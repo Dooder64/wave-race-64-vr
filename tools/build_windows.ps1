@@ -41,7 +41,8 @@ try {
         if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Required tool not found: $tool" }
     }
     foreach ($patch in @('patch_rt64.py', 'patch_n64recomp.py', 'patch_rsprecomp.py',
-                         'patch_librecomp.py', 'patch_water.py', 'patch_runtime_shutdown.py', 'patch_texture_packs.py')) {
+                         'patch_librecomp.py', 'patch_water.py', 'patch_runtime_shutdown.py', 'patch_texture_packs.py',
+                         'patch_rt64_vr.py')) {
         & python (Join-Path 'tools' $patch)
         if ($LASTEXITCODE -ne 0) { throw "Patch failed: $patch" }
     }

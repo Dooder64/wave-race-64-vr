@@ -221,7 +221,8 @@ set(WR64_SOURCES src/main.cpp src/rom.cpp src/crash_handler.cpp)
 if(WR64_WITH_RUNTIME AND WR64_WITH_RECOMPILED)
     list(APPEND WR64_SOURCES src/renderer.cpp src/callbacks.cpp src/overlays.cpp src/libultra_stubs.cpp
                              src/testdrive.cpp src/display.cpp src/dlrewrite.cpp src/water.cpp src/music.cpp src/textures.cpp
-                             src/haptics.cpp src/haptics_mixer.cpp src/haptics_output.cpp src/haptics_observation.cpp)
+                             src/haptics.cpp src/haptics_mixer.cpp src/haptics_output.cpp src/haptics_observation.cpp
+                             src/vr.cpp)
     if(WR64_WITH_FRONTEND)
         list(APPEND WR64_SOURCES src/frontend.cpp)
     endif()

@@ -47,6 +47,7 @@
 #include "wr64/water.h"
 #include "wr64/music.h"
 #include "wr64/haptics.h"
+#include "wr64/vr.h"
 
 // The recompiled audio microcode, produced by RSPRecomp from the cartridge.
 //
@@ -834,6 +835,7 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
         if (event->type == SDL_KEYDOWN && !event->key.repeat) {
             if (event->key.keysym.sym == SDLK_F9) wr64::water::toggle();
             if (event->key.keysym.sym == SDLK_F10) wr64::water::cycle_debug();
+            if (event->key.keysym.sym == SDLK_F7) wr64::vr::cycle_debug_offset();
         }
         return 0;
     }, nullptr);
