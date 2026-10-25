@@ -10,12 +10,17 @@
 // F7 steps that offset through left, right and none, far enough to be obvious
 // on a monitor. A working hook shows the 3D world sliding sideways while the
 // HUD stays put and the race carries on as before.
+//
+// Phase 3 draws both eyes side by side on the monitor, the layout a headset
+// uses. F8 switches it on and off; for now each half shows the same picture,
+// which proves the layout before each eye is rendered on its own.
 
 #include "wr64/vr.h"
 
 #include <cstdio>
 
 extern "C" void RT64_SetViewOffset(float x, float y, float z);
+extern "C" void RT64_SetStereo(int mode, float separation);
 
 namespace wr64::vr {
 
@@ -28,6 +33,12 @@ constexpr float kDebugOffset = 30.0f;
 
 int g_debug_step = 0;  // 0 none, 1 left, 2 right
 
+// About a human eye separation, 6-7 cm, if a unit is the 3 cm or so the
+// camera log suggests. Not used until each eye is rendered on its own.
+constexpr float kStereoSeparation = 2.0f;
+
+bool g_stereo = false;
+
 }  // namespace
 
 void cycle_debug_offset() {
@@ -36,6 +47,13 @@ void cycle_debug_offset() {
     RT64_SetViewOffset(x, 0.0f, 0.0f);
     static const char* const kNames[] = { "none", "left", "right" };
     std::fprintf(stderr, "[wr64-vr] view offset: %s (%.0f units)\n", kNames[g_debug_step], x);
+    std::fflush(stderr);
+}
+
+void cycle_stereo() {
+    g_stereo = !g_stereo;
+    RT64_SetStereo(g_stereo ? 1 : 0, kStereoSeparation);
+    std::fprintf(stderr, "[wr64-vr] stereo: %s\n", g_stereo ? "side by side" : "off");
     std::fflush(stderr);
 }
 

@@ -9,4 +9,7 @@ namespace wr64::vr {
 // F7: steps the view offset through left, right and back to none.
 void cycle_debug_offset();
 
+// F8: switches side-by-side stereo on and off.
+void cycle_stereo();
+
 }  // namespace wr64::vr

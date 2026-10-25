@@ -20,6 +20,13 @@ The previous frame's camera is moved by the same amount. RT64 keeps it to
 judge how far things moved between frames, and moving only the current one
 would read as the camera jumping by the whole offset.
 
+Side-by-side stereo is switched on the same way, through RT64_SetStereo. The
+VI renderer can then draw into a region of the window rather than the whole
+of it, and the present queue draws the frame into each half: the layout a
+headset's two eyes use, on a monitor. The VI's own fitting -- the content
+crop's included -- lays the picture out inside the half as it would inside
+a window that shape, so each eye keeps its proportions.
+
 Scripted and idempotent because it patches a submodule: a submodule update
 would otherwise revert it silently.
 
@@ -31,7 +38,11 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-PROJ_PROCESSOR = REPO / "lib" / "RT64" / "src" / "render" / "rt64_projection_processor.cpp"
+RT64 = REPO / "lib" / "RT64" / "src"
+PROJ_PROCESSOR = RT64 / "render" / "rt64_projection_processor.cpp"
+VI_HEADER = RT64 / "render" / "rt64_vi_renderer.h"
+VI_RENDERER = RT64 / "render" / "rt64_vi_renderer.cpp"
+PRESENT_QUEUE = RT64 / "hle" / "rt64_present_queue.cpp"
 
 # --- the setter -------------------------------------------------------------
 
@@ -91,6 +102,133 @@ OFFSET_REPLACEMENT = """            // wr64: move the camera by the port's offse
             viewProjMatrix = hlslpp::mul(viewMatrix, projMatrix);
 """
 
+# --- the stereo switch ------------------------------------------------------
+
+STEREO_ANCHOR = """        wr64ViewOffsetZ.store(z, std::memory_order_relaxed);
+    }
+"""
+
+STEREO_REPLACEMENT = """        wr64ViewOffsetZ.store(z, std::memory_order_relaxed);
+    }
+
+    // wr64: side-by-side stereo. Mode 0 is off; otherwise each eye is drawn
+    // into its half of the window, and the separation is the distance between
+    // the eyes in game units. Not static: the present queue reads them too.
+    std::atomic<int> wr64StereoMode{ 0 };
+    std::atomic<float> wr64StereoSeparation{ 0.0f };
+
+    extern "C" void RT64_SetStereo(int mode, float separation) {
+        wr64StereoSeparation.store(separation, std::memory_order_relaxed);
+        wr64StereoMode.store(mode, std::memory_order_relaxed);
+    }
+"""
+
+# --- the VI renderer draws into a region ------------------------------------
+
+VI_PARAMS_ANCHOR = """            bool removeBlackBorders = false;
+        };
+"""
+
+VI_PARAMS_REPLACEMENT = """            bool removeBlackBorders = false;
+
+            // wr64: the part of the window to draw into, from regionX and
+            // regionWidth pixels wide, for side-by-side stereo. A width of
+            // zero (the default) is the whole window.
+            float regionX = 0.0f;
+            float regionWidth = 0.0f;
+        };
+"""
+
+VI_DECL_ANCHOR = """        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
+"""
+
+VI_DECL_REPLACEMENT = """        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor, float regionX = 0.0f, float regionWidth = 0.0f);
+"""
+
+VI_CALL_ANCHOR = """        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
+"""
+
+VI_CALL_REPLACEMENT = """        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor, p.regionX, p.regionWidth);
+"""
+
+VI_DEF_ANCHOR = """    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
+"""
+
+VI_DEF_REPLACEMENT = """    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor, float regionX, float regionWidth) {
+"""
+
+VI_SIZE_ANCHOR = """        const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
+"""
+
+VI_SIZE_REPLACEMENT = """        // wr64: a region is laid out as a window of its own width, then moved
+        // into place at the end.
+        const float layoutWidth = (regionWidth > 0.0f) ? regionWidth : float(swapChain->getWidth());
+        const hlslpp::float2 windowSize = { layoutWidth, float(swapChain->getHeight()) };
+"""
+
+VI_REGION_ANCHOR = """            scissor.bottom = std::min(scissor.bottom, int32_t(windowSize.y));
+        }
+    }
+"""
+
+VI_REGION_REPLACEMENT = """            scissor.bottom = std::min(scissor.bottom, int32_t(windowSize.y));
+        }
+
+        // wr64: move a region's layout to where the region starts, and keep the
+        // scissor inside it so one eye never draws over the other.
+        if (regionWidth > 0.0f) {
+            const int32_t regionLeft = int32_t(regionX);
+            const int32_t regionRight = int32_t(regionX + regionWidth);
+            viewport.x += regionX;
+            scissor.left = std::min(std::max(scissor.left + regionLeft, regionLeft), regionRight);
+            scissor.right = std::min(std::max(scissor.right + regionLeft, regionLeft), regionRight);
+        }
+    }
+"""
+
+# --- the present queue draws both halves ------------------------------------
+
+PRESENT_EXTERN_ANCHOR = """#include "rt64_workload_queue.h"
+
+namespace RT64 {
+"""
+
+PRESENT_EXTERN_REPLACEMENT = """#include "rt64_workload_queue.h"
+
+#include <atomic>
+
+namespace RT64 {
+    // wr64: see rt64_projection_processor.cpp.
+    extern std::atomic<int> wr64StereoMode;
+
+"""
+
+PRESENT_DRAW_ANCHOR = """                if (renderParams.texture != nullptr) {
+                    commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
+                    viRenderer->render(renderParams);
+                }
+"""
+
+PRESENT_DRAW_REPLACEMENT = """                if (renderParams.texture != nullptr) {
+                    commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
+
+                    // wr64: side-by-side stereo draws into each half of the
+                    // window. Both halves show the same picture until each eye
+                    // is rendered on its own.
+                    if (wr64StereoMode.load(std::memory_order_relaxed) != 0) {
+                        const float halfWidth = float(ext.swapChain->getWidth()) / 2.0f;
+                        renderParams.regionWidth = halfWidth;
+                        renderParams.regionX = 0.0f;
+                        viRenderer->render(renderParams);
+                        renderParams.regionX = halfWidth;
+                        viRenderer->render(renderParams);
+                    }
+                    else {
+                        viRenderer->render(renderParams);
+                    }
+                }
+"""
+
 
 def patch(target, anchor, replacement, name):
     text = target.read_text()
@@ -105,11 +243,21 @@ def patch(target, anchor, replacement, name):
 
 
 def main():
-    if not PROJ_PROCESSOR.exists():
-        sys.exit(f"missing {PROJ_PROCESSOR}. Run: git submodule update --init --recursive")
+    for target in (PROJ_PROCESSOR, VI_HEADER, VI_RENDERER, PRESENT_QUEUE):
+        if not target.exists():
+            sys.exit(f"missing {target}. Run: git submodule update --init --recursive")
 
     patch(PROJ_PROCESSOR, SETTER_ANCHOR, SETTER_REPLACEMENT, "view offset (setter)")
     patch(PROJ_PROCESSOR, OFFSET_ANCHOR, OFFSET_REPLACEMENT, "view offset (camera)")
+    patch(PROJ_PROCESSOR, STEREO_ANCHOR, STEREO_REPLACEMENT, "stereo (switch)")
+    patch(VI_HEADER, VI_PARAMS_ANCHOR, VI_PARAMS_REPLACEMENT, "stereo (region params)")
+    patch(VI_HEADER, VI_DECL_ANCHOR, VI_DECL_REPLACEMENT, "stereo (region declaration)")
+    patch(VI_RENDERER, VI_CALL_ANCHOR, VI_CALL_REPLACEMENT, "stereo (region call)")
+    patch(VI_RENDERER, VI_DEF_ANCHOR, VI_DEF_REPLACEMENT, "stereo (region definition)")
+    patch(VI_RENDERER, VI_SIZE_ANCHOR, VI_SIZE_REPLACEMENT, "stereo (region size)")
+    patch(VI_RENDERER, VI_REGION_ANCHOR, VI_REGION_REPLACEMENT, "stereo (region placement)")
+    patch(PRESENT_QUEUE, PRESENT_EXTERN_ANCHOR, PRESENT_EXTERN_REPLACEMENT, "stereo (present switch)")
+    patch(PRESENT_QUEUE, PRESENT_DRAW_ANCHOR, PRESENT_DRAW_REPLACEMENT, "stereo (present halves)")
     print("Rebuild to pick it up.")
 
 
