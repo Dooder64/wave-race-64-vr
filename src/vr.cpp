@@ -12,8 +12,9 @@
 // HUD stays put and the race carries on as before.
 //
 // Phase 3 draws both eyes side by side on the monitor, the layout a headset
-// uses. F8 switches it on and off; for now each half shows the same picture,
-// which proves the layout before each eye is rendered on its own.
+// uses: RT64 renders each displayed frame twice, the camera moved half the
+// separation left for the left half and right for the right. F8 switches it
+// on and off.
 
 #include "wr64/vr.h"
 
@@ -34,7 +35,7 @@ constexpr float kDebugOffset = 30.0f;
 int g_debug_step = 0;  // 0 none, 1 left, 2 right
 
 // About a human eye separation, 6-7 cm, if a unit is the 3 cm or so the
-// camera log suggests. Not used until each eye is rendered on its own.
+// camera log suggests.
 constexpr float kStereoSeparation = 2.0f;
 
 bool g_stereo = false;

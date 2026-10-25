@@ -27,6 +27,17 @@ headset's two eyes use, on a monitor. The VI's own fitting -- the content
 crop's included -- lays the picture out inside the half as it would inside
 a window that shape, so each eye keeps its proportions.
 
+Each eye is its own rendering. RT64 already draws one game frame several
+times when it interpolates -- once per displayed frame, each into its own
+spare target -- so the right eye is one more of those drawings: the same
+frame and the same interpolation weights, into a target of its own, with the
+camera moved right by half the separation where the left eye's was moved
+left. It is drawn before the frame is reported ready, so the present queue
+never pairs eyes from different moments, and whether a frame is stereo is
+decided once and kept with the frame's counters, so the two queues cannot
+disagree about it. A frame RT64 has no target to redraw shows the left eye
+in both halves.
+
 Scripted and idempotent because it patches a submodule: a submodule update
 would otherwise revert it silently.
 
@@ -43,6 +54,9 @@ PROJ_PROCESSOR = RT64 / "render" / "rt64_projection_processor.cpp"
 VI_HEADER = RT64 / "render" / "rt64_vi_renderer.h"
 VI_RENDERER = RT64 / "render" / "rt64_vi_renderer.cpp"
 PRESENT_QUEUE = RT64 / "hle" / "rt64_present_queue.cpp"
+PRESENT_HEADER = RT64 / "hle" / "rt64_present_queue.h"
+WORKLOAD_QUEUE = RT64 / "hle" / "rt64_workload_queue.cpp"
+SHARED_RESOURCES = RT64 / "hle" / "rt64_shared_queue_resources.h"
 
 # --- the setter -------------------------------------------------------------
 
@@ -85,7 +99,7 @@ OFFSET_REPLACEMENT = """            // wr64: move the camera by the port's offse
             // everything it sees by -d, a translation multiplied on after it.
             // Both frames' cameras move, or the offset would read as motion.
             if (proj.type == Projection::Type::Perspective) {
-                const float offsetX = wr64ViewOffsetX.load(std::memory_order_relaxed);
+                const float offsetX = wr64ViewOffsetX.load(std::memory_order_relaxed) + wr64EyeOffsetX;
                 const float offsetY = wr64ViewOffsetY.load(std::memory_order_relaxed);
                 const float offsetZ = wr64ViewOffsetZ.load(std::memory_order_relaxed);
                 if ((offsetX != 0.0f) || (offsetY != 0.0f) || (offsetZ != 0.0f)) {
@@ -120,6 +134,30 @@ STEREO_REPLACEMENT = """        wr64ViewOffsetZ.store(z, std::memory_order_relax
     extern "C" void RT64_SetStereo(int mode, float separation) {
         wr64StereoSeparation.store(separation, std::memory_order_relaxed);
         wr64StereoMode.store(mode, std::memory_order_relaxed);
+    }
+"""
+
+# --- the eye's own offset ---------------------------------------------------
+
+EYE_ANCHOR = """        wr64StereoMode.store(mode, std::memory_order_relaxed);
+    }
+"""
+
+EYE_REPLACEMENT = """        wr64StereoMode.store(mode, std::memory_order_relaxed);
+    }
+
+    // wr64: the eye being drawn, as a sideways offset on top of the port's.
+    // Set by the workload queue around each eye's rendering and read here,
+    // both on the render thread, so it needs no atomic.
+    float wr64EyeOffsetX = 0.0f;
+
+    // Whether anything moves the camera, which needs the projections
+    // processed even in a frame RT64 would otherwise leave alone.
+    bool wr64CameraOffsetActive() {
+        return (wr64EyeOffsetX != 0.0f) ||
+            (wr64ViewOffsetX.load(std::memory_order_relaxed) != 0.0f) ||
+            (wr64ViewOffsetY.load(std::memory_order_relaxed) != 0.0f) ||
+            (wr64ViewOffsetZ.load(std::memory_order_relaxed) != 0.0f);
     }
 """
 
@@ -186,6 +224,115 @@ VI_REGION_REPLACEMENT = """            scissor.bottom = std::min(scissor.bottom,
     }
 """
 
+# --- the right eye's targets and the frame's stereo flag ---------------------
+
+COUNTERS_ANCHOR = """        uint32_t count = 0;
+        bool skipped = false;
+    };
+"""
+
+COUNTERS_REPLACEMENT = """        uint32_t count = 0;
+        bool skipped = false;
+
+        // wr64: whether this frame's eyes were rendered apart, decided once by
+        // the workload queue so the present queue pairs them the same way.
+        bool wr64Stereo = false;
+    };
+"""
+
+TARGETS_ANCHOR = """        std::vector<std::unique_ptr<RenderTarget>> interpolatedColorTargets;
+"""
+
+TARGETS_REPLACEMENT = """        std::vector<std::unique_ptr<RenderTarget>> interpolatedColorTargets;
+
+        // wr64: the right eye of each displayed frame, in the order the frames
+        // are rendered and presented. The left eye is wherever RT64 put it.
+        std::vector<std::unique_ptr<RenderTarget>> wr64StereoTargets;
+"""
+
+# --- the workload queue renders the right eye -------------------------------
+
+WORKLOAD_EXTERN_ANCHOR = """#define ENABLE_HIGH_RESOLUTION_RENDERER 1
+
+namespace RT64 {
+"""
+
+WORKLOAD_EXTERN_REPLACEMENT = """#define ENABLE_HIGH_RESOLUTION_RENDERER 1
+
+#include <atomic>
+
+namespace RT64 {
+    // wr64: see rt64_projection_processor.cpp.
+    extern std::atomic<int> wr64StereoMode;
+    extern std::atomic<float> wr64StereoSeparation;
+    extern float wr64EyeOffsetX;
+    bool wr64CameraOffsetActive();
+
+    // wr64: the right eye's targets carry modifier keys of their own, clear of
+    // the interpolated targets' (one up from 1), so RT64 never mistakes one
+    // target's framebuffer for another's.
+    constexpr uint32_t wr64StereoModifierBase = 0x10000;
+
+"""
+
+WORKLOAD_PROJ_ANCHOR = """        const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
+"""
+
+WORKLOAD_PROJ_REPLACEMENT = """        const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this) || wr64CameraOffsetActive();
+"""
+
+WORKLOAD_CLEAR_ANCHOR = """            ext.sharedResources->interpolatedColorTargets.clear();
+"""
+
+WORKLOAD_CLEAR_REPLACEMENT = """            ext.sharedResources->interpolatedColorTargets.clear();
+            ext.sharedResources->wr64StereoTargets.clear();
+"""
+
+WORKLOAD_DECIDE_ANCHOR = """                curFrameCounters.count = displayFrames;
+"""
+
+WORKLOAD_DECIDE_REPLACEMENT = """                curFrameCounters.count = displayFrames;
+
+                // wr64: decide once whether this frame's eyes are rendered apart.
+                // It takes a target RT64 can redraw the frame into; without one
+                // the frame is presented as it is, in both halves.
+                const float wr64Separation = wr64StereoSeparation.load(std::memory_order_relaxed);
+                const bool wr64Stereo = (wr64StereoMode.load(std::memory_order_relaxed) != 0) && !interpolationTargetKey.isEmpty();
+                curFrameCounters.wr64Stereo = wr64Stereo;
+                if (wr64Stereo) {
+                    auto &stereoTargets = ext.sharedResources->wr64StereoTargets;
+                    const bool stereoHDR = ext.sharedResources->renderTargetManager.usesHDR;
+                    while (stereoTargets.size() < displayFrames) {
+                        stereoTargets.emplace_back(std::make_unique<RenderTarget>(interpolationTargetKey.address, Framebuffer::Type::Color, RenderMultisampling(), stereoHDR));
+                    }
+                }
+"""
+
+WORKLOAD_RENDER_ANCHOR = """                    threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
+"""
+
+WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: in stereo this is the left eye, moved left by half the
+                    // separation.
+                    wr64EyeOffsetX = wr64Stereo ? (-0.5f * wr64Separation) : 0.0f;
+                    threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
+
+                    // wr64: and the right eye: the same frame at the same weights,
+                    // moved right, into its own target. It is indexed by the frames
+                    // rendered so far, which is the order the present queue shows
+                    // them in once skipped frames are left out, and it is drawn
+                    // before the frame is reported ready below.
+                    if (wr64Stereo && (framesRendered < ext.sharedResources->wr64StereoTargets.size())) {
+                        RenderTarget *rightTarget = ext.sharedResources->wr64StereoTargets[framesRendered].get();
+                        wr64EyeOffsetX = 0.5f * wr64Separation;
+                        threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                            interpolationTargetKey, interpolationTargetFbPairIndex, rightTarget, wr64StereoModifierBase + framesRendered, velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
+                    }
+
+                    wr64EyeOffsetX = 0.0f;
+"""
+
 # --- the present queue draws both halves ------------------------------------
 
 PRESENT_EXTERN_ANCHOR = """#include "rt64_workload_queue.h"
@@ -212,21 +359,63 @@ PRESENT_DRAW_ANCHOR = """                if (renderParams.texture != nullptr) {
 PRESENT_DRAW_REPLACEMENT = """                if (renderParams.texture != nullptr) {
                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
 
-                    // wr64: side-by-side stereo draws into each half of the
-                    // window. Both halves show the same picture until each eye
-                    // is rendered on its own.
+                    // wr64: side-by-side stereo draws the left eye into the left
+                    // half of the window and the right eye into the right. The
+                    // right eye is this frame's own target when the workload
+                    // queue rendered one; otherwise the left eye fills both.
                     if (wr64StereoMode.load(std::memory_order_relaxed) != 0) {
                         const float halfWidth = float(ext.swapChain->getWidth()) / 2.0f;
                         renderParams.regionWidth = halfWidth;
                         renderParams.regionX = 0.0f;
                         viRenderer->render(renderParams);
-                        renderParams.regionX = halfWidth;
-                        viRenderer->render(renderParams);
+
+                        VIRenderer::RenderParams rightParams = renderParams;
+                        rightParams.regionX = halfWidth;
+                        auto &stereoTargets = ext.sharedResources->wr64StereoTargets;
+                        RenderTarget *rightTarget = (frameCounters.wr64Stereo && (uint32_t(i) < stereoTargets.size())) ? stereoTargets[i].get() : nullptr;
+                        if ((rightTarget != nullptr) && (rightTarget->width > 0)) {
+                            rightParams.textureFormat = rightTarget->format;
+                            rightParams.resolutionScale = rightTarget->resolutionScale;
+                            rightParams.downsamplingScale = 1;
+                            if (rightTarget->downsampleMultiplier > 1) {
+                                rightTarget->downsampleTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
+                                rightParams.texture = rightTarget->downsampledTexture.get();
+                                rightParams.textureWidth = rightTarget->width / rightTarget->downsampleMultiplier;
+                                rightParams.textureHeight = rightTarget->height / rightTarget->downsampleMultiplier;
+                                rightParams.downsamplingScale = rightTarget->downsampleMultiplier;
+                            }
+                            else {
+                                rightTarget->resolveTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
+                                rightParams.texture = rightTarget->getResolvedTexture();
+                                rightParams.textureWidth = rightTarget->width;
+                                rightParams.textureHeight = rightTarget->height;
+                            }
+
+                            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(rightParams.texture, RenderTextureLayout::SHADER_READ));
+                        }
+
+                        // Its own VI renderer: each holds the texture it samples in
+                        // a descriptor set, and both draws are in one command list.
+                        wr64RightViRenderer->render(rightParams);
                     }
                     else {
                         viRenderer->render(renderParams);
                     }
                 }
+"""
+
+PRESENT_MEMBER_ANCHOR = """        std::unique_ptr<VIRenderer> viRenderer;
+"""
+
+PRESENT_MEMBER_REPLACEMENT = """        std::unique_ptr<VIRenderer> viRenderer;
+        std::unique_ptr<VIRenderer> wr64RightViRenderer; // wr64: the right eye in side-by-side stereo.
+"""
+
+PRESENT_SETUP_ANCHOR = """        viRenderer = std::make_unique<VIRenderer>();
+"""
+
+PRESENT_SETUP_REPLACEMENT = """        viRenderer = std::make_unique<VIRenderer>();
+        wr64RightViRenderer = std::make_unique<VIRenderer>();
 """
 
 
@@ -243,13 +432,24 @@ def patch(target, anchor, replacement, name):
 
 
 def main():
-    for target in (PROJ_PROCESSOR, VI_HEADER, VI_RENDERER, PRESENT_QUEUE):
+    for target in (PROJ_PROCESSOR, VI_HEADER, VI_RENDERER, PRESENT_QUEUE, PRESENT_HEADER,
+                   WORKLOAD_QUEUE, SHARED_RESOURCES):
         if not target.exists():
             sys.exit(f"missing {target}. Run: git submodule update --init --recursive")
 
     patch(PROJ_PROCESSOR, SETTER_ANCHOR, SETTER_REPLACEMENT, "view offset (setter)")
     patch(PROJ_PROCESSOR, OFFSET_ANCHOR, OFFSET_REPLACEMENT, "view offset (camera)")
     patch(PROJ_PROCESSOR, STEREO_ANCHOR, STEREO_REPLACEMENT, "stereo (switch)")
+    patch(PROJ_PROCESSOR, EYE_ANCHOR, EYE_REPLACEMENT, "stereo (eye offset)")
+    patch(SHARED_RESOURCES, COUNTERS_ANCHOR, COUNTERS_REPLACEMENT, "stereo (frame flag)")
+    patch(SHARED_RESOURCES, TARGETS_ANCHOR, TARGETS_REPLACEMENT, "stereo (right eye targets)")
+    patch(WORKLOAD_QUEUE, WORKLOAD_EXTERN_ANCHOR, WORKLOAD_EXTERN_REPLACEMENT, "stereo (workload switch)")
+    patch(WORKLOAD_QUEUE, WORKLOAD_PROJ_ANCHOR, WORKLOAD_PROJ_REPLACEMENT, "stereo (projections processed)")
+    patch(WORKLOAD_QUEUE, WORKLOAD_CLEAR_ANCHOR, WORKLOAD_CLEAR_REPLACEMENT, "stereo (targets cleared)")
+    patch(WORKLOAD_QUEUE, WORKLOAD_DECIDE_ANCHOR, WORKLOAD_DECIDE_REPLACEMENT, "stereo (frame decided)")
+    patch(WORKLOAD_QUEUE, WORKLOAD_RENDER_ANCHOR, WORKLOAD_RENDER_REPLACEMENT, "stereo (right eye rendered)")
+    patch(PRESENT_HEADER, PRESENT_MEMBER_ANCHOR, PRESENT_MEMBER_REPLACEMENT, "stereo (right VI renderer)")
+    patch(PRESENT_QUEUE, PRESENT_SETUP_ANCHOR, PRESENT_SETUP_REPLACEMENT, "stereo (right VI renderer setup)")
     patch(VI_HEADER, VI_PARAMS_ANCHOR, VI_PARAMS_REPLACEMENT, "stereo (region params)")
     patch(VI_HEADER, VI_DECL_ANCHOR, VI_DECL_REPLACEMENT, "stereo (region declaration)")
     patch(VI_RENDERER, VI_CALL_ANCHOR, VI_CALL_REPLACEMENT, "stereo (region call)")
