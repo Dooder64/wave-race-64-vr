@@ -85,6 +85,9 @@
 // rather than moves. WR64_3D_TRACE_FRAMES sets how many frames (two by
 // default) and WR64_3D_TRACE_STATE takes a game state in hexadecimal for the
 // screens that are not races.
+//
+// WR64_CAMERA_LOG=1 prints the race camera's position, direction and lens
+// about once a second; see log_camera.
 
 #include "wr64/dlrewrite.h"
 #include "wr64/display.h"
@@ -92,6 +95,7 @@
 #include "wr64/water.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -338,6 +342,13 @@ struct Walker {
     Mat4 modelview[16];
     int modelview_depth = 0;
     uint32_t texture = 0;
+
+    // The frame's first camera: the affine matrix the game multiplies onto a
+    // perspective projection, and that projection as it stood. Read by the
+    // camera log (WR64_CAMERA_LOG) and nothing else.
+    bool have_camera = false;
+    Mat4 camera = Mat4::identity();
+    Mat4 camera_lens = Mat4::identity();
 
     // Section state: A1's centred perspective sections, and the 2D class in
     // force.
@@ -1076,6 +1087,11 @@ struct Walker {
         return m.m[0][3] == 0.0f && m.m[1][3] == 0.0f && m.m[2][3] == 0.0f && m.m[3][3] == 1.0f;
     }
 
+    static bool identity(const Mat4& m) {
+        const Mat4 i = Mat4::identity();
+        return std::memcmp(&m, &i, sizeof(Mat4)) == 0;
+    }
+
     void on_matrix(uint32_t w0, uint32_t w1) {
         const uint32_t params = (w0 >> 16) & 0xFF;
         const Mat4 loaded = read_matrix(physical(w1));
@@ -1098,6 +1114,11 @@ struct Walker {
                 projection = loaded * projection;
                 if (!affine(loaded)) {
                     projection_only = loaded * projection_only;
+                }
+                else if (!have_camera && perspective(projection_only) && !identity(loaded)) {
+                    have_camera = true;
+                    camera = loaded;
+                    camera_lens = projection_only;
                 }
             }
             projection_is_perspective = perspective(projection_only);
@@ -1322,6 +1343,48 @@ void trace_3d(uint8_t* rdram, uint32_t list_vaddr, uint32_t state) {
         std::fprintf(stderr, "[wr64] 3D trace: %d frames written to %s\n", written, path);
         std::fflush(stderr);
     }
+}
+
+// ---- the camera log ----------------------------------------------------
+//
+// Diagnosis only: WR64_CAMERA_LOG=1 prints, about once a second of racing,
+// where the game's camera is and the shape of its lens. The VR work needs
+// both -- the field of view says how much more a headset sees than the game
+// draws, and the camera's distance from the craft says how big a game unit
+// is.
+//
+// The camera is the affine matrix multiplied onto the perspective projection
+// (Walker::on_matrix). Row vectors, so a world point p is seen at p * camera:
+// the upper 3x3 is the rotation R and row 3 the translation t, and the eye
+// sits where p * R + t = 0, which is -t * R^T while R is a pure rotation --
+// `scale` is the length of R's first row, and anything far from 1 says it is
+// not. The view looks down its own -Z, which in the world is minus R's third
+// column.
+//
+// The lens is a guPerspective matrix, which libultra multiplies through by a
+// scale the game chooses. guPerspective sets [2][3] to -scale, so dividing by
+// -[2][3] takes it back out before the angles and distances are read.
+void log_camera(uint32_t state, const Mat4& v, const Mat4& p) {
+    constexpr float kDegrees = 57.2957795f;
+    const float px = -(v.m[3][0] * v.m[0][0] + v.m[3][1] * v.m[0][1] + v.m[3][2] * v.m[0][2]);
+    const float py = -(v.m[3][0] * v.m[1][0] + v.m[3][1] * v.m[1][1] + v.m[3][2] * v.m[1][2]);
+    const float pz = -(v.m[3][0] * v.m[2][0] + v.m[3][1] * v.m[2][1] + v.m[3][2] * v.m[2][2]);
+    const float scale = std::sqrt(v.m[0][0] * v.m[0][0] + v.m[0][1] * v.m[0][1] + v.m[0][2] * v.m[0][2]);
+
+    const float s = -p.m[2][3];
+    if (s == 0.0f || p.m[0][0] == 0.0f) return;
+    const float fov_y = 2.0f * std::atan(s / p.m[1][1]) * kDegrees;
+    const float aspect = p.m[1][1] / p.m[0][0];
+    const float a = p.m[2][2] / s;
+    const float b = p.m[3][2] / s;
+    const float near_z = (a != 1.0f) ? b / (a - 1.0f) : 0.0f;
+    const float far_z = (a != -1.0f) ? b / (a + 1.0f) : 0.0f;
+
+    std::fprintf(stderr, "[wr64-cam] state 0x%02X pos=(%.1f, %.1f, %.1f) forward=(%.3f, %.3f, %.3f)"
+                         " scale=%.3f fov_y=%.1f aspect=%.3f near=%.1f far=%.1f\n",
+                 state, px, py, pz, -v.m[0][2], -v.m[1][2], -v.m[2][2],
+                 scale, fov_y, aspect, near_z, far_z);
+    std::fflush(stderr);
 }
 
 }  // namespace
@@ -1611,6 +1674,13 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
         std::fprintf(stderr, "[wr64] no sky section found in a race frame (state 0x%02X);"
                              " the sky stays at the game's rate\n", state);
         std::fflush(stderr);
+    }
+
+    // One race list in thirty is about once a second at the game's 30 Hz.
+    static const bool camera_log = std::getenv("WR64_CAMERA_LOG") != nullptr;
+    static uint32_t camera_lists = 0;
+    if (camera_log && w.have_camera && racing(state) && camera_lists++ % 30 == 0) {
+        log_camera(state, w.camera, w.camera_lens);
     }
 
     static uint32_t lists = 0;
