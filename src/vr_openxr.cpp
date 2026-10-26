@@ -21,9 +21,13 @@
 //
 // Each eye is drawn through the headset's own lens for that eye, passed to
 // RT64 every frame along with the size to render at, so the two images line
-// up as the headset expects. For now the game's camera is the head: the
-// projection layer is placed in VIEW space, so the picture stays fixed to the
-// face. Head tracking comes next.
+// up as the headset expects. The head is tracked on top of the game's camera:
+// each frame both eyes' poses in the seated space become a transform RT64
+// applies after the game's camera, metres turned into game units by the world
+// scale (WR64_VR_SCALE), and published under a tag that comes back with the
+// finished frame, so the headset is told the pose each frame was rendered
+// with. The projection layer is placed in the seated space, and the
+// compositor corrects for the head's movement since. F6 recentres.
 //
 // tools/xr_test is the same path stripped of the game, for when something
 // here does not work and the question is whether it is the headset.
@@ -65,22 +69,42 @@ struct RT64_XrFrame {
 };
 
 typedef int (*RT64_XrBeginFrame)(void* user, RT64_XrFrame* frame);
-typedef void (*RT64_XrEndFrame)(void* user, int rendered);
+typedef void (*RT64_XrEndFrame)(void* user, int rendered, uint64_t headTag);
 }  // namespace RT64
 
 extern "C" void RT64_SetXrOutput(RT64::RT64_XrBeginFrame begin, RT64::RT64_XrEndFrame end, void* user);
 extern "C" void RT64_SetXrRefreshRate(uint32_t rate);
 extern "C" void RT64_SetXrRenderHeight(uint32_t height);
 extern "C" void RT64_SetXrLens(int active, const float* angles);
+extern "C" void RT64_SetXrHead(int active, const float* eyes, uint64_t tag);
 extern "C" void RT64_SetStereo(int mode, float separation);
 
 namespace wr64::vr {
 
 namespace {
 
-// Two units is about a human eye separation by the camera log's measure. The
-// headset reports the real one; using it is part of head tracking.
-constexpr float kVrStereoSeparation = 2.0f;
+// Game units to a metre: the camera log puts the chase camera about 55 units
+// above the water, which is around 1.7 m if a unit is 3 cm. The larger the
+// scale, the smaller the world feels. WR64_VR_SCALE overrides it.
+constexpr float kDefaultWorldScale = 33.3f;
+
+float world_scale() {
+    static const float scale = [] {
+        const char* value = std::getenv("WR64_VR_SCALE");
+        const float parsed = value != nullptr ? float(std::atof(value)) : 0.0f;
+        return parsed > 0.0f ? parsed : kDefaultWorldScale;
+    }();
+    return scale;
+}
+
+// The poses recently published to RT64, by tag, so each frame can be handed
+// to the headset with the pose it was rendered with. RT64 renders a few frames
+// ahead of the one being shown; sixteen is far more than it ever holds.
+struct TaggedViews {
+    uint64_t tag = 0;
+    XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+};
+constexpr size_t kPoseHistory = 16;
 
 struct Eye {
     XrSwapchain swapchain = XR_NULL_HANDLE;
@@ -110,6 +134,15 @@ XrView g_views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
 bool g_images_acquired = false;
 XrDuration g_reported_period = 0;
 bool g_lens_reported = false;
+
+// Head tracking, under g_mutex: the poses published so far, and the seated
+// position and heading "straight ahead" is measured from. F6 asks for the
+// head's current ones to become it.
+TaggedViews g_pose_history[kPoseHistory];
+uint64_t g_next_tag = 1;
+std::atomic<bool> g_recenter_requested{ false };
+XrVector3f g_centre_position{ 0.0f, 0.0f, 0.0f };
+float g_centre_yaw = 0.0f;
 uint64_t g_frames = 0;
 uint64_t g_drawn = 0;
 std::chrono::steady_clock::time_point g_last_report;
@@ -174,6 +207,7 @@ bool poll_events() {
                 RT64_SetXrRefreshRate(0);
                 RT64_SetXrRenderHeight(0);
                 RT64_SetXrLens(0, nullptr);
+                RT64_SetXrHead(0, nullptr, 0);
                 g_reported_period = 0;
                 g_lens_reported = false;
             }
@@ -188,6 +222,69 @@ bool poll_events() {
         event = { XR_TYPE_EVENT_DATA_BUFFER };
     }
     return alive;
+}
+
+// ---- head tracking ----------------------------------------------------------
+//
+// OpenXR's spaces and the game's camera space agree: right-handed, +Y up,
+// looking down -Z. So an eye's pose, measured from the seated centre, can be
+// put straight after the game's camera -- RT64 does it after turning the view
+// to the middle of the game's frame -- once its metres are game units.
+
+// The heading of an orientation: its turn about the vertical, left positive.
+float yaw_of(const XrQuaternionf& q) {
+    const float forward_x = -2.0f * (q.x * q.z + q.w * q.y);
+    const float forward_z = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+    return std::atan2(-forward_x, -forward_z);
+}
+
+XrQuaternionf multiply(const XrQuaternionf& a, const XrQuaternionf& b) {
+    return {
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    };
+}
+
+// The transform RT64 multiplies on after the game's camera for one eye: from
+// the seated space into the eye's own, in game units, as row vectors. The
+// eye's pose is first taken relative to the centre -- its position less the
+// centre's, both turned back by the centre's heading -- so straight ahead is
+// wherever the head faced when it was last recentred. A point p of the seated
+// space then lands at (p - position) * R, R being the orientation's rotation
+// written for column vectors, which as row vectors is its inverse.
+void eye_transform(const XrPosef& pose, float out[16]) {
+    const float scale = world_scale();
+    const float c = std::cos(-g_centre_yaw), s = std::sin(-g_centre_yaw);
+    const float dx = pose.position.x - g_centre_position.x;
+    const float dy = pose.position.y - g_centre_position.y;
+    const float dz = pose.position.z - g_centre_position.z;
+    const float px = (c * dx + s * dz) * scale;
+    const float py = dy * scale;
+    const float pz = (-s * dx + c * dz) * scale;
+
+    const XrQuaternionf unturn{ 0.0f, std::sin(-g_centre_yaw * 0.5f), 0.0f, std::cos(-g_centre_yaw * 0.5f) };
+    const XrQuaternionf q = multiply(unturn, pose.orientation);
+    const float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+    const float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
+    const float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
+    const float r[3][3] = {
+        { 1.0f - 2.0f * (yy + zz), 2.0f * (xy - wz), 2.0f * (xz + wy) },
+        { 2.0f * (xy + wz), 1.0f - 2.0f * (xx + zz), 2.0f * (yz - wx) },
+        { 2.0f * (xz - wy), 2.0f * (yz + wx), 1.0f - 2.0f * (xx + yy) },
+    };
+
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            out[row * 4 + column] = r[row][column];
+        }
+        out[row * 4 + 3] = 0.0f;
+    }
+    for (int column = 0; column < 3; ++column) {
+        out[12 + column] = -(px * r[0][column] + py * r[1][column] + pz * r[2][column]);
+    }
+    out[15] = 1.0f;
 }
 
 // RT64's present thread, before each displayed frame. The lock taken here is
@@ -215,22 +312,48 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
         std::fflush(stderr);
     }
 
-    // The eyes as they sit in the head: VIEW space, since for now the picture
-    // is fixed to the face.
+    // The eyes in the seated space, where the head is now -- predicted for
+    // when this frame is shown, which is as close to the frames RT64 is about
+    // to render as anything known.
     XrViewLocateInfo locate{ XR_TYPE_VIEW_LOCATE_INFO };
     locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     locate.displayTime = g_frame_state.predictedDisplayTime;
-    locate.space = g_head;
+    locate.space = g_local;
     XrViewState view_state{ XR_TYPE_VIEW_STATE };
     uint32_t located = 0;
     g_views[0] = { XR_TYPE_VIEW };
     g_views[1] = { XR_TYPE_VIEW };
     xrLocateViews(g_session, &locate, &view_state, 2, &located, g_views);
+    const bool tracked = located == 2 && (view_state.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) &&
+                         (view_state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
 
     g_images_acquired = false;
-    if (!g_frame_state.shouldRender || located != 2) {
+    if (!g_frame_state.shouldRender || !tracked) {
         return 0;
     }
+
+    // F6: straight ahead becomes wherever the head is facing, from wherever it
+    // is -- a heading only, so up stays up.
+    if (g_recenter_requested.exchange(false)) {
+        XrSpaceLocation where{ XR_TYPE_SPACE_LOCATION };
+        xrLocateSpace(g_head, g_local, g_frame_state.predictedDisplayTime, &where);
+        g_centre_position = where.pose.position;
+        g_centre_yaw = yaw_of(where.pose.orientation);
+        std::fprintf(stderr, "[wr64-vr] recentred: facing %.1f degrees, at (%+.3f, %+.3f, %+.3f) m\n",
+                     g_centre_yaw * 57.2957795f, g_centre_position.x, g_centre_position.y, g_centre_position.z);
+        std::fflush(stderr);
+    }
+
+    // Publish the head to RT64 under a new tag, and remember the poses by it.
+    float heads[2][16];
+    eye_transform(g_views[0].pose, heads[0]);
+    eye_transform(g_views[1].pose, heads[1]);
+    const uint64_t tag = g_next_tag++;
+    TaggedViews& kept = g_pose_history[tag % kPoseHistory];
+    kept.tag = tag;
+    kept.views[0] = g_views[0];
+    kept.views[1] = g_views[1];
+    RT64_SetXrHead(1, &heads[0][0], tag);
 
     // Each eye's lens, for RT64 to draw that eye through. The runtime reports
     // it every frame; it only changes if the headset's settings do.
@@ -265,24 +388,33 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
 }
 
 // RT64's present thread, after the frame begun above, drawn or not. Its
-// command list has finished, so the images can go straight back.
-void end_frame(void*, int rendered) {
+// command list has finished, so the images can go straight back. The frame is
+// handed to the headset with the poses it was rendered with, found by the tag
+// RT64 kept with it, so the compositor corrects for exactly the head's
+// movement since; a tag no longer remembered falls back to this frame's.
+void end_frame(void*, int rendered, uint64_t head_tag) {
     if (g_images_acquired) {
         for (Eye& eye : g_eyes) {
             xrReleaseSwapchainImage(eye.swapchain, nullptr);
         }
     }
 
+    const XrView* rendered_views = g_views;
+    const TaggedViews& kept = g_pose_history[head_tag % kPoseHistory];
+    if (head_tag != 0 && kept.tag == head_tag) {
+        rendered_views = kept.views;
+    }
+
     XrCompositionLayerProjectionView views[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW },
                                                   { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     for (uint32_t e = 0; e < 2; ++e) {
-        views[e].pose = g_views[e].pose;
-        views[e].fov = g_views[e].fov;
+        views[e].pose = rendered_views[e].pose;
+        views[e].fov = rendered_views[e].fov;
         views[e].subImage.swapchain = g_eyes[e].swapchain;
         views[e].subImage.imageRect.extent = { int32_t(g_eyes[e].width), int32_t(g_eyes[e].height) };
     }
     XrCompositionLayerProjection layer{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
-    layer.space = g_head;
+    layer.space = g_local;
     layer.viewCount = 2;
     layer.views = views;
     const XrCompositionLayerBaseHeader* layers[] = { reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer) };
@@ -476,12 +608,20 @@ void attach(void* d3d12_device, void* d3d12_queue) {
         return;
     }
 
-    // The headset needs two eyes, so stereo is on whatever F8 last chose.
-    RT64_SetStereo(1, kVrStereoSeparation);
+    // The headset needs two eyes, so stereo is on whatever F8 last chose; the
+    // eyes' separation is the headset's own, in each eye's pose, so RT64 adds
+    // none of its own.
+    RT64_SetStereo(1, 0.0f);
     g_shutting_down = false;
     RT64_SetXrOutput(begin_frame, end_frame, nullptr);
-    std::fprintf(stderr, "[wr64-vr] RT64 will draw the headset's eye images\n");
+    std::fprintf(stderr, "[wr64-vr] RT64 will draw the headset's eye images; %.1f game units to a metre\n",
+                 world_scale());
     std::fflush(stderr);
+}
+
+void recenter() {
+    if (!enabled()) return;
+    g_recenter_requested = true;
 }
 
 void shutdown() {
@@ -493,6 +633,7 @@ void shutdown() {
     RT64_SetXrRefreshRate(0);
     RT64_SetXrRenderHeight(0);
     RT64_SetXrLens(0, nullptr);
+    RT64_SetXrHead(0, nullptr, 0);
     std::lock_guard<std::mutex> lock(g_mutex);
     g_shutting_down = true;
 

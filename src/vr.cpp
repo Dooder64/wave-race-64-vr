@@ -54,6 +54,13 @@ void cycle_debug_offset() {
 }
 
 void cycle_stereo() {
+    // In VR mode the headset owns stereo: both eyes are always drawn, apart by
+    // the headset's own eye positions.
+    if (enabled()) {
+        std::fprintf(stderr, "[wr64-vr] stereo follows the headset in VR mode; F8 does nothing\n");
+        std::fflush(stderr);
+        return;
+    }
     g_stereo_step = (g_stereo_step + 1) % 3;
     const float separation = g_stereo_step == 2 ? kStereoExaggerated : kStereoSeparation;
     RT64_SetStereo(g_stereo_step != 0 ? 1 : 0, separation);
@@ -72,6 +79,7 @@ void cycle_stereo() {
 bool enabled() { return false; }
 void attach(void*, void*) {}
 void shutdown() {}
+void recenter() {}
 #endif
 
 }  // namespace wr64::vr

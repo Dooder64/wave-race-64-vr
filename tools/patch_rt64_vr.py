@@ -58,6 +58,15 @@ eye about as tall as the headset's eye images (RT64_SetXrRenderHeight), at
 the game's 4:3 rather than widened, and the VI renderer stretches that frame
 over the whole eye image, since the lens has already said what it covers.
 
+Head tracking goes between the turn that centres the game's frame and the
+lens: the port publishes, each headset frame, a transform per eye from the
+seated space into that eye (RT64_SetXrHead), with a tag naming the pose. The
+workload queue takes one snapshot of it per displayed frame, for both eyes,
+and the tag travels with the frame to the present queue, which hands it back
+when the frame is submitted -- so the headset is told the pose each frame
+was really rendered with, and its compositor can correct for the head's
+movement since.
+
 Scripted and idempotent because it patches a submodule: a submodule update
 would otherwise revert it silently.
 
@@ -160,6 +169,20 @@ OFFSET_REPLACEMENT = """            // wr64: move the camera by the port's offse
                     const hlslpp::float4x4 recentre = wr64Recentre(centreX, centreY);
                     viewMatrix = hlslpp::mul(hlslpp::float4x4(viewMatrix), recentre);
                     prevViewTransform = hlslpp::mul(hlslpp::float4x4(prevViewTransform), recentre);
+                }
+
+                // The head: where this eye is, and which way it faces, relative to
+                // the seated position, as the frame's snapshot holds it. Straight
+                // ahead for the head is now the middle of the game's frame.
+                if (wr64HeadActive) {
+                    const float *e = wr64HeadEye[wr64EyeIndex];
+                    const hlslpp::float4x4 head(
+                        e[0], e[1], e[2], e[3],
+                        e[4], e[5], e[6], e[7],
+                        e[8], e[9], e[10], e[11],
+                        e[12], e[13], e[14], e[15]);
+                    viewMatrix = hlslpp::mul(hlslpp::float4x4(viewMatrix), head);
+                    prevViewTransform = hlslpp::mul(hlslpp::float4x4(prevViewTransform), head);
                 }
 
                 projMatrix = wr64EyeLens(projMatrix, wr64EyeIndex);
@@ -416,6 +439,51 @@ VI_REGION_REPLACEMENT = """            scissor.bottom = std::min(scissor.bottom,
     }
 """
 
+# --- the head ---------------------------------------------------------------
+
+HEAD_ANCHOR = """    // ProjectionProcessor
+
+    ProjectionProcessor::ProjectionProcessor() { }
+"""
+
+HEAD_REPLACEMENT = """    // wr64: the head, in a headset: for each eye a transform from the seated
+    // space into that eye's own, in the game's units, and a tag naming the
+    // pose it came from. The port publishes the latest each headset frame.
+    // The workload queue takes a snapshot of it before rendering each frame,
+    // so both eyes of a frame see the same moment, and reports the snapshot's
+    // tag with the frame, so the port can hand the headset the pose the frame
+    // was rendered with.
+    static std::mutex wr64HeadMutex;
+    static bool wr64HeadPublishedActive = false;
+    static float wr64HeadPublished[2][16];
+    static uint64_t wr64HeadPublishedTag = 0;
+
+    // The snapshot, on the render thread.
+    static bool wr64HeadActive = false;
+    static float wr64HeadEye[2][16];
+
+    extern "C" void RT64_SetXrHead(int active, const float *eyes, uint64_t tag) {
+        std::scoped_lock lock(wr64HeadMutex);
+        wr64HeadPublishedActive = (active != 0) && (eyes != nullptr);
+        if (wr64HeadPublishedActive) {
+            memcpy(wr64HeadPublished, eyes, sizeof(wr64HeadPublished));
+        }
+
+        wr64HeadPublishedTag = wr64HeadPublishedActive ? tag : 0;
+    }
+
+    uint64_t wr64SnapshotHead() {
+        std::scoped_lock lock(wr64HeadMutex);
+        wr64HeadActive = wr64HeadPublishedActive;
+        memcpy(wr64HeadEye, wr64HeadPublished, sizeof(wr64HeadEye));
+        return wr64HeadPublishedTag;
+    }
+
+    // ProjectionProcessor
+
+    ProjectionProcessor::ProjectionProcessor() { }
+"""
+
 # --- the right eye's targets and the frame's stereo flag ---------------------
 
 COUNTERS_ANCHOR = """        uint32_t count = 0;
@@ -440,6 +508,31 @@ TARGETS_REPLACEMENT = """        std::vector<std::unique_ptr<RenderTarget>> inte
         // wr64: the right eye of each displayed frame, in the order the frames
         // are rendered and presented. The left eye is wherever RT64 put it.
         std::vector<std::unique_ptr<RenderTarget>> wr64StereoTargets;
+"""
+
+HEAD_TAGS_ANCHOR = """        InterpolatedFrameCounters interpolatedFrames[2];
+"""
+
+HEAD_TAGS_REPLACEMENT = """        // wr64: the head pose each displayed frame was rendered with, as the
+        // port's tag for it, in the same order as wr64StereoTargets. Fixed in
+        // size, so the present queue can read it while the workload queue
+        // writes, with no reallocation between them.
+        std::array<uint64_t, 16> wr64HeadTags = {};
+
+        InterpolatedFrameCounters interpolatedFrames[2];
+"""
+
+HEAD_EXTERN_ANCHOR = """    // WorkloadQueue
+
+    WorkloadQueue::WorkloadQueue() {
+"""
+
+HEAD_EXTERN_REPLACEMENT = """    // wr64: see rt64_projection_processor.cpp.
+    uint64_t wr64SnapshotHead();
+
+    // WorkloadQueue
+
+    WorkloadQueue::WorkloadQueue() {
 """
 
 # --- the workload queue renders the right eye -------------------------------
@@ -505,7 +598,15 @@ WORKLOAD_RENDER_ANCHOR = """                    threadRenderFrame(curFrame, prev
                         interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
 """
 
-WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: in stereo this is the left eye, moved left by half the
+WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: a headset's head, as it is now, for both eyes of this
+                    // frame; its tag goes with the frame to the present queue,
+                    // indexed like the right eye's target.
+                    const uint64_t wr64HeadTag = wr64SnapshotHead();
+                    if (framesRendered < ext.sharedResources->wr64HeadTags.size()) {
+                        ext.sharedResources->wr64HeadTags[framesRendered] = wr64HeadTag;
+                    }
+
+                    // wr64: in stereo this is the left eye, moved left by half the
                     // separation.
                     wr64EyeIndex = 0;
                     wr64EyeOffsetX = wr64Stereo ? (-0.5f * wr64Separation) : 0.0f;
@@ -621,7 +722,9 @@ XR_DECL_REPLACEMENT = """    // wr64: a headset as a second output, supplied by 
     // waits until the headset wants a frame and returns -1 for no headset frame
     // (none attached, or its session not running), 0 for a frame it does not
     // want drawn, and 1 for a frame whose eye images are to be drawn; every
-    // frame begun is handed back through end, drawn or not. writeRaw says the
+    // frame begun is handed back through end, drawn or not, with the tag of
+    // the head pose the frame was rendered with (see RT64_SetXrHead in
+    // rt64_projection_processor.cpp). writeRaw says the
     // images take the VI's output as it is; otherwise they encode to sRGB as
     // they are written, and are given it linearised.
     struct RT64_XrEye {
@@ -636,7 +739,7 @@ XR_DECL_REPLACEMENT = """    // wr64: a headset as a second output, supplied by 
     };
 
     typedef int (*RT64_XrBeginFrame)(void *user, RT64_XrFrame *frame);
-    typedef void (*RT64_XrEndFrame)(void *user, int rendered);
+    typedef void (*RT64_XrEndFrame)(void *user, int rendered, uint64_t headTag);
 
     struct Wr64XrOutput {
         RT64_XrBeginFrame begin = nullptr;
@@ -787,7 +890,9 @@ XR_END_REPLACEMENT = """                    ext.presentGraphicsWorker->wait();
             // that drew its images has been executed and waited on, so the GPU is
             // done with them before the runtime takes them back.
             if (wr64XrState >= 0) {
-                wr64Xr.end(wr64Xr.user, wr64XrRendered ? 1 : 0);
+                const auto &wr64HeadTags = ext.sharedResources->wr64HeadTags;
+                const uint64_t wr64HeadTag = (uint32_t(i) < wr64HeadTags.size()) ? wr64HeadTags[i] : 0;
+                wr64Xr.end(wr64Xr.user, wr64XrRendered ? 1 : 0, wr64HeadTag);
             }
 """
 
@@ -923,9 +1028,12 @@ def main():
     patch(PROJ_PROCESSOR, STEREO_ANCHOR, STEREO_REPLACEMENT, "stereo (switch)")
     patch(PROJ_PROCESSOR, EYE_ANCHOR, EYE_REPLACEMENT, "stereo (eye offset)")
     patch(PROJ_PROCESSOR, LENS_ANCHOR, LENS_REPLACEMENT, "headset (lens)")
+    patch(PROJ_PROCESSOR, HEAD_ANCHOR, HEAD_REPLACEMENT, "headset (head)")
     patch(SHARED_RESOURCES, COUNTERS_ANCHOR, COUNTERS_REPLACEMENT, "stereo (frame flag)")
     patch(SHARED_RESOURCES, TARGETS_ANCHOR, TARGETS_REPLACEMENT, "stereo (right eye targets)")
+    patch(SHARED_RESOURCES, HEAD_TAGS_ANCHOR, HEAD_TAGS_REPLACEMENT, "headset (head tags)")
     patch(WORKLOAD_QUEUE, WORKLOAD_EXTERN_ANCHOR, WORKLOAD_EXTERN_REPLACEMENT, "stereo (workload switch)")
+    patch(WORKLOAD_QUEUE, HEAD_EXTERN_ANCHOR, HEAD_EXTERN_REPLACEMENT, "headset (head snapshot)")
     patch(WORKLOAD_QUEUE, WORKLOAD_PROJ_ANCHOR, WORKLOAD_PROJ_REPLACEMENT, "stereo (projections processed)")
     patch(WORKLOAD_QUEUE, WORKLOAD_CLEAR_ANCHOR, WORKLOAD_CLEAR_REPLACEMENT, "stereo (targets cleared)")
     patch(WORKLOAD_QUEUE, WORKLOAD_DECIDE_ANCHOR, WORKLOAD_DECIDE_REPLACEMENT, "stereo (frame decided)")

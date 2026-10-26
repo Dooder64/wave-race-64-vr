@@ -39,4 +39,7 @@ void attach(void* d3d12_device, void* d3d12_queue);
 // Ends the session. Called before RT64 shuts down, while the device lives.
 void shutdown();
 
+// F6: straight ahead becomes the way the head faces now, from where it is.
+void recenter();
+
 }  // namespace wr64::vr
