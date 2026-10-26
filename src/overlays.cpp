@@ -41,6 +41,8 @@ void music_load_sequence_hook(uint8_t* rdram, recomp_context* ctx);
 void music_disable_sequence_hook(uint8_t* rdram, recomp_context* ctx);
 void music_player_sound_hook(uint8_t* rdram, recomp_context* ctx);
 void music_audio_task_hook(uint8_t* rdram, recomp_context* ctx);
+void water_view_hook(uint8_t* rdram, recomp_context* ctx);
+void water_update_hook(uint8_t* rdram, recomp_context* ctx);
 
 void register_overlays() {
     // Unlike main_segment's race initializer, the rider-select initializer is
@@ -168,6 +170,9 @@ void register_runtime_functions() {
     recomp::overlays::add_loaded_function(static_cast<int32_t>(0x800BCEE0), music_disable_sequence_hook);
     recomp::overlays::add_loaded_function(static_cast<int32_t>(0x800BBFD4), music_player_sound_hook);
     recomp::overlays::add_loaded_function(static_cast<int32_t>(0x800C4C40), music_audio_task_hook);
+    // VR: the wave mesh again for the camera turned round (patches/water_all_round.cpp).
+    recomp::overlays::add_loaded_function(static_cast<int32_t>(0x8004C1D0), water_view_hook);
+    recomp::overlays::add_loaded_function(static_cast<int32_t>(0x80051238), water_update_hook);
 
     std::fprintf(stderr,
                  "[wr64] registered %zu runtime-provided and %zu resident functions"

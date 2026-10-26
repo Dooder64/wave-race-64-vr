@@ -74,5 +74,25 @@ peak is logged in VR mode.
 ## Not yet
 
 - The lists at about 100 degrees (`0x080617F0`-) are left out somewhere else.
-- The water grid (func_80050204, laid out by func_8004C1D0 from the camera's
-  heading and gSinTable) and the sky are built only in front of the camera.
+- The sky is built only in front of the camera.
+
+## The water all round
+
+The game's wave mesh (list `0x0100B590`) is a hexagon of waves about 1500
+units across, on a triangular lattice fixed to the world (64 units along x,
+rows 55.43 apart along z, odd rows offset by 32), its border flattened to the
+water level, inside a ring of six flat quads -- all translucent. Only where the
+hexagon is centred depends on the camera: about 700 units ahead of it.
+
+`patches/water_all_round.cpp` builds the mesh again for the camera turned 90,
+180 and 270 degrees (and puts back everything the builds change), merges the
+four point by point on the lattice -- an average weighted by how far inside
+each hexagon a point lies, so flattened borders drop out -- and writes one
+hexagon mesh with its own flat ring out to 6000 units. `src/dlrewrite.cpp`
+draws it in place of the game's. Drawing the four meshes on top of one another
+was tried first: the overlaps were doubly opaque, each flat ring cut through
+its neighbours' waves, and the modern water renderer saw four surfaces.
+
+`WR64_WATER_DUMP=<file>` (with `WR64_WATER_DUMP_AT=<frames>`, 300 by default)
+writes one frame's merged mesh to the file and the game's own to `<file>.game`,
+as display-list commands and vertices.

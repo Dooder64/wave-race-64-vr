@@ -121,6 +121,13 @@
 
 #include "rt64_extended_gbi.h"
 
+namespace wr64 {
+// patches/water_all_round.cpp: the merged wave mesh for the frame buffer
+// segment 3 points at -- the segment base it expects and its list.
+bool water_merged(uint32_t segment3, uint32_t* base, uint32_t* list);
+void water_copy_camera(float* eye_x, float* eye_z, float* heading);
+}
+
 namespace {
 
 constexpr uint32_t kScratch = 0x80700000u;
@@ -727,6 +734,37 @@ struct Walker {
             auto *data = reinterpret_cast<uint32_t *>(commands);
             data[0] = op; data[1] = 2; // Water payload v2 appends effect preferences.
             std::memcpy(data + 2, &m, sizeof(m));
+        }
+    }
+
+    // WR64_WATER_DUMP=<file>: one frame's water list and the vertices it loads,
+    // for the game's mesh (and any copies given) or the merged one, to check them.
+    void dump_water(uint32_t list, const uint32_t bases[], int copies, int depth, FILE* f) {
+        uint32_t cursor = physical(list);
+        for (uint32_t steps = 0; steps < 16384; ++steps) {
+            const uint32_t w0 = words(cursor)[0], w1 = words(cursor)[1];
+            cursor += 8;
+            const uint8_t op = uint8_t(w0 >> 24);
+            std::fprintf(f, "cmd %08X %08X\n", w0, w1);
+            if (op == kOpEndDisplayList) return;
+            if (op == kOpDisplayList) {
+                if (((w0 >> 16) & 0xFF) != 0) { cursor = physical(w1); continue; }
+                if (depth < 3) dump_water(w1, bases, copies, depth + 1, f);
+                continue;
+            }
+            if (op != kOpVtx) continue;
+            const uint32_t count = (w0 >> 9) & 0x7F;
+            for (int m = 0; m <= copies; ++m) {
+                const uint32_t base = m == 0 ? segments[(w1 >> 24) & 0xF] : bases[m - 1];
+                const uint32_t addr = (base + (w1 & 0x00FFFFFFu)) & 0x00FFFFF8u;
+                for (uint32_t i = 0; i < count && i < 64; ++i) {
+                    const uint32_t v = addr + i * 16;
+                    std::fprintf(f, "v %d %u %d %d %d %d %d %u %u %u %u\n", m, i,
+                                 signed_half(v), signed_half(v + 2), signed_half(v + 4),
+                                 signed_half(v + 8), signed_half(v + 10),
+                                 rdram[(v + 12) ^ 3], rdram[(v + 13) ^ 3], rdram[(v + 14) ^ 3], rdram[(v + 15) ^ 3]);
+                }
+            }
         }
     }
 
@@ -1813,7 +1851,41 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             const bool modern_water = water && w.known_water_material(w1);
             if (water && w.water_interp) w.vertex_interp_group(Walker::kWaterId);
             if (modern_water) w.water_material(true);
-            w.emit(w0, w1);
+            // VR: the wave mesh merged from builds all round the camera
+            // (patches/water_all_round.cpp) is drawn in place of the game's,
+            // in the same state, by a list of its own reached through segment
+            // 3, which is moved to it for the call and then put back.
+            uint32_t merged_base = 0, merged_list = 0;
+            if (water && w1 == 0x0100B590 && wr64::water_merged(w.segments[3], &merged_base, &merged_list)) {
+                static const char* dump_path = std::getenv("WR64_WATER_DUMP");
+                static int dump_countdown = std::getenv("WR64_WATER_DUMP_AT") ? std::atoi(std::getenv("WR64_WATER_DUMP_AT")) : 300;
+                if (dump_path != nullptr && dump_countdown >= 0 && dump_countdown-- == 0) {
+                    float eye_x, eye_z, heading;
+                    wr64::water_copy_camera(&eye_x, &eye_z, &heading);
+                    // The merged mesh to the file named, the game's own beside it.
+                    const std::string game_path = std::string(dump_path) + ".game";
+                    FILE* merged = std::fopen(dump_path, "w");
+                    FILE* game = std::fopen(game_path.c_str(), "w");
+                    if (merged != nullptr && game != nullptr) {
+                        std::fprintf(merged, "camera %f %f %f\n", eye_x, eye_z, heading);
+                        std::fprintf(game, "camera %f %f %f\n", eye_x, eye_z, heading);
+                        w.dump_water(w1, nullptr, 0, 0, game);
+                        const uint32_t segment3 = w.segments[3];
+                        w.segments[3] = merged_base;
+                        w.dump_water(merged_list, nullptr, 0, 0, merged);
+                        w.segments[3] = segment3;
+                        std::fprintf(stderr, "[wr64-water] dumped the water meshes to %s\n", dump_path);
+                    }
+                    if (merged != nullptr) std::fclose(merged);
+                    if (game != nullptr) std::fclose(game);
+                }
+                w.emit((uint32_t(kOpMoveWord) << 24) | ((3u * 4u) << 8) | kMoveWordSegment, merged_base);
+                w.emit(uint32_t(kOpDisplayList) << 24, merged_list);
+                w.emit((uint32_t(kOpMoveWord) << 24) | ((3u * 4u) << 8) | kMoveWordSegment, w.segments[3]);
+            }
+            else {
+                w.emit(w0, w1);
+            }
             if (modern_water) w.water_material(false);
             if (water && w.water_interp) w.vertex_interp_group(G_EX_ID_AUTO);
             continue;
