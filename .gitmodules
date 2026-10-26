@@ -7,3 +7,6 @@
 [submodule "lib/RecompFrontend"]
 	path = lib/RecompFrontend
 	url = https://github.com/N64Recomp/RecompFrontend.git
+[submodule "lib/OpenXR-SDK"]
+	path = lib/OpenXR-SDK
+	url = https://github.com/KhronosGroup/OpenXR-SDK.git
