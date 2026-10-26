@@ -50,6 +50,14 @@ than stop at the window's. RT64 knows nothing of OpenXR: the images arrive
 as Direct3D 12 resources, wrapped as plume textures the way the swap chain's
 buffers are.
 
+The headset's own lens replaces the game's while it is active. The port
+passes each eye's view angles through RT64_SetXrLens, and every full-frame
+perspective scene drawn for that eye gets an asymmetric frustum built from
+them, keeping the game's near and far planes and scale. RT64 renders each
+eye about as tall as the headset's eye images (RT64_SetXrRenderHeight), at
+the game's 4:3 rather than widened, and the VI renderer stretches that frame
+over the whole eye image, since the lens has already said what it covers.
+
 Scripted and idempotent because it patches a submodule: a submodule update
 would otherwise revert it silently.
 
@@ -125,7 +133,143 @@ OFFSET_REPLACEMENT = """            // wr64: move the camera by the port's offse
                 }
             }
 
+            // wr64: in a headset, a scene the game draws across its whole frame
+            // is seen through the eye's own lens rather than the game's. Only a
+            // scene RT64 judged for itself (aspect AUTO) and found full-frame:
+            // the race's world and sky are, the 3D drawn inside a menu's layout
+            // (aspect ADJUST, set by the port's display-list rewriter) is not.
+            //
+            // The game's frame need not be centred on its camera: an off-centre
+            // projection puts the camera's direction somewhere other than the
+            // middle of the picture. The eye is first turned so that what the
+            // game shows in the middle of its frame is straight ahead, then
+            // given the lens, which is centred on the eye.
+            if ((proj.type == Projection::Type::Perspective) && (curProjGroup.aspectMode == G_EX_ASPECT_AUTO) &&
+                adjustAspectRatio && wr64XrLensActive.load(std::memory_order_relaxed)) {
+                const float centreX = (projMatrix[0][0] != 0.0f) ? (projMatrix[2][0] / projMatrix[0][0]) : 0.0f;
+                const float centreY = (projMatrix[1][1] != 0.0f) ? (projMatrix[2][1] / projMatrix[1][1]) : 0.0f;
+                static bool reportedCentre = false;
+                if (!reportedCentre) {
+                    reportedCentre = true;
+                    fprintf(stderr, "[wr64-vr] the game's frame is centred %.1f degrees right and %.1f degrees up of its camera\\n",
+                        atanf(centreX) * 57.2957795f, atanf(centreY) * 57.2957795f);
+                    fflush(stderr);
+                }
+
+                if ((centreX != 0.0f) || (centreY != 0.0f)) {
+                    const hlslpp::float4x4 recentre = wr64Recentre(centreX, centreY);
+                    viewMatrix = hlslpp::mul(hlslpp::float4x4(viewMatrix), recentre);
+                    prevViewTransform = hlslpp::mul(hlslpp::float4x4(prevViewTransform), recentre);
+                }
+
+                projMatrix = wr64EyeLens(projMatrix, wr64EyeIndex);
+                prevProjTransform = projMatrix;
+            }
+
             viewProjMatrix = hlslpp::mul(viewMatrix, projMatrix);
+"""
+
+# --- the headset's lens -----------------------------------------------------
+
+LENS_ANCHOR = """    inline void adjustProjectionMatrix(interop::float4x4 &matrix, const float aspectRatioScale) {
+"""
+
+LENS_REPLACEMENT = """    // wr64: a headset's lens for each eye, as the tangents of the angles its
+    // view reaches left, right, up and down (left and down negative), and
+    // whether to use them. Set by the port from its present-thread callback,
+    // read on the render thread.
+    static std::atomic<bool> wr64XrLensActive{ false };
+    static std::atomic<float> wr64XrLensTangents[2][4];
+
+    // wr64: the eye being drawn, 0 left and 1 right. Set by the workload queue
+    // around each eye's rendering, like wr64EyeOffsetX and on the same thread.
+    int wr64EyeIndex = 0;
+
+    extern "C" void RT64_SetXrLens(int active, const float *angles) {
+        if (active && (angles != nullptr)) {
+            for (int eye = 0; eye < 2; eye++) {
+                for (int side = 0; side < 4; side++) {
+                    wr64XrLensTangents[eye][side].store(std::tan(angles[eye * 4 + side]), std::memory_order_relaxed);
+                }
+            }
+        }
+
+        wr64XrLensActive.store(active != 0, std::memory_order_relaxed);
+    }
+
+    // wr64: the eye's lens in place of a game's perspective projection. The
+    // game's near and far planes are kept, read from the projection as the
+    // camera log reads them, and so is its overall scale: libultra's
+    // guPerspective multiplies the whole matrix through by one, and [2][3] is
+    // minus it, so w comes out the same as the game's and nothing downstream
+    // sees a difference beyond the shape of the view. An asymmetric frustum,
+    // row vectors, OpenGL's clip space, as the N64's own.
+    inline interop::float4x4 wr64EyeLens(const interop::float4x4 &game, int eye) {
+        const float scale = -game[2][3];
+        if (scale == 0.0f) {
+            return game;
+        }
+
+        const float tanLeft = wr64XrLensTangents[eye][0].load(std::memory_order_relaxed);
+        const float tanRight = wr64XrLensTangents[eye][1].load(std::memory_order_relaxed);
+        const float tanUp = wr64XrLensTangents[eye][2].load(std::memory_order_relaxed);
+        const float tanDown = wr64XrLensTangents[eye][3].load(std::memory_order_relaxed);
+        if ((tanRight <= tanLeft) || (tanUp <= tanDown)) {
+            return game;
+        }
+
+        interop::float4x4 lens = interop::float4x4::identity();
+        for (int row = 0; row < 4; row++) {
+            for (int column = 0; column < 4; column++) {
+                lens[row][column] = 0.0f;
+            }
+        }
+
+        lens[0][0] = 2.0f / (tanRight - tanLeft);
+        lens[1][1] = 2.0f / (tanUp - tanDown);
+        lens[2][0] = (tanRight + tanLeft) / (tanRight - tanLeft);
+        lens[2][1] = (tanUp + tanDown) / (tanUp - tanDown);
+        lens[2][2] = game[2][2] / scale;
+        lens[2][3] = -1.0f;
+        lens[3][2] = game[3][2] / scale;
+        for (int row = 0; row < 4; row++) {
+            for (int column = 0; column < 4; column++) {
+                lens[row][column] *= scale;
+            }
+        }
+
+        return lens;
+    }
+
+    // wr64: a turn of the view that brings the direction a game's frame is
+    // centred on -- tangents centreX right and centreY up, read off its
+    // projection -- to straight ahead: a yaw, then a pitch. Row vectors, for
+    // multiplying on after a view matrix.
+    inline hlslpp::float4x4 wr64Recentre(float centreX, float centreY) {
+        const float yawLength = sqrtf(1.0f + centreX * centreX);
+        const float yawCos = 1.0f / yawLength;
+        const float yawSin = centreX / yawLength;
+        const hlslpp::float4x4 yaw(
+            yawCos, 0.0f, -yawSin, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            yawSin, 0.0f, yawCos, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f);
+
+        // After the yaw the centre is centreY up over a run of yawLength.
+        const float pitchTangent = centreY / yawLength;
+        const float pitchLength = sqrtf(1.0f + pitchTangent * pitchTangent);
+        const float pitchCos = 1.0f / pitchLength;
+        const float pitchSin = -pitchTangent / pitchLength;
+        const hlslpp::float4x4 pitch(
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, pitchCos, pitchSin, 0.0f,
+            0.0f, -pitchSin, pitchCos, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f);
+
+        return hlslpp::mul(yaw, pitch);
+    }
+
+    inline void adjustProjectionMatrix(interop::float4x4 &matrix, const float aspectRatioScale) {
 """
 
 # --- the stereo switch ------------------------------------------------------
@@ -194,7 +338,27 @@ VI_PARAMS_REPLACEMENT = """            bool removeBlackBorders = false;
             // as it is written is given the VI's output linearised (2.2), so
             // the two cancel rather than brightening the picture twice.
             float gammaScale = 1.0f;
+
+            // wr64: stretch the whole frame over the whole region, shape and
+            // borders ignored -- a headset's eye image, whose lens already
+            // describes the frame RT64 rendered. Needs regionWidth and
+            // regionHeight.
+            bool fillRegion = false;
         };
+"""
+
+VI_FILL_ANCHOR = """        p.commandList->setViewports(viewport);
+        p.commandList->setScissors(scissor);
+"""
+
+VI_FILL_REPLACEMENT = """        // wr64: see fillRegion.
+        if (p.fillRegion && (p.regionWidth > 0.0f) && (p.regionHeight > 0.0f)) {
+            viewport = RenderViewport(p.regionX, 0.0f, p.regionWidth, p.regionHeight);
+            scissor = RenderRect(int32_t(p.regionX), 0, int32_t(p.regionX + p.regionWidth), int32_t(p.regionHeight));
+        }
+
+        p.commandList->setViewports(viewport);
+        p.commandList->setScissors(scissor);
 """
 
 VI_DECL_ANCHOR = """        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
@@ -294,6 +458,7 @@ namespace RT64 {
     extern std::atomic<int> wr64StereoMode;
     extern std::atomic<float> wr64StereoSeparation;
     extern float wr64EyeOffsetX;
+    extern int wr64EyeIndex;
     bool wr64CameraOffsetActive();
 
     // wr64: the right eye's targets carry modifier keys of their own, clear of
@@ -342,6 +507,7 @@ WORKLOAD_RENDER_ANCHOR = """                    threadRenderFrame(curFrame, prev
 
 WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: in stereo this is the left eye, moved left by half the
                     // separation.
+                    wr64EyeIndex = 0;
                     wr64EyeOffsetX = wr64Stereo ? (-0.5f * wr64Separation) : 0.0f;
                     threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
                         interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
@@ -353,11 +519,13 @@ WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: in stereo this is 
                     // before the frame is reported ready below.
                     if (wr64Stereo && (framesRendered < ext.sharedResources->wr64StereoTargets.size())) {
                         RenderTarget *rightTarget = ext.sharedResources->wr64StereoTargets[framesRendered].get();
+                        wr64EyeIndex = 1;
                         wr64EyeOffsetX = 0.5f * wr64Separation;
                         threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
                             interpolationTargetKey, interpolationTargetFbPairIndex, rightTarget, wr64StereoModifierBase + framesRendered, velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
                     }
 
+                    wr64EyeIndex = 0;
                     wr64EyeOffsetX = 0.0f;
 """
 
@@ -494,6 +662,14 @@ XR_DECL_REPLACEMENT = """    // wr64: a headset as a second output, supplied by 
         wr64XrRefreshRate.store(rate, std::memory_order_relaxed);
     }
 
+    // wr64: the height of the headset's eye images while it sets the pace,
+    // zero otherwise. The workload queue renders each eye about that tall.
+    std::atomic<uint32_t> wr64XrRenderHeight{ 0 };
+
+    extern "C" void RT64_SetXrRenderHeight(uint32_t height) {
+        wr64XrRenderHeight.store(height, std::memory_order_relaxed);
+    }
+
     // PresentQueue
 
     PresentQueue::PresentQueue() {
@@ -581,6 +757,7 @@ XR_DRAW_REPLACEMENT = """#               if defined(_WIN32)
                             xrParams.regionWidth = float(xrEye.width);
                             xrParams.regionHeight = float(xrEye.height);
                             xrParams.gammaScale = wr64XrFrame.writeRaw ? 1.0f : 2.2f;
+                            xrParams.fillRegion = true;
                             if (wr64XrViRenderers[eye] == nullptr) {
                                 wr64XrViRenderers[eye] = std::make_unique<VIRenderer>();
                             }
@@ -664,12 +841,35 @@ XR_RATE_EXTERN_REPLACEMENT = """#include "rt64_present_queue.h"
 #include <atomic>
 
 namespace RT64 {
-    // wr64: the headset's refresh rate while it sets the pace, zero otherwise
-    // (rt64_present_queue.cpp).
+    // wr64: the headset's refresh rate and eye image height while it sets the
+    // pace, zero otherwise (rt64_present_queue.cpp).
     extern std::atomic<uint32_t> wr64XrRefreshRate;
+    extern std::atomic<uint32_t> wr64XrRenderHeight;
 };
 
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
+"""
+
+XR_SIZE_ANCHOR = """        ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
+"""
+
+# Kept a few lines clear of the water patch's change above it: patch_water.py
+# recognises its own work by reversing it, which needs its context untouched.
+XR_SIZE_REPLACEMENT = """        ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
+
+        // wr64: while a headset sets the pace, render for its eyes instead of the
+        // window: about as tall as its eye images, in whole multiples as RT64
+        // prefers, and at the game's own 4:3, since each eye's lens replaces
+        // the game's and RT64 never draws narrower than its source. The
+        // nearly square eye image then takes the frame squeezed sideways.
+        const uint32_t wr64XrHeight = wr64XrRenderHeight.load(std::memory_order_relaxed);
+        if (wr64XrHeight > 0) {
+            const float wr64Multiplier = std::max(1.0f, std::round(float(wr64XrHeight) / float(referenceHeight)));
+            workloadConfig.aspectRatioTarget = workloadConfig.aspectRatioSource;
+            workloadConfig.aspectRatioScale = 1.0f;
+            workloadConfig.resolutionScale = { wr64Multiplier, wr64Multiplier };
+            ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
+        }
 """
 
 XR_RATE_ANCHOR = """        ext.sharedResources->targetRate = workloadConfig.targetRate;
@@ -722,6 +922,7 @@ def main():
     patch(PROJ_PROCESSOR, OFFSET_ANCHOR, OFFSET_REPLACEMENT, "view offset (camera)")
     patch(PROJ_PROCESSOR, STEREO_ANCHOR, STEREO_REPLACEMENT, "stereo (switch)")
     patch(PROJ_PROCESSOR, EYE_ANCHOR, EYE_REPLACEMENT, "stereo (eye offset)")
+    patch(PROJ_PROCESSOR, LENS_ANCHOR, LENS_REPLACEMENT, "headset (lens)")
     patch(SHARED_RESOURCES, COUNTERS_ANCHOR, COUNTERS_REPLACEMENT, "stereo (frame flag)")
     patch(SHARED_RESOURCES, TARGETS_ANCHOR, TARGETS_REPLACEMENT, "stereo (right eye targets)")
     patch(WORKLOAD_QUEUE, WORKLOAD_EXTERN_ANCHOR, WORKLOAD_EXTERN_REPLACEMENT, "stereo (workload switch)")
@@ -738,6 +939,7 @@ def main():
     patch(VI_RENDERER, VI_SIZE_ANCHOR, VI_SIZE_REPLACEMENT, "stereo (region size)")
     patch(VI_RENDERER, VI_REGION_ANCHOR, VI_REGION_REPLACEMENT, "stereo (region placement)")
     patch(VI_RENDERER, VI_GAMMA_ANCHOR, VI_GAMMA_REPLACEMENT, "headset (gamma)")
+    patch(VI_RENDERER, VI_FILL_ANCHOR, VI_FILL_REPLACEMENT, "headset (fill)")
     patch(PRESENT_QUEUE, PRESENT_EXTERN_ANCHOR, PRESENT_EXTERN_REPLACEMENT, "stereo (present switch)")
     patch(PRESENT_QUEUE, PRESENT_DRAW_ANCHOR, PRESENT_DRAW_REPLACEMENT, "stereo (present halves)")
     patch(PRESENT_QUEUE, XR_INCLUDE_ANCHOR, XR_INCLUDE_REPLACEMENT, "headset (include)")
@@ -751,6 +953,7 @@ def main():
     patch(PRESENT_HEADER, XR_MEMBERS_ANCHOR, XR_MEMBERS_REPLACEMENT, "headset (wrapped images)")
     patch(WORKLOAD_QUEUE, XR_RATE_EXTERN_ANCHOR, XR_RATE_EXTERN_REPLACEMENT, "headset (rate switch)")
     patch(WORKLOAD_QUEUE, XR_RATE_ANCHOR, XR_RATE_REPLACEMENT, "headset (frame rate)")
+    patch(WORKLOAD_QUEUE, XR_SIZE_ANCHOR, XR_SIZE_REPLACEMENT, "headset (eye size)")
     print("Rebuild to pick it up.")
 
 

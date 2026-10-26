@@ -19,9 +19,11 @@
 // is off, or not yet ready -- begin_frame says so and RT64 paces itself to the
 // window as before.
 //
-// For now each eye is the game's own camera and lens, shown fixed to the face:
-// the projection layer is placed in VIEW space, so the picture follows the
-// head. The headset's lens and head tracking come next.
+// Each eye is drawn through the headset's own lens for that eye, passed to
+// RT64 every frame along with the size to render at, so the two images line
+// up as the headset expects. For now the game's camera is the head: the
+// projection layer is placed in VIEW space, so the picture stays fixed to the
+// face. Head tracking comes next.
 //
 // tools/xr_test is the same path stripped of the game, for when something
 // here does not work and the question is whether it is the headset.
@@ -68,6 +70,8 @@ typedef void (*RT64_XrEndFrame)(void* user, int rendered);
 
 extern "C" void RT64_SetXrOutput(RT64::RT64_XrBeginFrame begin, RT64::RT64_XrEndFrame end, void* user);
 extern "C" void RT64_SetXrRefreshRate(uint32_t rate);
+extern "C" void RT64_SetXrRenderHeight(uint32_t height);
+extern "C" void RT64_SetXrLens(int active, const float* angles);
 extern "C" void RT64_SetStereo(int mode, float separation);
 
 namespace wr64::vr {
@@ -105,6 +109,7 @@ XrFrameState g_frame_state{ XR_TYPE_FRAME_STATE };
 XrView g_views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
 bool g_images_acquired = false;
 XrDuration g_reported_period = 0;
+bool g_lens_reported = false;
 uint64_t g_frames = 0;
 uint64_t g_drawn = 0;
 std::chrono::steady_clock::time_point g_last_report;
@@ -164,9 +169,13 @@ bool poll_events() {
             else if (changed.state == XR_SESSION_STATE_STOPPING) {
                 xrEndSession(g_session);
                 g_running = false;
-                // RT64 paces itself to the window again until the session is back.
+                // RT64 renders for and paces itself to the window again until
+                // the session is back.
                 RT64_SetXrRefreshRate(0);
+                RT64_SetXrRenderHeight(0);
+                RT64_SetXrLens(0, nullptr);
                 g_reported_period = 0;
+                g_lens_reported = false;
             }
             else if (changed.state == XR_SESSION_STATE_EXITING ||
                      changed.state == XR_SESSION_STATE_LOSS_PENDING) {
@@ -201,6 +210,7 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
         g_reported_period = g_frame_state.predictedDisplayPeriod;
         const double hz = 1e9 / double(g_frame_state.predictedDisplayPeriod);
         RT64_SetXrRefreshRate(uint32_t(std::lround(hz)));
+        RT64_SetXrRenderHeight(g_eyes[0].height);
         std::fprintf(stderr, "[wr64-vr] the headset refreshes at %.1f Hz; RT64 now renders for it\n", hz);
         std::fflush(stderr);
     }
@@ -220,6 +230,23 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
     g_images_acquired = false;
     if (!g_frame_state.shouldRender || located != 2) {
         return 0;
+    }
+
+    // Each eye's lens, for RT64 to draw that eye through. The runtime reports
+    // it every frame; it only changes if the headset's settings do.
+    const float angles[8] = {
+        g_views[0].fov.angleLeft, g_views[0].fov.angleRight, g_views[0].fov.angleUp, g_views[0].fov.angleDown,
+        g_views[1].fov.angleLeft, g_views[1].fov.angleRight, g_views[1].fov.angleUp, g_views[1].fov.angleDown,
+    };
+    RT64_SetXrLens(1, angles);
+    if (!g_lens_reported) {
+        g_lens_reported = true;
+        constexpr float kDegrees = 57.2957795f;
+        std::fprintf(stderr, "[wr64-vr] eye lenses (left, right, up, down, degrees): left eye %.1f %.1f %.1f %.1f,"
+                             " right eye %.1f %.1f %.1f %.1f\n",
+                     angles[0] * kDegrees, angles[1] * kDegrees, angles[2] * kDegrees, angles[3] * kDegrees,
+                     angles[4] * kDegrees, angles[5] * kDegrees, angles[6] * kDegrees, angles[7] * kDegrees);
+        std::fflush(stderr);
     }
 
     for (uint32_t e = 0; e < 2; ++e) {
@@ -464,6 +491,8 @@ void shutdown() {
     // lock is held until it ends.
     RT64_SetXrOutput(nullptr, nullptr, nullptr);
     RT64_SetXrRefreshRate(0);
+    RT64_SetXrRenderHeight(0);
+    RT64_SetXrLens(0, nullptr);
     std::lock_guard<std::mutex> lock(g_mutex);
     g_shutting_down = true;
 

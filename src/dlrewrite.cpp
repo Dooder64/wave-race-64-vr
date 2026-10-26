@@ -88,10 +88,18 @@
 //
 // WR64_CAMERA_LOG=1 prints the race camera's position, direction and lens
 // about once a second; see log_camera.
+//
+// 5. VR mode (WR64_VR=1) opens the world's scissor. The game draws its 3D
+// inside (8, 20)-(311, 219) and leaves the rest of its framebuffer black for a
+// CRT's overscan to hide; through a headset's lens that border would sit in
+// the middle of the view, so the scissor that names that region is widened
+// to the whole framebuffer. Everything else this walk does still sees the
+// game's own scissor. WR64_VR_KEEP_SCISSOR=1 leaves it alone, for comparison.
 
 #include "wr64/dlrewrite.h"
 #include "wr64/display.h"
 #include "wr64/testdrive.h"
+#include "wr64/vr.h"
 #include "wr64/water.h"
 
 #include <algorithm>
@@ -154,6 +162,7 @@ constexpr uint8_t kMoveMemViewport = 0x80;
 // quarter pixels; these offsets undo it, so the game's viewport data is used
 // as it is and only the anchor moves.
 constexpr int kFramebufferWidth = 320;
+constexpr int kFramebufferHeight = 240;
 int origin_cancel(uint32_t origin) {
     return -static_cast<int>((origin * kFramebufferWidth * 4) / G_EX_ORIGIN_RIGHT);
 }
@@ -1526,6 +1535,19 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             w.have_viewport = true;
             w.viewport_w0 = w0;
             w.viewport_w1 = w1;
+            // VR mode depends on the race's 3D viewport covering the whole
+            // framebuffer, since the headset's lens is fitted to it; say once
+            // what it is. A Vp is scale then translation, four halves each, in
+            // quarter pixels.
+            static bool reported_viewport = false;
+            if (!reported_viewport && wr64::vr::enabled() && racing(state)) {
+                reported_viewport = true;
+                const uint32_t vp = w.physical(w1);
+                std::fprintf(stderr, "[wr64-vr] the race's viewport: centre (%.1f, %.1f), half-size (%.1f, %.1f) pixels\n",
+                             w.signed_half(vp + 8) / 4.0f, w.signed_half(vp + 10) / 4.0f,
+                             w.signed_half(vp + 0) / 4.0f, w.signed_half(vp + 2) / 4.0f);
+                std::fflush(stderr);
+            }
             if (w.trace != nullptr) {
                 char line[96];
                 std::snprintf(line, sizeof(line), "[hud] state 0x%02X viewport load 0x%08X (class %s)\n",
@@ -1541,6 +1563,22 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             w.have_scissor_cmd = true;
             w.scissor_w0 = w0;
             w.scissor_w1 = w1;
+            // VR mode: the world's scissor becomes the whole framebuffer (see 5.
+            // at the top). Coordinates are 10.2 fixed point in the low 24 bits
+            // of each word, the mode bits above them are kept.
+            static const bool open_scissor = wr64::vr::enabled() && std::getenv("WR64_VR_KEEP_SCISSOR") == nullptr;
+            if (open_scissor) {
+                const int ulx = static_cast<int>((w0 >> 12) & 0xFFF) >> 2;
+                const int uly = static_cast<int>(w0 & 0xFFF) >> 2;
+                const int lrx = static_cast<int>((w1 >> 12) & 0xFFF) >> 2;
+                const int lry = static_cast<int>(w1 & 0xFFF) >> 2;
+                if (ulx == wr64::display::kContentLeft && uly == wr64::display::kContentTop &&
+                    lrx == wr64::display::kContentRight && lry == wr64::display::kContentBottom) {
+                    w.emit(w0 & 0xFF000000u,
+                           (w1 & 0xFF000000u) | (uint32_t(kFramebufferWidth * 4) << 12) | uint32_t(kFramebufferHeight * 4));
+                    continue;
+                }
+            }
             w.emit(w0, w1);
             continue;
         }
