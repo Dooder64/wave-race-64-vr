@@ -13,8 +13,8 @@
 //
 // Phase 3 draws both eyes side by side on the monitor, the layout a headset
 // uses: RT64 renders each displayed frame twice, the camera moved half the
-// separation left for the left half and right for the right. F8 switches it
-// on and off.
+// separation left for the left half and right for the right. F8 steps it
+// through off, a human eye separation, and an exaggerated one.
 
 #include "wr64/vr.h"
 
@@ -35,10 +35,12 @@ constexpr float kDebugOffset = 30.0f;
 int g_debug_step = 0;  // 0 none, 1 left, 2 right
 
 // About a human eye separation, 6-7 cm, if a unit is the 3 cm or so the
-// camera log suggests.
+// camera log suggests. On a monitor the two halves then differ only a
+// little, so F8 also offers five times that, where the difference is plain.
 constexpr float kStereoSeparation = 2.0f;
+constexpr float kStereoExaggerated = 10.0f;
 
-bool g_stereo = false;
+int g_stereo_step = 0;  // 0 off, 1 normal, 2 exaggerated
 
 }  // namespace
 
@@ -52,9 +54,16 @@ void cycle_debug_offset() {
 }
 
 void cycle_stereo() {
-    g_stereo = !g_stereo;
-    RT64_SetStereo(g_stereo ? 1 : 0, kStereoSeparation);
-    std::fprintf(stderr, "[wr64-vr] stereo: %s\n", g_stereo ? "side by side" : "off");
+    g_stereo_step = (g_stereo_step + 1) % 3;
+    const float separation = g_stereo_step == 2 ? kStereoExaggerated : kStereoSeparation;
+    RT64_SetStereo(g_stereo_step != 0 ? 1 : 0, separation);
+    static const char* const kNames[] = { "off", "side by side", "side by side, exaggerated" };
+    if (g_stereo_step == 0) {
+        std::fprintf(stderr, "[wr64-vr] stereo: %s\n", kNames[g_stereo_step]);
+    }
+    else {
+        std::fprintf(stderr, "[wr64-vr] stereo: %s (eyes %.0f units apart)\n", kNames[g_stereo_step], separation);
+    }
     std::fflush(stderr);
 }
 
