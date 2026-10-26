@@ -129,6 +129,11 @@ bool g_copies_ready[2] = { false, false };
 // The camera the last copies were built for, for WR64_WATER_DUMP.
 float g_copy_camera[3] = { 0.0f, 0.0f, 0.0f };
 
+// For each frame buffer, the camera its merged mesh was built for and the
+// mesh's hexagon, for the sky (patches/sky_all_round.cpp).
+struct BuiltFor { float eye[3]; float centre_x, centre_z, radius; };
+BuiltFor g_built_for[2] = {};
+
 uint32_t physical(uint32_t address) { return address & 0x00FFFFFFu; }
 
 float& word_f(uint8_t* rdram, uint32_t address) {
@@ -266,7 +271,7 @@ std::unordered_map<int64_t, LatticePoint> lattice_of(const std::vector<uint8_t>&
     return points;
 }
 
-struct MergeStats { uint32_t points, waves, triangles, loads; int radius; };
+struct MergeStats { uint32_t points, waves, triangles, loads; int radius; float centre_x, centre_z; };
 
 // Merges the game's mesh and the turned builds' into one, written with the
 // list that draws it into the merged area for frame buffer `b`. False when it
@@ -451,6 +456,8 @@ bool merge(uint8_t* rdram, int b, const std::vector<uint8_t> (&meshes)[1 + kTurn
     stats.triangles = uint32_t(triangles.size());
     stats.loads = loads;
     stats.radius = radius;
+    stats.centre_x = float(X0 * kHalfStep);
+    stats.centre_z = float(K0) * kRow;
     return true;
 }
 
@@ -534,6 +541,10 @@ void build_copies(uint8_t* rdram, recomp_context* ctx, uint32_t camera) {
         built = merge(rdram, pool_index, meshes, eye_x, eye_z, stats);
     }
     g_copies_ready[pool_index] = built;
+    if (built) {
+        g_built_for[pool_index] = { { eye_x, word_f(rdram, camera + 0x50), eye_z },
+                                    stats.centre_x, stats.centre_z, float(stats.radius * 2 * kHalfStep) };
+    }
     if (!built) g_copies_ready[pool_index ^ 1] = false;
 
     static bool reported = false;
@@ -623,6 +634,20 @@ bool water_merged(uint32_t segment3, uint32_t* base, uint32_t* list) {
         if (segment3 != kFrameBuffers[b] || !g_copies_ready[b]) continue;
         *base = kMerged + uint32_t(b) * kMergedStride;
         *list = 0x03000000u | kMergedList;
+        return true;
+    }
+    return false;
+}
+
+// For the sky: the camera the merged mesh for the frame buffer that segment 3
+// points at was built for, and the centre and corner distance of its
+// hexagon, whose corners point along +x and every 60 degrees from it.
+bool water_built_for(uint32_t segment3, float eye[3], float* centre_x, float* centre_z, float* radius) {
+    for (int b = 0; b < 2; ++b) {
+        if (segment3 != kFrameBuffers[b] || !g_copies_ready[b]) continue;
+        const BuiltFor& f = g_built_for[b];
+        eye[0] = f.eye[0]; eye[1] = f.eye[1]; eye[2] = f.eye[2];
+        *centre_x = f.centre_x; *centre_z = f.centre_z; *radius = f.radius;
         return true;
     }
     return false;

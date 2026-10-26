@@ -126,6 +126,10 @@ namespace wr64 {
 // segment 3 points at -- the segment base it expects and its list.
 bool water_merged(uint32_t segment3, uint32_t* base, uint32_t* list);
 void water_copy_camera(float* eye_x, float* eye_z, float* heading);
+// patches/sky_all_round.cpp: the sky's three draws rebuilt round the camera,
+// as lists through segment 6 and the segment base they expect.
+struct SkyLists { uint32_t base, floor, gradient, clouds; };
+bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists);
 }
 
 namespace {
@@ -577,6 +581,37 @@ struct Walker {
     enum class SkySection { Before, Open, Done };
     SkySection sky = SkySection::Before;
     bool sky_interp = true;
+
+    // VR: the sky's three draws replaced by the same three round the camera
+    // (patches/sky_all_round.cpp), decided at the first of them: the call of
+    // 0x010103F0 (the water's floor), the gradient's own load of 0x060000E0
+    // at the top level and its call of 0x010103B8, and the call of
+    // 0x01010470 (the clouds). Each replacement is a call of its own list
+    // with segment 6 moved to it for the call.
+    static constexpr uint32_t kSkyFloorList = 0x010103F0;
+    static constexpr uint32_t kSkyGradientVertices = 0x060000E0;
+    static constexpr uint32_t kSkyGradientList = 0x010103B8;
+    static constexpr uint32_t kSkyCloudList = 0x01010470;
+    bool sky_tried = false;
+    bool sky_replaced = false;
+    wr64::SkyLists sky_lists{};
+
+    // Whether a top-level call draws part of the sky, and so was replaced.
+    bool replace_sky_call(uint32_t list) {
+        if (list == kSkyFloorList && !sky_tried) {
+            sky_tried = true;
+            sky_replaced = wr64::sky_all_round(rdram, segments[3], segments[6], &sky_lists);
+        }
+        if (!sky_replaced) return false;
+        const uint32_t own = list == kSkyFloorList ? sky_lists.floor
+                           : list == kSkyGradientList ? sky_lists.gradient
+                           : list == kSkyCloudList ? sky_lists.clouds : 0;
+        if (own == 0) return false;
+        emit((uint32_t(kOpMoveWord) << 24) | ((6u * 4u) << 8) | kMoveWordSegment, sky_lists.base);
+        emit(uint32_t(kOpDisplayList) << 24, own);
+        emit((uint32_t(kOpMoveWord) << 24) | ((6u * 4u) << 8) | kMoveWordSegment, segments[6]);
+        return true;
+    }
 
     // The group both the sky and the water are drawn under, and the one that
     // puts RT64's defaults back afterwards. Only the vertex and
@@ -1827,10 +1862,19 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             break;
         }
 
+        // The sky's gradient is loaded here and drawn by a call; both are
+        // replaced when the sky is (see replace_sky_call).
+        if (op == kOpVtx && w.sky_replaced && w.sky_lists.gradient != 0 && w1 == Walker::kSkyGradientVertices) {
+            continue;
+        }
+
         if (op == kOpDisplayList) {
             const bool branch = ((w0 >> 16) & 0xFF) != 0;
             if (branch) {
                 cursor = w.physical(w1);
+                continue;
+            }
+            if (w.projection_is_perspective && w.replace_sky_call(w1)) {
                 continue;
             }
             // A call under an orthographic projection is a 2D element drawn
@@ -1870,10 +1914,35 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
                         std::fprintf(merged, "camera %f %f %f\n", eye_x, eye_z, heading);
                         std::fprintf(game, "camera %f %f %f\n", eye_x, eye_z, heading);
                         w.dump_water(w1, nullptr, 0, 0, game);
+                        // The sky's three draws: two static lists with their
+                        // own loads, and one whose seven vertices are loaded
+                        // first from segment 6 at 0xE0.
+                        std::fprintf(game, "sky\n");
+                        w.dump_water(0x010103F0, nullptr, 0, 0, game);
+                        const uint32_t band = (w.segments[6] + 0xE0) & 0x00FFFFF8u;
+                        std::fprintf(game, "cmd 04000EEF 060000E0\n");
+                        for (uint32_t i = 0; i < 7; ++i) {
+                            const uint32_t v = band + i * 16;
+                            std::fprintf(game, "v 0 %u %d %d %d %d %d %u %u %u %u\n", i,
+                                         w.signed_half(v), w.signed_half(v + 2), w.signed_half(v + 4),
+                                         w.signed_half(v + 8), w.signed_half(v + 10),
+                                         rdram[(v + 12) ^ 3], rdram[(v + 13) ^ 3], rdram[(v + 14) ^ 3], rdram[(v + 15) ^ 3]);
+                        }
+                        w.dump_water(0x010103B8, nullptr, 0, 0, game);
+                        w.dump_water(0x01010470, nullptr, 0, 0, game);
                         const uint32_t segment3 = w.segments[3];
                         w.segments[3] = merged_base;
                         w.dump_water(merged_list, nullptr, 0, 0, merged);
                         w.segments[3] = segment3;
+                        if (w.sky_replaced) {
+                            const uint32_t segment6 = w.segments[6];
+                            w.segments[6] = w.sky_lists.base;
+                            std::fprintf(merged, "sky\n");
+                            w.dump_water(w.sky_lists.floor, nullptr, 0, 0, merged);
+                            w.dump_water(w.sky_lists.gradient, nullptr, 0, 0, merged);
+                            w.dump_water(w.sky_lists.clouds, nullptr, 0, 0, merged);
+                            w.segments[6] = segment6;
+                        }
                         std::fprintf(stderr, "[wr64-water] dumped the water meshes to %s\n", dump_path);
                     }
                     if (merged != nullptr) std::fclose(merged);

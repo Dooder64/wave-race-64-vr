@@ -74,7 +74,6 @@ peak is logged in VR mode.
 ## Not yet
 
 - The lists at about 100 degrees (`0x080617F0`-) are left out somewhere else.
-- The sky is built only in front of the camera.
 
 ## The water all round
 
@@ -96,3 +95,17 @@ its neighbours' waves, and the modern water renderer saw four surfaces.
 `WR64_WATER_DUMP=<file>` (with `WR64_WATER_DUMP_AT=<frames>`, 300 by default)
 writes one frame's merged mesh to the file and the game's own to `<file>.game`,
 as display-list commands and vertices.
+
+## The sky all round
+
+What a race draws as its sky is three fans of six triangles in the structure
+segment 6 points at, placed on the wave patch ahead of the camera: the floor
+seen through the translucent water (+0x000, list `0x010103F0`), the gradient,
+a tent from a high point down to the same hexagon (+0x0E0, loaded at the top
+level, drawn by `0x010103B8`), and the clouds at height 400 (+0x1C0,
+`0x01010470`). `patches/sky_all_round.cpp` replaces all three each frame with
+the same centred on the camera, read from the game's own: texture coordinates
+and the clouds' fade as they are, the gradient as the tent looks straight
+ahead, swept round. Two things learned: the game culls faces turned away, and
+does not clear the screen behind the sky, so a hole shows the last frame; and
+it reads parts of that structure back, so it must not be written.
