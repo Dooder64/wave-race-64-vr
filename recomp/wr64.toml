@@ -117,3 +117,54 @@ ignored = [
     # in place before the call returns rather than after a queue wait.
     "game_dma_copy"
 ]
+
+# VR: draw objects all round the camera, and farther.
+#
+# func_8006E674 decides, every frame, which course objects are drawn. For each
+# of three groups -- visibility in D_801C0840, D_801C08C0 and D_801C0AC0, read
+# only by drawing code -- it leaves out an object farther than a distance from
+# the course's settings, or off to the side of the camera's heading: cosine
+# above 0.5 (60 degrees) for the first two groups, above 0 (90 degrees) for
+# the third. A flat screen never sees past that; a headset looks everywhere.
+#
+# These hooks put a line before the instructions that decide it, so nothing
+# generated is edited by hand. Each asks the port (src/vr.cpp) whether VR wants
+# objects all round, and only then changes anything: the direction tests are
+# made to pass, and the distances the groups fade out between are scaled. The
+# registers changed are written again before anything else reads them, which
+# was checked in the generated code. See docs/VR-CULLING.md.
+
+# The fade-start and cut-off distances, s1 and s2, loaded at 0x8006E9A4 and in
+# the delay slot at 0x8006E9AC and used by all three groups. They are read
+# again from the course settings rather than scaled in place, because the
+# second hook also runs after the first when the first group has objects.
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006E9B0
+text = '{ extern int wr64_vr_draw_distance(int value); int settings = MEM_W(0, (int32_t)0x801C0C80); ctx->r17 = (int32_t)wr64_vr_draw_distance(MEM_W(0xA0, settings)); ctx->r18 = (int32_t)wr64_vr_draw_distance(MEM_W(0xA4, settings)); }'
+
+# Where the branch skipping an empty first group lands.
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006EBC0
+text = '{ extern int wr64_vr_draw_distance(int value); int settings = MEM_W(0, (int32_t)0x801C0C80); ctx->r17 = (int32_t)wr64_vr_draw_distance(MEM_W(0xA0, settings)); ctx->r18 = (int32_t)wr64_vr_draw_distance(MEM_W(0xA4, settings)); }'
+
+# First group: c.lt.s $f10, $f8 -- 0.5 < cosine. The threshold goes below any
+# cosine.
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006EAF4
+text = '{ extern int wr64_vr_all_round(void); if (wr64_vr_all_round()) ctx->f10.fl = -2.0f; }'
+
+# Second group: c.lt.s $f8, $f4 -- 0.5 < cosine.
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006ECA4
+text = '{ extern int wr64_vr_all_round(void); if (wr64_vr_all_round()) ctx->f8.fl = -2.0f; }'
+
+# Third group: c.lt.s $f24, $f4 -- 0 < cosine. $f24 holds zero for the rest of
+# the function, so the cosine is raised instead.
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006EDFC
+text = '{ extern int wr64_vr_all_round(void); if (wr64_vr_all_round()) ctx->f4.fl = 2.0f; }'

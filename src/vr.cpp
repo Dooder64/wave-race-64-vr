@@ -15,10 +15,17 @@
 // uses: RT64 renders each displayed frame twice, the camera moved half the
 // separation left for the left half and right for the right. F8 steps it
 // through off, a human eye separation, and an exaggerated one.
+//
+// A headset also looks where the flat game never needed to draw. The game
+// leaves objects out that are off to the side of its camera or far away
+// (func_8006E674; docs/VR-CULLING.md); recompiler hooks in recomp/wr64.toml
+// ask this file whether to draw them all round, and how much farther.
 
 #include "wr64/vr.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 extern "C" void RT64_SetViewOffset(float x, float y, float z);
 extern "C" void RT64_SetStereo(int mode, float separation);
@@ -82,4 +89,45 @@ void shutdown() {}
 void recenter() {}
 #endif
 
+bool all_round() {
+    // VR mode, or WR64_CULL_ALL_ROUND=1 to see it without a headset.
+    static const bool on = [] {
+        const char* value = std::getenv("WR64_CULL_ALL_ROUND");
+        const bool forced = value != nullptr && std::strcmp(value, "1") == 0;
+        const bool result = forced || enabled();
+        if (result) {
+            std::fprintf(stderr, "[wr64-vr] objects are drawn all round the camera\n");
+            std::fflush(stderr);
+        }
+        return result;
+    }();
+    return on;
+}
+
+float draw_distance() {
+    // How much farther than the course asks objects are drawn before they have
+    // faded out; WR64_VR_DRAW_DISTANCE overrides it.
+    static const float factor = [] {
+        if (!all_round()) return 1.0f;
+        const char* value = std::getenv("WR64_VR_DRAW_DISTANCE");
+        const float parsed = value != nullptr ? float(std::atof(value)) : 0.0f;
+        const float result = parsed > 0.0f ? parsed : 2.0f;
+        std::fprintf(stderr, "[wr64-vr] objects are drawn %.1f times as far\n", result);
+        std::fflush(stderr);
+        return result;
+    }();
+    return factor;
+}
+
 }  // namespace wr64::vr
+
+// Called from the recompiler hooks in recomp/wr64.toml, from generated C, so
+// with C linkage and C types.
+extern "C" int wr64_vr_all_round(void) {
+    return wr64::vr::all_round() ? 1 : 0;
+}
+
+extern "C" int wr64_vr_draw_distance(int value) {
+    const float factor = wr64::vr::draw_distance();
+    return factor == 1.0f ? value : int(float(value) * factor);
+}

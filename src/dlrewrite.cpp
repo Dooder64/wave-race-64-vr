@@ -2008,6 +2008,30 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
         std::fflush(stderr);
     }
 
+    // Drawing objects all round the camera (wr64::vr::all_round) uses more of
+    // the game's per-frame matrices, of which there is room for 454: the Mtx
+    // array at 0x4140 of the frame's buffer runs up to the LookAt at 0xB2C0.
+    // D_801AE950 is how many this frame took by the time its list is handed
+    // over. The peak is reported every twenty seconds or so, and as a warning
+    // the first time it comes close.
+    if (wr64::vr::all_round()) {
+        static int32_t peak = 0;
+        static uint32_t matrix_lists = 0;
+        static bool warned = false;
+        const int32_t used = *reinterpret_cast<const int32_t*>(rdram + 0x1AE950);
+        peak = std::max(peak, used);
+        if (!warned && used >= 400) {
+            warned = true;
+            std::fprintf(stderr, "[wr64-vr] WARNING: a frame used %d of the game's 454 matrices;"
+                                 " lower WR64_VR_DRAW_DISTANCE if objects misbehave\n", used);
+            std::fflush(stderr);
+        }
+        if (++matrix_lists % 600 == 0) {
+            std::fprintf(stderr, "[wr64-vr] most matrices a frame has used: %d of 454\n", peak);
+            std::fflush(stderr);
+        }
+    }
+
     // One race list in thirty is about once a second at the game's 30 Hz.
     static const bool camera_log = std::getenv("WR64_CAMERA_LOG") != nullptr;
     static uint32_t camera_lists = 0;

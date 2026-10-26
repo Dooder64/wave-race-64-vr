@@ -42,4 +42,12 @@ void shutdown();
 // F6: straight ahead becomes the way the head faces now, from where it is.
 void recenter();
 
+// Whether the game draws objects all round its camera rather than only those
+// a flat screen would show: in VR mode, or with WR64_CULL_ALL_ROUND=1.
+bool all_round();
+
+// How many times farther than the course's own distances objects are drawn
+// when they are drawn all round (WR64_VR_DRAW_DISTANCE, 2 by default).
+float draw_distance();
+
 }  // namespace wr64::vr
