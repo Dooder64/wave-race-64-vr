@@ -87,7 +87,9 @@
 // screens that are not races.
 //
 // WR64_CAMERA_LOG=1 prints the race camera's position, direction and lens
-// about once a second; see log_camera.
+// about once a second; see log_camera. WR64_CULL_SURVEY=1 reports in which
+// directions from the camera, and how far, a race draws anything; see the
+// cull survey.
 //
 // 5. VR mode (WR64_VR=1) opens the world's scissor. The game draws its 3D
 // inside (8, 20)-(311, 219) and leaves the rest of its framebuffer black for a
@@ -1354,6 +1356,297 @@ void trace_3d(uint8_t* rdram, uint32_t list_vaddr, uint32_t state) {
     }
 }
 
+// ---- the cull survey ---------------------------------------------------
+//
+// Diagnosis only: WR64_CULL_SURVEY=1 measures what the game chooses to draw
+// in a race, so the rules it uses to leave things out can be read off rather
+// than guessed. A headset sees all round, while the game draws only what its
+// flat camera would show; making it draw the rest starts with knowing where
+// that boundary is.
+//
+// Every race frame is walked in full, calls followed, as the 3D trace walks
+// it. Each block of vertices drawn has its centre taken into the camera's
+// space -- the world is drawn under the model matrices and the camera rides
+// on the projection stack, so modelview gives world space and the camera
+// matrix the rest -- and is filed by its direction from the camera's heading
+// (yaw, left negative) and its distance. Water (segment 3), sky (segment 6)
+// and everything else are counted apart. Every twenty seconds of racing, and
+// when a race ends, the totals so far are printed: in which directions
+// anything was ever drawn, and how far away.
+struct Surveyor {
+    uint8_t* rdram = nullptr;
+    uint32_t segments[16] = {};
+    Mat4 projection_only = Mat4::identity();
+    bool projection_perspective = false;
+    bool have_camera = false;
+    Mat4 camera = Mat4::identity();
+    Mat4 modelview[16];
+    int modelview_depth = 0;
+
+    struct Category {
+        static constexpr int kBins = 36;    // ten degrees each, from -180
+        uint64_t count[kBins] = {};
+        float farthest[kBins] = {};
+        uint64_t total = 0;
+        float farthest_overall = 0.0f;
+        // A block filed again by its vertex nearest the camera's heading, in
+        // ten-degree steps from 0 to 180 either side: a large block whose
+        // centre is behind can still reach into view, and a game that keeps
+        // whatever reaches into view keeps nothing past some angle here.
+        static constexpr int kNearestBins = 18;
+        uint64_t nearest[kNearestBins] = {};
+    };
+    Category* scene = nullptr;
+    Category* water = nullptr;
+    Category* sky = nullptr;
+
+    // Per drawing list the frame calls, by its address: how often it was
+    // drawn, and the widest angle off the camera's heading -- of its corner
+    // nearest the heading -- at which it still was. An object the game leaves
+    // out when it is outside the view tops out near the view's edge; one that
+    // is always drawn reaches round behind. The address is also a constant in
+    // the code that draws it, which leads to the test that decides.
+    struct ListStats {
+        uint64_t draws = 0;
+        float widest = 0.0f;
+        float farthest = 0.0f;
+    };
+    std::unordered_map<uint32_t, ListStats>* lists = nullptr;
+    uint32_t current_list = 0;
+    float current_nearest = 180.0f;
+    float current_farthest = 0.0f;
+    bool current_drawn = false;
+
+    Surveyor() { modelview[0] = Mat4::identity(); }
+
+    uint32_t physical(uint32_t segmented) const {
+        return (segments[(segmented >> 24) & 0xF] + (segmented & 0x00FFFFFFu)) & 0x00FFFFF8u;
+    }
+    const uint32_t* words(uint32_t addr) const {
+        return reinterpret_cast<const uint32_t*>(rdram + (addr & 0x00FFFFFFu));
+    }
+    int16_t signed_half(uint32_t addr) const {
+        return static_cast<int16_t>(*reinterpret_cast<const uint16_t*>(rdram + ((addr & 0x00FFFFFFu) ^ 2)));
+    }
+    Mat4 read_matrix(uint32_t addr) const {
+        Mat4 r{};
+        for (int i = 0; i < 16; ++i) {
+            const uint32_t full = (uint32_t(static_cast<uint16_t>(signed_half(addr + 2 * i))) << 16) |
+                                  static_cast<uint16_t>(signed_half(addr + 32 + 2 * i));
+            r.m[i / 4][i % 4] = static_cast<float>(static_cast<int32_t>(full)) / 65536.0f;
+        }
+        return r;
+    }
+
+    void record(uint32_t segmented, uint32_t count) {
+        if (!have_camera || count == 0) return;
+        const uint32_t addr = physical(segmented);
+        float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+        const uint32_t n = std::min<uint32_t>(count, 64);
+        for (uint32_t i = 0; i < n; ++i) {
+            sx += signed_half(addr + i * 16 + 0);
+            sy += signed_half(addr + i * 16 + 2);
+            sz += signed_half(addr + i * 16 + 4);
+        }
+        sx /= float(n); sy /= float(n); sz /= float(n);
+        const Mat4& mv = modelview[modelview_depth];
+        const Mat4& c = camera;
+        // A point of the block's model space in the camera's space, and its
+        // direction from the camera's heading.
+        auto to_camera = [&](float x, float y, float z, float out[3]) {
+            const float wx = x * mv.m[0][0] + y * mv.m[1][0] + z * mv.m[2][0] + mv.m[3][0];
+            const float wy = x * mv.m[0][1] + y * mv.m[1][1] + z * mv.m[2][1] + mv.m[3][1];
+            const float wz = x * mv.m[0][2] + y * mv.m[1][2] + z * mv.m[2][2] + mv.m[3][2];
+            out[0] = wx * c.m[0][0] + wy * c.m[1][0] + wz * c.m[2][0] + c.m[3][0];
+            out[1] = wx * c.m[0][1] + wy * c.m[1][1] + wz * c.m[2][1] + c.m[3][1];
+            out[2] = wx * c.m[0][2] + wy * c.m[1][2] + wz * c.m[2][2] + c.m[3][2];
+        };
+        float nearest_yaw = 180.0f;
+        for (uint32_t i = 0; i < n; ++i) {
+            float p[3];
+            to_camera(signed_half(addr + i * 16 + 0), signed_half(addr + i * 16 + 2), signed_half(addr + i * 16 + 4), p);
+            nearest_yaw = std::min(nearest_yaw, std::fabs(std::atan2(p[0], -p[2]) * 57.2957795f));
+        }
+        float v[3];
+        to_camera(sx, sy, sz, v);
+        const float vx = v[0], vy = v[1], vz = v[2];
+        const float distance = std::sqrt(vx * vx + vy * vy + vz * vz);
+        const float yaw = std::atan2(vx, -vz) * 57.2957795f;
+        int bin = int(std::floor((yaw + 180.0f) / 10.0f));
+        bin = std::max(0, std::min(Category::kBins - 1, bin));
+
+        const uint32_t segment = (segmented >> 24) & 0xF;
+        if (segment != 3 && segment != 6) {
+            current_drawn = true;
+            current_nearest = std::min(current_nearest, nearest_yaw);
+            current_farthest = std::max(current_farthest, distance);
+        }
+        Category* cat = segment == 3 ? water : segment == 6 ? sky : scene;
+        cat->count[bin]++;
+        cat->farthest[bin] = std::max(cat->farthest[bin], distance);
+        cat->nearest[std::min(Category::kNearestBins - 1, int(nearest_yaw / 10.0f))]++;
+        cat->total++;
+        cat->farthest_overall = std::max(cat->farthest_overall, distance);
+    }
+
+    void walk(uint32_t cursor, int depth) {
+        for (uint32_t steps = 0; steps < 8192; ++steps) {
+            const uint32_t* cmd = words(cursor);
+            const uint32_t w0 = cmd[0];
+            const uint32_t w1 = cmd[1];
+            const uint8_t op = static_cast<uint8_t>(w0 >> 24);
+            cursor += 8;
+            switch (op) {
+                case kOpEndDisplayList:
+                    return;
+                case kOpDisplayList: {
+                    if (((w0 >> 16) & 0xFF) != 0) { cursor = physical(w1); continue; }
+                    if (depth < 6) {
+                        // A list the frame itself calls is one object, whatever
+                        // it calls in turn.
+                        if (depth == 0) {
+                            current_list = w1;
+                            current_nearest = 180.0f;
+                            current_farthest = 0.0f;
+                            current_drawn = false;
+                        }
+                        const int saved = modelview_depth;
+                        walk(physical(w1), depth + 1);
+                        modelview_depth = saved;
+                        if (depth == 0 && current_drawn && lists != nullptr) {
+                            ListStats& stats = (*lists)[current_list];
+                            stats.draws++;
+                            stats.widest = std::max(stats.widest, current_nearest);
+                            stats.farthest = std::max(stats.farthest, current_farthest);
+                        }
+                    }
+                    continue;
+                }
+                case kOpMoveWord:
+                    if ((w0 & 0xFF) == kMoveWordSegment) segments[(w0 >> 10) & 0xF] = w1 & 0x00FFFFFFu;
+                    continue;
+                case kOpPopMtx:
+                    if (modelview_depth > 0) --modelview_depth;
+                    continue;
+                case kOpMtx: {
+                    const uint32_t params = (w0 >> 16) & 0xFF;
+                    const Mat4 loaded = read_matrix(physical(w1));
+                    if (params & kMtxProjection) {
+                        if (params & kMtxLoad) {
+                            projection_only = loaded;
+                        }
+                        else if (Walker::affine(loaded)) {
+                            if (!have_camera && projection_perspective && !Walker::identity(loaded)) {
+                                have_camera = true;
+                                camera = loaded;
+                            }
+                        }
+                        else {
+                            projection_only = loaded * projection_only;
+                        }
+                        projection_perspective = Walker::perspective(projection_only);
+                        continue;
+                    }
+                    if ((params & kMtxPush) && modelview_depth < 15) {
+                        modelview[modelview_depth + 1] = modelview[modelview_depth];
+                        ++modelview_depth;
+                    }
+                    modelview[modelview_depth] = (params & kMtxLoad) ? loaded : loaded * modelview[modelview_depth];
+                    continue;
+                }
+                case kOpVtx:
+                    if (projection_perspective) record(w1, (w0 >> 9) & 0x7F);
+                    continue;
+                default:
+                    continue;
+            }
+        }
+    }
+};
+
+void print_survey(const char* name, const Surveyor::Category& cat) {
+    if (cat.total == 0) {
+        std::fprintf(stderr, "[wr64-cull] %s: nothing drawn\n", name);
+        return;
+    }
+    int first = -1, last = -1;
+    for (int b = 0; b < Surveyor::Category::kBins; ++b) {
+        if (cat.count[b] != 0) {
+            if (first < 0) first = b;
+            last = b;
+        }
+    }
+    std::fprintf(stderr, "[wr64-cull] %s: %llu blocks, drawn between %d and %d degrees of the camera's heading,"
+                         " as far as %.0f units\n",
+                 name, static_cast<unsigned long long>(cat.total), first * 10 - 180, last * 10 - 170,
+                 cat.farthest_overall);
+    std::string line;
+    for (int b = 0; b < Surveyor::Category::kBins; ++b) {
+        if (cat.count[b] == 0) continue;
+        char cell[48];
+        std::snprintf(cell, sizeof(cell), " %+d:%llu/%.0f", b * 10 - 180,
+                      static_cast<unsigned long long>(cat.count[b]), cat.farthest[b]);
+        line += cell;
+    }
+    std::fprintf(stderr, "[wr64-cull]   by direction (degrees:blocks/farthest):%s\n", line.c_str());
+    line.clear();
+    for (int b = 0; b < Surveyor::Category::kNearestBins; ++b) {
+        if (cat.nearest[b] == 0) continue;
+        char cell[32];
+        std::snprintf(cell, sizeof(cell), " %d:%llu", b * 10, static_cast<unsigned long long>(cat.nearest[b]));
+        line += cell;
+    }
+    std::fprintf(stderr, "[wr64-cull]   by nearest corner's angle off heading (degrees:blocks):%s\n", line.c_str());
+}
+
+void survey_frame(uint8_t* rdram, uint32_t list_vaddr, uint32_t state) {
+    static const bool enabled = std::getenv("WR64_CULL_SURVEY") != nullptr;
+    if (!enabled) return;
+    static Surveyor::Category scene, water, sky;
+    static std::unordered_map<uint32_t, Surveyor::ListStats> lists;
+    static uint64_t frames = 0;
+    static bool was_racing = false;
+
+    auto report = [&](const char* why) {
+        std::fprintf(stderr, "[wr64-cull] ---- %s: %llu race frames surveyed ----\n", why,
+                     static_cast<unsigned long long>(frames));
+        print_survey("scenery", scene);
+        print_survey("water", water);
+        print_survey("sky", sky);
+        // The lists drawn most, each with the widest angle off the heading it
+        // was ever drawn at; those that never pass the view's edge are the
+        // ones the game leaves out.
+        std::vector<std::pair<uint32_t, Surveyor::ListStats>> sorted(lists.begin(), lists.end());
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const auto& a, const auto& b) { return a.second.draws > b.second.draws; });
+        std::fprintf(stderr, "[wr64-cull] %zu drawing lists; the 40 drawn most (address: draws, widest angle"
+                             " drawn at, farthest):\n", sorted.size());
+        for (size_t i = 0; i < sorted.size() && i < 40; ++i) {
+            std::fprintf(stderr, "[wr64-cull]   0x%08X: %llu, %.0f deg, %.0f\n", sorted[i].first,
+                         static_cast<unsigned long long>(sorted[i].second.draws), sorted[i].second.widest,
+                         sorted[i].second.farthest);
+        }
+        std::fflush(stderr);
+    };
+
+    const bool is_racing = racing(state);
+    if (!is_racing) {
+        if (was_racing && frames > 0) report("race ended");
+        was_racing = false;
+        return;
+    }
+    was_racing = true;
+
+    Surveyor s{};
+    s.rdram = rdram;
+    s.scene = &scene;
+    s.water = &water;
+    s.sky = &sky;
+    s.lists = &lists;
+    s.walk(list_vaddr & 0x00FFFFFFu, 0);
+    if (s.have_camera && ++frames % 600 == 0) report("so far");
+}
+
 // ---- the camera log ----------------------------------------------------
 //
 // Diagnosis only: WR64_CAMERA_LOG=1 prints, about once a second of racing,
@@ -1421,6 +1714,7 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
 
     wr64::water::begin_frame(list_vaddr);
     trace_3d(rdram, list_vaddr, state);
+    survey_frame(rdram, list_vaddr, state);
 
     Walker w{};
     w.rdram = rdram;
