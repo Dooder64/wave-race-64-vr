@@ -29,6 +29,19 @@
 // with. The projection layer is placed in the seated space, and the
 // compositor corrects for the head's movement since. F6 recentres.
 //
+// What the game draws flat -- a race's HUD, the title's lettering, a menu's
+// labels -- cannot be stretched over each eye's view with the rest, since
+// the eyes' lenses look in different directions and the two copies would
+// never line up. In a frame with a 3D scene RT64 moves it onto a panel,
+// WR64_VR_HUD_DISTANCE metres ahead and WR64_VR_HUD_WIDTH wide, placed in
+// each eye as that eye sees it. The panel stays in front of the eyes as the
+// head turns; WR64_VR_HUD_FIXED=1 hangs it straight ahead of the seated
+// position instead, where the game's camera looks. A frame with nothing drawn
+// through the lens -- a menu with no 3D behind it -- RT64 draws onto a third
+// image instead, which is hung in front of the seated position as a flat
+// screen (a quad layer), WR64_VR_SCREEN_DISTANCE metres away and
+// WR64_VR_SCREEN_WIDTH wide; the headset draws it for each eye itself.
+//
 // tools/xr_test is the same path stripped of the game, for when something
 // here does not work and the question is whether it is the headset.
 
@@ -65,10 +78,12 @@ struct RT64_XrEye {
 
 struct RT64_XrFrame {
     RT64_XrEye eyes[2];
+    RT64_XrEye screen;
     int writeRaw;
 };
 
 typedef int (*RT64_XrBeginFrame)(void* user, RT64_XrFrame* frame);
+// rendered: 0 nothing, 1 the eyes, 2 the flat screen.
 typedef void (*RT64_XrEndFrame)(void* user, int rendered, uint64_t headTag);
 }  // namespace RT64
 
@@ -78,6 +93,8 @@ extern "C" void RT64_SetXrRenderHeight(uint32_t height);
 extern "C" void RT64_SetXrLens(int active, const float* angles);
 extern "C" void RT64_SetXrHead(int active, const float* eyes, uint64_t tag);
 extern "C" void RT64_SetStereo(int mode, float separation);
+extern "C" void RT64_SetXrPanel(float distance, float width, float separation, int followHead);
+extern "C" void RT64_SetXrFramed(float scale, float x, float y);
 
 namespace wr64::vr {
 
@@ -113,12 +130,54 @@ struct Eye {
     uint32_t acquired = 0;
 };
 
+// The flat screen's image: the game's 4:3, about as many pixels across as
+// the screen covers of an eye's.
+constexpr uint32_t kScreenWidth = 1920;
+constexpr uint32_t kScreenHeight = 1440;
+
+float setting(const char* name, float fallback) {
+    const char* value = std::getenv(name);
+    const float parsed = value != nullptr ? float(std::atof(value)) : 0.0f;
+    return parsed > 0.0f ? parsed : fallback;
+}
+
+float screen_distance() {
+    static const float distance = setting("WR64_VR_SCREEN_DISTANCE", 2.5f);
+    return distance;
+}
+
+float screen_width() {
+    static const float width = setting("WR64_VR_SCREEN_WIDTH", 2.0f);
+    return width;
+}
+
+// The panel a frame's flat elements are drawn on in front of the eyes.
+float hud_distance() {
+    static const float distance = setting("WR64_VR_HUD_DISTANCE", 2.0f);
+    return distance;
+}
+
+float hud_width() {
+    static const float width = setting("WR64_VR_HUD_WIDTH", 1.6f);
+    return width;
+}
+
+// Framed 3D -- a model a menu turns in a box of its own, such as a jet ski
+// on the selection screens -- stays in its box on the panel; WR64_VR_FRAMED_SCALE,
+// WR64_VR_FRAMED_X and WR64_VR_FRAMED_Y scale and move it within the box, in
+// the panel's own -1 to 1 (so 1 is the panel's whole half-width).
+float signed_setting(const char* name, float fallback) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? float(std::atof(value)) : fallback;
+}
+
 XrInstance g_instance = XR_NULL_HANDLE;
 XrSystemId g_system = XR_NULL_SYSTEM_ID;
 XrSession g_session = XR_NULL_HANDLE;
 XrSpace g_local = XR_NULL_HANDLE;
 XrSpace g_head = XR_NULL_HANDLE;
 Eye g_eyes[2];
+Eye g_screen;
 bool g_write_raw = false;
 
 // Every OpenXR call after attach is made under this lock: by the present
@@ -142,9 +201,13 @@ TaggedViews g_pose_history[kPoseHistory];
 uint64_t g_next_tag = 1;
 std::atomic<bool> g_recenter_requested{ false };
 XrVector3f g_centre_position{ 0.0f, 0.0f, 0.0f };
-float g_centre_yaw = 0.0f;
+// WR64_VR_TEST_YAW turns straight ahead that many degrees to the left, as if
+// the head were turned right by it -- for checking, with the headset still,
+// what stays put in the seated space and what follows the head.
+float g_centre_yaw = float(std::atof(std::getenv("WR64_VR_TEST_YAW") ? std::getenv("WR64_VR_TEST_YAW") : "0")) * 0.0174532925f;
 uint64_t g_frames = 0;
 uint64_t g_drawn = 0;
+uint64_t g_screen_frames = 0;
 std::chrono::steady_clock::time_point g_last_report;
 
 bool ok(XrResult result, const char* what) {
@@ -171,9 +234,9 @@ const char* state_name(XrSessionState state) {
 }
 
 void destroy() {
-    for (Eye& eye : g_eyes) {
-        if (eye.swapchain != XR_NULL_HANDLE) xrDestroySwapchain(eye.swapchain);
-        eye = Eye{};
+    for (Eye* eye : { &g_eyes[0], &g_eyes[1], &g_screen }) {
+        if (eye->swapchain != XR_NULL_HANDLE) xrDestroySwapchain(eye->swapchain);
+        *eye = Eye{};
     }
     if (g_head != XR_NULL_HANDLE) xrDestroySpace(g_head);
     if (g_local != XR_NULL_HANDLE) xrDestroySpace(g_local);
@@ -362,6 +425,17 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
         g_views[1].fov.angleLeft, g_views[1].fov.angleRight, g_views[1].fov.angleUp, g_views[1].fov.angleDown,
     };
     RT64_SetXrLens(1, angles);
+    const float sx = g_views[1].pose.position.x - g_views[0].pose.position.x;
+    const float sy = g_views[1].pose.position.y - g_views[0].pose.position.y;
+    const float sz = g_views[1].pose.position.z - g_views[0].pose.position.z;
+    static const bool hud_follows = std::getenv("WR64_VR_HUD_FIXED") == nullptr;
+    const float scale = world_scale();
+    RT64_SetXrPanel(hud_distance() * scale, hud_width() * scale, std::sqrt(sx * sx + sy * sy + sz * sz) * scale,
+                    hud_follows ? 1 : 0);
+    static const float framed_scale = setting("WR64_VR_FRAMED_SCALE", 1.0f);
+    static const float framed_x = signed_setting("WR64_VR_FRAMED_X", 0.0f);
+    static const float framed_y = signed_setting("WR64_VR_FRAMED_Y", 0.0f);
+    RT64_SetXrFramed(framed_scale, framed_x, framed_y);
     if (!g_lens_reported) {
         g_lens_reported = true;
         constexpr float kDegrees = 57.2957795f;
@@ -382,6 +456,13 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
         frame->eyes[e].width = eye.width;
         frame->eyes[e].height = eye.height;
     }
+    xrAcquireSwapchainImage(g_screen.swapchain, nullptr, &g_screen.acquired);
+    XrSwapchainImageWaitInfo screen_wait{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    screen_wait.timeout = XR_INFINITE_DURATION;
+    xrWaitSwapchainImage(g_screen.swapchain, &screen_wait);
+    frame->screen.resource = g_screen.images[g_screen.acquired].texture;
+    frame->screen.width = g_screen.width;
+    frame->screen.height = g_screen.height;
     frame->writeRaw = g_write_raw ? 1 : 0;
     g_images_acquired = true;
     return 1;
@@ -394,8 +475,8 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
 // movement since; a tag no longer remembered falls back to this frame's.
 void end_frame(void*, int rendered, uint64_t head_tag) {
     if (g_images_acquired) {
-        for (Eye& eye : g_eyes) {
-            xrReleaseSwapchainImage(eye.swapchain, nullptr);
+        for (Eye* eye : { &g_eyes[0], &g_eyes[1], &g_screen }) {
+            xrReleaseSwapchainImage(eye->swapchain, nullptr);
         }
     }
 
@@ -417,7 +498,36 @@ void end_frame(void*, int rendered, uint64_t head_tag) {
     layer.space = g_local;
     layer.viewCount = 2;
     layer.views = views;
-    const XrCompositionLayerBaseHeader* layers[] = { reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer) };
+
+    // The flat screen: straight ahead of the seated position, at its height,
+    // facing it, so it stays where it hangs as the head moves.
+    XrCompositionLayerQuad screen{ XR_TYPE_COMPOSITION_LAYER_QUAD };
+    screen.space = g_local;
+    screen.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    screen.subImage.swapchain = g_screen.swapchain;
+    screen.subImage.imageRect.extent = { int32_t(g_screen.width), int32_t(g_screen.height) };
+    const float distance = screen_distance();
+    screen.pose.orientation = { 0.0f, std::sin(0.5f * g_centre_yaw), 0.0f, std::cos(0.5f * g_centre_yaw) };
+    screen.pose.position = { g_centre_position.x - distance * std::sin(g_centre_yaw), g_centre_position.y,
+                             g_centre_position.z - distance * std::cos(g_centre_yaw) };
+    screen.size = { screen_width(), screen_width() * float(g_screen.height) / float(g_screen.width) };
+
+    const XrCompositionLayerBaseHeader* layers[] = {
+        rendered == 2 ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&screen)
+                      : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer) };
+    static int last_rendered = 0;
+    if (rendered != 0 && rendered != last_rendered) {
+        last_rendered = rendered;
+        if (rendered == 2) {
+            std::fprintf(stderr, "[wr64-vr] frames go to the flat screen, %.1f m away and %.1f m wide\n",
+                         distance, screen.size.width);
+        }
+        else {
+            std::fprintf(stderr, "[wr64-vr] frames go to the eyes, flat elements on a panel %.1f m away and %.1f m wide\n",
+                         hud_distance(), hud_width());
+        }
+        std::fflush(stderr);
+    }
 
     const bool submit = g_images_acquired && rendered != 0;
     XrFrameEndInfo end{ XR_TYPE_FRAME_END_INFO };
@@ -430,17 +540,19 @@ void end_frame(void*, int rendered, uint64_t head_tag) {
 
     ++g_frames;
     if (submit) ++g_drawn;
+    if (submit && rendered == 2) ++g_screen_frames;
     const auto now = std::chrono::steady_clock::now();
     if (now - g_last_report >= std::chrono::seconds(2)) {
         const double interval = std::chrono::duration<double>(now - g_last_report).count();
         if (g_last_report.time_since_epoch().count() != 0) {
-            std::fprintf(stderr, "[wr64-vr] %.0f headset frames a second, %.0f of them drawn\n",
-                         double(g_frames) / interval, double(g_drawn) / interval);
+            std::fprintf(stderr, "[wr64-vr] %.0f headset frames a second, %.0f of them drawn, %.0f on the flat screen\n",
+                         double(g_frames) / interval, double(g_drawn) / interval, double(g_screen_frames) / interval);
             std::fflush(stderr);
         }
         g_last_report = now;
         g_frames = 0;
         g_drawn = 0;
+        g_screen_frames = 0;
     }
 
     g_mutex.unlock();
@@ -496,6 +608,26 @@ bool create_swapchains() {
         eye.images.assign(count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR });
         xrEnumerateSwapchainImages(eye.swapchain, count, &count,
                                    reinterpret_cast<XrSwapchainImageBaseHeader*>(eye.images.data()));
+    }
+
+    {
+        g_screen.width = kScreenWidth;
+        g_screen.height = kScreenHeight;
+        XrSwapchainCreateInfo info{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
+        info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+        info.format = format;
+        info.sampleCount = 1;
+        info.width = g_screen.width;
+        info.height = g_screen.height;
+        info.faceCount = 1;
+        info.arraySize = 1;
+        info.mipCount = 1;
+        if (!ok(xrCreateSwapchain(g_session, &info, &g_screen.swapchain), "xrCreateSwapchain (screen)")) return false;
+        uint32_t count = 0;
+        xrEnumerateSwapchainImages(g_screen.swapchain, 0, &count, nullptr);
+        g_screen.images.assign(count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR });
+        xrEnumerateSwapchainImages(g_screen.swapchain, count, &count,
+                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(g_screen.images.data()));
     }
 
     const DXGI_FORMAT made = g_eyes[0].images[0].texture->GetDesc().Format;

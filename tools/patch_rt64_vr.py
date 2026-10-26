@@ -67,6 +67,22 @@ when the frame is submitted -- so the headset is told the pose each frame
 was really rendered with, and its compositor can correct for the head's
 movement since.
 
+What a frame draws flat -- a race's HUD, the title's lettering over its 3D
+backdrop, a menu's labels -- cannot be stretched over each eye's view like
+the rest: the eyes' lenses look different ways, and the two copies would
+never line up. In a frame that put a scene through the lens, everything
+drawn flat (orthographic projections, a menu's 3D laid out in a box of its
+own, and screen rectangles with their scissors) is moved onto a panel of the
+frame's shape (RT64_SetXrPanel), hung straight ahead of the seated position
+-- where the game's camera looks -- and placed in each eye as that eye sees
+it, so the two agree and the panel stays put as the head turns; or, if the
+port asks, kept in front of the eyes. A frame that put nothing
+through the lens -- a menu with nothing 3D behind it -- is not shown to the
+eyes at all: the workload queue notes which frames these are, and the
+present queue draws such a frame, as the left eye was drawn, onto a third
+image the port supplies, which it hangs in front of the player as a flat
+screen; the end callback says which was drawn.
+
 Scripted and idempotent because it patches a submodule: a submodule update
 would otherwise revert it silently.
 
@@ -86,6 +102,7 @@ PRESENT_QUEUE = RT64 / "hle" / "rt64_present_queue.cpp"
 PRESENT_HEADER = RT64 / "hle" / "rt64_present_queue.h"
 WORKLOAD_QUEUE = RT64 / "hle" / "rt64_workload_queue.cpp"
 SHARED_RESOURCES = RT64 / "hle" / "rt64_shared_queue_resources.h"
+FRAMEBUFFER_RENDERER = RT64 / "render" / "rt64_framebuffer_renderer.cpp"
 
 # --- the setter -------------------------------------------------------------
 
@@ -187,6 +204,15 @@ OFFSET_REPLACEMENT = """            // wr64: move the camera by the port's offse
 
                 projMatrix = wr64EyeLens(projMatrix, wr64EyeIndex);
                 prevProjTransform = projMatrix;
+                wr64LensUsed = true;
+            }
+            else if (wr64XrLensActive.load(std::memory_order_relaxed) &&
+                ((proj.type == Projection::Type::Perspective) || (proj.type == Projection::Type::Orthographic))) {
+                // wr64: drawn flat; moved onto the panel by process() once the
+                // frame is known to have put a scene through the lens.
+                wr64FlatTransforms.push_back({ uint32_t(sceneProj.workloadIndex), uint32_t(proj.transformsIndex),
+                    (proj.type == Projection::Type::Perspective) && (curProjGroup.aspectMode == G_EX_ASPECT_ADJUST),
+                    &drawData, float(fbPair.colorImage.width) });
             }
 
             viewProjMatrix = hlslpp::mul(viewMatrix, projMatrix);
@@ -207,6 +233,158 @@ LENS_REPLACEMENT = """    // wr64: a headset's lens for each eye, as the tangent
     // wr64: the eye being drawn, 0 left and 1 right. Set by the workload queue
     // around each eye's rendering, like wr64EyeOffsetX and on the same thread.
     int wr64EyeIndex = 0;
+
+    // wr64: whether the frame being drawn put a scene through a headset's lens.
+    // Cleared by the workload queue before each displayed frame's first eye,
+    // set as its projections are processed, and read by the framebuffer
+    // renderer and the workload queue, all on the render thread.
+    bool wr64LensUsed = false;
+
+    // wr64: the projections of the frame being drawn that were not put through
+    // the lens -- its flat elements, and 3D that is not the scene -- by
+    // workload and transform, and whether each is framed 3D, which the port
+    // marks with G_EX_ASPECT_ADJUST (a menu's model in a box of its own), for
+    // process() to move onto the panel.
+    struct Wr64FlatTransform {
+        uint32_t workload;
+        uint32_t transform;
+        bool framed;
+        const void *drawData;
+        float frameWidth;
+    };
+    static std::vector<Wr64FlatTransform> wr64FlatTransforms;
+
+    // wr64: the panel a frame's flat elements are drawn on inside a headset's
+    // eyes, set by the port: how far ahead and how wide, and how far apart
+    // the eyes are, in the units of the head's transforms (game units). It is
+    // the frame's 4:3. It hangs straight ahead of the seated position, where
+    // the game's camera looks, and stays there as the head turns -- the flat
+    // picture where the game framed it, with the 3D scene around it to look
+    // at -- unless followHead is set, when it stays in front of the eyes.
+    static std::atomic<float> wr64PanelDistance{ 66.0f };
+    static std::atomic<float> wr64PanelWidth{ 53.0f };
+    static std::atomic<float> wr64PanelSeparation{ 2.0f };
+    static std::atomic<bool> wr64PanelFollowsHead{ false };
+
+    extern "C" void RT64_SetXrPanel(float distance, float width, float separation, int followHead) {
+        wr64PanelDistance.store(distance, std::memory_order_relaxed);
+        wr64PanelWidth.store(width, std::memory_order_relaxed);
+        wr64PanelSeparation.store(separation, std::memory_order_relaxed);
+        wr64PanelFollowsHead.store(followHead != 0, std::memory_order_relaxed);
+    }
+
+    // wr64: the head's transform for an eye, from the seated space into the
+    // eye's, as the frame being drawn took it (below, with the head).
+    bool wr64HeadForEye(int eye, float out[16]);
+
+    // wr64: where framed 3D -- a model a menu turns in a box of its own, like
+    // the course card's track -- goes on the panel, set by the port: scaled
+    // about the frame's middle, then moved, in the frame's own -1 to 1. Left
+    // where the game put it, it stays in its box, which the box's own
+    // viewport clips it to; the port can move it aside instead.
+    static std::atomic<float> wr64FramedScale{ 1.0f };
+    static std::atomic<float> wr64FramedX{ 0.0f };
+    static std::atomic<float> wr64FramedY{ 0.0f };
+
+    extern "C" void RT64_SetXrFramed(float scale, float x, float y) {
+        wr64FramedScale.store(scale, std::memory_order_relaxed);
+        wr64FramedX.store(x, std::memory_order_relaxed);
+        wr64FramedY.store(y, std::memory_order_relaxed);
+    }
+
+    bool wr64PanelTransform(float out[4]);
+
+    // wr64: for framed 3D, what its frame's -1 to 1 becomes in the eye's
+    // picture -- its placement, then the panel -- as wr64PanelTransform
+    // gives it; false for anything else. The framebuffer renderer moves the
+    // viewport's clip with it.
+    bool wr64FramedTransform(const void *drawData, uint32_t transform, float out[4]) {
+        float panel[4];
+        if (!wr64PanelTransform(panel)) {
+            return false;
+        }
+
+        for (const Wr64FlatTransform &flat : wr64FlatTransforms) {
+            if (flat.framed && (flat.drawData == drawData) && (flat.transform == transform)) {
+                const float scale = wr64FramedScale.load(std::memory_order_relaxed);
+                out[0] = panel[0] * scale;
+                out[1] = panel[0] * wr64FramedX.load(std::memory_order_relaxed) + panel[1];
+                out[2] = panel[2] * scale;
+                out[3] = panel[2] * wr64FramedY.load(std::memory_order_relaxed) + panel[3];
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // wr64: where the panel lies in the picture of the eye being drawn: a flat
+    // element at x and y in the frame (-1 to 1, up positive) belongs at
+    // x * out[0] + out[1] and y * out[2] + out[3] there. Each eye sees the
+    // panel's points in the directions they lie from it, through its own
+    // lens, so the two agree on where the panel is. Hung in the seated space,
+    // the panel is found from each eye's head transform: its middle in the
+    // eye's space gives where, and how its edges move from there gives how
+    // big -- the panel's picture straightened, as a scale and an offset are
+    // all a screen rectangle can take, which keeps it level and square-on
+    // whichever way the head turns or tilts. Once it is behind the eye, or
+    // beside it, it is moved out of the picture. False when there is no
+    // panel: no headset lens, or a frame that put no scene through it, which
+    // the port shows on its flat screen.
+    bool wr64PanelTransform(float out[4]) {
+        if (!wr64XrLensActive.load(std::memory_order_relaxed) || !wr64LensUsed) {
+            return false;
+        }
+
+        const float tanLeft = wr64XrLensTangents[wr64EyeIndex][0].load(std::memory_order_relaxed);
+        const float tanRight = wr64XrLensTangents[wr64EyeIndex][1].load(std::memory_order_relaxed);
+        const float tanUp = wr64XrLensTangents[wr64EyeIndex][2].load(std::memory_order_relaxed);
+        const float tanDown = wr64XrLensTangents[wr64EyeIndex][3].load(std::memory_order_relaxed);
+        const float distance = wr64PanelDistance.load(std::memory_order_relaxed);
+        const float width = wr64PanelWidth.load(std::memory_order_relaxed);
+        if ((tanRight <= tanLeft) || (tanUp <= tanDown) || (distance <= 0.0f) || (width <= 0.0f)) {
+            return false;
+        }
+
+        const float height = width * 0.75f;
+        float head[16];
+        if (!wr64PanelFollowsHead.load(std::memory_order_relaxed) && wr64HeadForEye(wr64EyeIndex, head)) {
+            // Row vectors: a point p of the seated space is p * head in the
+            // eye's. The panel's middle, and its half-width and half-height
+            // as directions.
+            const float c[3] = {
+                -distance * head[8] + head[12],
+                -distance * head[9] + head[13],
+                -distance * head[10] + head[14] };
+            const float u[3] = { 0.5f * width * head[0], 0.5f * width * head[1], 0.5f * width * head[2] };
+            const float v[3] = { 0.5f * height * head[4], 0.5f * height * head[5], 0.5f * height * head[6] };
+            const float depth = -c[2];
+            if (depth < 0.1f * distance) {
+                out[0] = 0.0f; out[1] = 4.0f; out[2] = 0.0f; out[3] = 4.0f;
+                return true;
+            }
+
+            // The tangents of the middle, and how fast they change towards
+            // the right and top edges.
+            const float tx = c[0] / depth, ty = c[1] / depth;
+            const float dtx = (u[0] * depth + c[0] * u[2]) / (depth * depth);
+            const float dty = (v[1] * depth + c[1] * v[2]) / (depth * depth);
+            out[0] = 2.0f * dtx / (tanRight - tanLeft);
+            out[1] = (2.0f * tx - (tanRight + tanLeft)) / (tanRight - tanLeft);
+            out[2] = 2.0f * dty / (tanUp - tanDown);
+            out[3] = (2.0f * ty - (tanUp + tanDown)) / (tanUp - tanDown);
+            return true;
+        }
+
+        // Following the head: straight ahead of the eyes, each eye half the
+        // separation to its side.
+        const float eyeX = ((wr64EyeIndex == 0) ? -0.5f : 0.5f) * wr64PanelSeparation.load(std::memory_order_relaxed);
+        out[0] = (width / distance) / (tanRight - tanLeft);
+        out[1] = (-2.0f * eyeX / distance - (tanRight + tanLeft)) / (tanRight - tanLeft);
+        out[2] = (height / distance) / (tanUp - tanDown);
+        out[3] = -(tanUp + tanDown) / (tanUp - tanDown);
+        return true;
+    }
 
     extern "C" void RT64_SetXrLens(int active, const float *angles) {
         if (active && (angles != nullptr)) {
@@ -479,6 +657,15 @@ HEAD_REPLACEMENT = """    // wr64: the head, in a headset: for each eye a transf
         return wr64HeadPublishedTag;
     }
 
+    bool wr64HeadForEye(int eye, float out[16]) {
+        if (!wr64HeadActive || (eye < 0) || (eye > 1)) {
+            return false;
+        }
+
+        memcpy(out, wr64HeadEye[eye], sizeof(wr64HeadEye[eye]));
+        return true;
+    }
+
     // ProjectionProcessor
 
     ProjectionProcessor::ProjectionProcessor() { }
@@ -519,6 +706,10 @@ HEAD_TAGS_REPLACEMENT = """        // wr64: the head pose each displayed frame w
         // writes, with no reallocation between them.
         std::array<uint64_t, 16> wr64HeadTags = {};
 
+        // wr64: whether each displayed frame is for a headset's flat screen --
+        // drawn without the headset's lens -- in the same order.
+        std::array<bool, 16> wr64ScreenFrames = {};
+
         InterpolatedFrameCounters interpolatedFrames[2];
 """
 
@@ -552,6 +743,7 @@ namespace RT64 {
     extern std::atomic<float> wr64StereoSeparation;
     extern float wr64EyeOffsetX;
     extern int wr64EyeIndex;
+    extern bool wr64LensUsed;
     bool wr64CameraOffsetActive();
 
     // wr64: the right eye's targets carry modifier keys of their own, clear of
@@ -610,8 +802,16 @@ WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: a headset's head, 
                     // separation.
                     wr64EyeIndex = 0;
                     wr64EyeOffsetX = wr64Stereo ? (-0.5f * wr64Separation) : 0.0f;
+                    wr64LensUsed = false;
                     threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
                         interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
+
+                    // wr64: a frame no scene of which went through a headset's
+                    // lens -- a menu with nothing 3D behind it -- is shown on its
+                    // flat screen instead of to its eyes.
+                    if (framesRendered < ext.sharedResources->wr64ScreenFrames.size()) {
+                        ext.sharedResources->wr64ScreenFrames[framesRendered] = !wr64LensUsed;
+                    }
 
                     // wr64: and the right eye: the same frame at the same weights,
                     // moved right, into its own target. It is indexed by the frames
@@ -721,10 +921,14 @@ XR_DECL_REPLACEMENT = """    // wr64: a headset as a second output, supplied by 
     // which mirrors these two structs and must keep them identical). begin
     // waits until the headset wants a frame and returns -1 for no headset frame
     // (none attached, or its session not running), 0 for a frame it does not
-    // want drawn, and 1 for a frame whose eye images are to be drawn; every
-    // frame begun is handed back through end, drawn or not, with the tag of
+    // want drawn, and 1 for a frame whose images are to be drawn; every
+    // frame begun is handed back through end -- with 0 if nothing was drawn,
+    // 1 if the eyes were and 2 if the flat screen was -- and the tag of
     // the head pose the frame was rendered with (see RT64_SetXrHead in
-    // rt64_projection_processor.cpp). writeRaw says the
+    // rt64_projection_processor.cpp). A frame no scene of which went through
+    // the headset's lens -- a menu with nothing 3D behind it -- is drawn as it
+    // is onto the screen's image, for the headset to hang in front of the
+    // player. writeRaw says the
     // images take the VI's output as it is; otherwise they encode to sRGB as
     // they are written, and are given it linearised.
     struct RT64_XrEye {
@@ -735,6 +939,7 @@ XR_DECL_REPLACEMENT = """    // wr64: a headset as a second output, supplied by 
 
     struct RT64_XrFrame {
         RT64_XrEye eyes[2];
+        RT64_XrEye screen;
         int writeRaw;
     };
 
@@ -811,7 +1016,7 @@ XR_BEGIN_REPLACEMENT = """            // wr64: when a headset is attached it set
 
             RT64_XrFrame wr64XrFrame = {};
             const int wr64XrState = (wr64Xr.begin != nullptr) ? wr64Xr.begin(wr64Xr.user, &wr64XrFrame) : -1;
-            bool wr64XrRendered = false;
+            int wr64XrRendered = 0;
 
             uint32_t swapChainIndex = 0;
 """
@@ -827,8 +1032,10 @@ XR_DRAW_REPLACEMENT = """#               if defined(_WIN32)
                 // runtime's images are never released here. The runtime hands an
                 // image over in the render-target state and takes it back so.
                 if (wr64XrState == 1) {
-                    for (uint32_t eye = 0; eye < 2; eye++) {
-                        const RT64_XrEye &xrEye = wr64XrFrame.eyes[eye];
+                    const auto &wr64ScreenFrames = ext.sharedResources->wr64ScreenFrames;
+                    const bool wr64Screen = (wr64XrFrame.screen.resource != nullptr) && (uint32_t(i) < wr64ScreenFrames.size()) && wr64ScreenFrames[i];
+                    for (uint32_t eye = (wr64Screen ? 2 : 0); eye < (wr64Screen ? 3 : 2); eye++) {
+                        const RT64_XrEye &xrEye = (eye < 2) ? wr64XrFrame.eyes[eye] : wr64XrFrame.screen;
                         Wr64XrTarget &xrTarget = wr64XrTargets[xrEye.resource];
                         if (xrTarget.texture == nullptr) {
                             auto xrTexture = std::make_unique<D3D12Texture>();
@@ -854,8 +1061,10 @@ XR_DRAW_REPLACEMENT = """#               if defined(_WIN32)
                         xrTexture->layout = RenderTextureLayout::COLOR_WRITE;
                         commandList->setFramebuffer(xrTarget.framebuffer.get());
                         commandList->clearColor();
-                        if (wr64EyeParams[eye].texture != nullptr) {
-                            VIRenderer::RenderParams xrParams = wr64EyeParams[eye];
+                        // The screen shows the frame as the left eye was drawn.
+                        const VIRenderer::RenderParams &xrSource = wr64EyeParams[(eye < 2) ? eye : 0];
+                        if (xrSource.texture != nullptr) {
+                            VIRenderer::RenderParams xrParams = xrSource;
                             xrParams.regionX = 0.0f;
                             xrParams.regionWidth = float(xrEye.width);
                             xrParams.regionHeight = float(xrEye.height);
@@ -870,7 +1079,7 @@ XR_DRAW_REPLACEMENT = """#               if defined(_WIN32)
                     }
 
                     commandList->setFramebuffer(swapChainFramebuffer);
-                    wr64XrRendered = true;
+                    wr64XrRendered = wr64Screen ? 2 : 1;
                 }
 #               endif
 
@@ -892,7 +1101,7 @@ XR_END_REPLACEMENT = """                    ext.presentGraphicsWorker->wait();
             if (wr64XrState >= 0) {
                 const auto &wr64HeadTags = ext.sharedResources->wr64HeadTags;
                 const uint64_t wr64HeadTag = (uint32_t(i) < wr64HeadTags.size()) ? wr64HeadTags[i] : 0;
-                wr64Xr.end(wr64Xr.user, wr64XrRendered ? 1 : 0, wr64HeadTag);
+                wr64Xr.end(wr64Xr.user, wr64XrRendered, wr64HeadTag);
             }
 """
 
@@ -917,13 +1126,13 @@ XR_MEMBERS_ANCHOR = """        std::unique_ptr<Inspector> inspector;
 XR_MEMBERS_REPLACEMENT = """        std::unique_ptr<Inspector> inspector;
 
         // wr64: the headset's eye images, wrapped to draw into and kept by the
-        // runtime's resource, and a VI renderer for each eye.
+        // runtime's resource, and a VI renderer for each eye and the screen.
         struct Wr64XrTarget {
             std::unique_ptr<RenderTexture> texture;
             std::unique_ptr<RenderFramebuffer> framebuffer;
         };
         std::unordered_map<void *, Wr64XrTarget> wr64XrTargets;
-        std::unique_ptr<VIRenderer> wr64XrViRenderers[2];
+        std::unique_ptr<VIRenderer> wr64XrViRenderers[3];
 """
 
 XR_HEADER_INCLUDE_ANCHOR = """#include "rt64_shared_queue_resources.h"
@@ -1005,6 +1214,142 @@ PRESENT_SETUP_REPLACEMENT = """        viRenderer = std::make_unique<VIRenderer>
 """
 
 
+
+# --- a frame's flat elements onto a panel in a headset's eyes ----------------
+
+PANEL_PROCESS_ANCHOR = """        for (size_t s = 0; s < p.curFrame->perspectiveScenes.size(); s++) {
+            processScene(p, p.curFrame->perspectiveScenes[s], s);
+        }
+
+        for (size_t s = 0; s < p.curFrame->orthographicScenes.size(); s++) {
+            processScene(p, p.curFrame->orthographicScenes[s], s);
+        }
+    }
+"""
+
+PANEL_PROCESS_REPLACEMENT = """        wr64FlatTransforms.clear();
+
+        for (size_t s = 0; s < p.curFrame->perspectiveScenes.size(); s++) {
+            processScene(p, p.curFrame->perspectiveScenes[s], s);
+        }
+
+        for (size_t s = 0; s < p.curFrame->orthographicScenes.size(); s++) {
+            processScene(p, p.curFrame->orthographicScenes[s], s);
+        }
+
+        // wr64: in a frame that put a scene through a headset's lens, what it
+        // drew flat goes onto the panel (wr64PanelTransform): after its own
+        // projection, a scale and offset of the picture, w kept so a menu's
+        // 3D keeps its depth among itself. Framed 3D is placed
+        // (RT64_SetXrFramed) and its depth squeezed into the nearest
+        // hundredth, in front of the scene behind the panel: left where it
+        // was it is tested against that scene's depth, from another camera
+        // entirely, and flickers in and out of it. It is drawn through a
+        // viewport of its own -- its box -- which is applied after this, so
+        // it is moved within that viewport's -1 to 1 to where the box lands:
+        // with the box's middle at c and half-size h in the frame's -1 to 1,
+        // a point at x in the viewport is at c + h x in the frame, belongs at
+        // f = panel(c + s h x + o) -- scaled by s about the box's middle and
+        // moved by o -- and so at (f - c) / h in the viewport. The frame is
+        // taken to be the game's 4:3.
+        float wr64Panel[4];
+        if (wr64PanelTransform(wr64Panel)) {
+            const hlslpp::float4x4 onto(
+                wr64Panel[0], 0.0f, 0.0f, 0.0f,
+                0.0f, wr64Panel[2], 0.0f, 0.0f,
+                0.0f, 0.0f, 1.0f, 0.0f,
+                wr64Panel[1], wr64Panel[3], 0.0f, 1.0f);
+            const float framedDepth = 0.01f;
+            for (const Wr64FlatTransform &flat : wr64FlatTransforms) {
+                const uint32_t w = flat.workload, t = flat.transform;
+                DrawData &drawData = p.workloadQueue->workloads[w].drawData;
+                hlslpp::float4x4 placed = onto;
+                float framed[4];
+                if (flat.framed && (flat.frameWidth > 0.0f) && wr64FramedTransform(&drawData, t, framed)) {
+                    const interop::RSPViewport &viewport = drawData.rspViewports[t];
+                    const float halfWidth = 0.5f * flat.frameWidth, halfHeight = 0.375f * flat.frameWidth;
+                    const float cx = (viewport.translate.x - halfWidth) / halfWidth, hx = viewport.scale.x / halfWidth;
+                    const float cy = (halfHeight - viewport.translate.y) / halfHeight, hy = viewport.scale.y / halfHeight;
+                    if ((hx != 0.0f) && (hy != 0.0f)) {
+                        placed = hlslpp::float4x4(
+                            framed[0], 0.0f, 0.0f, 0.0f,
+                            0.0f, framed[2], 0.0f, 0.0f,
+                            0.0f, 0.0f, framedDepth, 0.0f,
+                            (wr64Panel[0] * cx + framed[1] - cx) / hx, (wr64Panel[2] * cy + framed[3] - cy) / hy, framedDepth - 1.0f, 1.0f);
+                    }
+                }
+
+                drawData.modProjTransforms[t] = hlslpp::mul(hlslpp::float4x4(drawData.modProjTransforms[t]), placed);
+                drawData.modViewProjTransforms[t] = hlslpp::mul(hlslpp::float4x4(drawData.modViewProjTransforms[t]), placed);
+                drawData.prevProjTransforms[t] = hlslpp::mul(hlslpp::float4x4(drawData.prevProjTransforms[t]), placed);
+                drawData.prevViewProjTransforms[t] = hlslpp::mul(hlslpp::float4x4(drawData.prevViewProjTransforms[t]), placed);
+            }
+        }
+    }
+"""
+
+PANEL_RECT_ANCHOR = """                            triangles.screenOffset.y = halfPixelOffset.y + (halfViewportSize.y - (viewportRect.y + viewportRect.height / 2.0f)) / halfViewportSize.y;
+"""
+
+PANEL_RECT_REPLACEMENT = """                            triangles.screenOffset.y = halfPixelOffset.y + (halfViewportSize.y - (viewportRect.y + viewportRect.height / 2.0f)) / halfViewportSize.y;
+
+                            // wr64: onto the panel in a headset's eye, with the
+                            // frame's other flat elements (rt64_projection_processor.cpp).
+                            bool wr64PanelTransform(float out[4]);
+                            float wr64Panel[4];
+                            if (wr64PanelTransform(wr64Panel)) {
+                                triangles.screenScale.x *= wr64Panel[0];
+                                triangles.screenScale.y *= wr64Panel[2];
+                                triangles.screenOffset.x = triangles.screenOffset.x * wr64Panel[0] + wr64Panel[1];
+                                triangles.screenOffset.y = triangles.screenOffset.y * wr64Panel[2] + wr64Panel[3];
+                            }
+"""
+
+PANEL_SCISSOR_ANCHOR = """                        triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
+"""
+
+PANEL_SCISSOR_REPLACEMENT = """                        triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
+
+                        // wr64: a flat element's scissor goes onto the panel with it, and so
+                        // does framed 3D's, which is what keeps it in its box -- the box
+                        // where the panel has it, while the model may be moved within it
+                        // (RT64_SetXrFramed).
+                        {
+                            bool wr64PanelTransform(float out[4]);
+                            bool wr64FramedTransform(const void *drawData, uint32_t transform, float out[4]);
+                            float wr64Panel[4];
+                            const bool wr64Flat = (proj.type == Projection::Type::Rectangle) || (proj.type == Projection::Type::Orthographic);
+                            if ((wr64Flat && wr64PanelTransform(wr64Panel)) ||
+                                ((proj.type == Projection::Type::Perspective) && wr64FramedTransform(&drawData, proj.transformsIndex, wr64Panel) &&
+                                 wr64PanelTransform(wr64Panel))) {
+                                auto across = [&](float px) { return ((px - halfViewportSize.x) / halfViewportSize.x * wr64Panel[0] + wr64Panel[1]) * halfViewportSize.x + halfViewportSize.x; };
+                                auto down = [&](float py) { return halfViewportSize.y - ((halfViewportSize.y - py) / halfViewportSize.y * wr64Panel[2] + wr64Panel[3]) * halfViewportSize.y; };
+                                triangles.scissor.left = int32_t(std::floor(across(float(triangles.scissor.left))));
+                                triangles.scissor.right = int32_t(std::ceil(across(float(triangles.scissor.right))));
+                                triangles.scissor.top = int32_t(std::floor(down(float(triangles.scissor.top))));
+                                triangles.scissor.bottom = int32_t(std::ceil(down(float(triangles.scissor.bottom))));
+                            }
+                        }
+"""
+
+
+PANEL_FRAMED_CLIP_ANCHOR = """                viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
+"""
+
+PANEL_FRAMED_CLIP_REPLACEMENT = """                viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
+
+                // wr64: framed 3D in a headset's eye is clipped by its scissor alone,
+                // moved onto the panel with it below -- the box the game draws it
+                // in. Its viewport is the frame's size, only off-centre, and moved
+                // with it cut the box short (rt64_projection_processor.cpp).
+                bool wr64FramedTransform(const void *drawData, uint32_t transform, float out[4]);
+                float wr64Framed[4];
+                if (wr64FramedTransform(&drawData, proj.transformsIndex, wr64Framed)) {
+                    viewportClip = framebuffer.viewport;
+                }
+"""
+
+
 def patch(target, anchor, replacement, name):
     text = target.read_text()
     if replacement in text:
@@ -1019,7 +1364,7 @@ def patch(target, anchor, replacement, name):
 
 def main():
     for target in (PROJ_PROCESSOR, VI_HEADER, VI_RENDERER, PRESENT_QUEUE, PRESENT_HEADER,
-                   WORKLOAD_QUEUE, SHARED_RESOURCES):
+                   WORKLOAD_QUEUE, SHARED_RESOURCES, FRAMEBUFFER_RENDERER):
         if not target.exists():
             sys.exit(f"missing {target}. Run: git submodule update --init --recursive")
 
@@ -1062,6 +1407,10 @@ def main():
     patch(WORKLOAD_QUEUE, XR_RATE_EXTERN_ANCHOR, XR_RATE_EXTERN_REPLACEMENT, "headset (rate switch)")
     patch(WORKLOAD_QUEUE, XR_RATE_ANCHOR, XR_RATE_REPLACEMENT, "headset (frame rate)")
     patch(WORKLOAD_QUEUE, XR_SIZE_ANCHOR, XR_SIZE_REPLACEMENT, "headset (eye size)")
+    patch(PROJ_PROCESSOR, PANEL_PROCESS_ANCHOR, PANEL_PROCESS_REPLACEMENT, "headset (flat onto the panel)")
+    patch(FRAMEBUFFER_RENDERER, PANEL_RECT_ANCHOR, PANEL_RECT_REPLACEMENT, "headset (rectangles onto the panel)")
+    patch(FRAMEBUFFER_RENDERER, PANEL_SCISSOR_ANCHOR, PANEL_SCISSOR_REPLACEMENT, "headset (scissors onto the panel)")
+    patch(FRAMEBUFFER_RENDERER, PANEL_FRAMED_CLIP_ANCHOR, PANEL_FRAMED_CLIP_REPLACEMENT, "headset (framed viewports onto the panel)")
     print("Rebuild to pick it up.")
 
 

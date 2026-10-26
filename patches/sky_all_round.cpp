@@ -486,4 +486,85 @@ bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyList
     return true;
 }
 
+// The results screen's sky. Its camera looks straight down on the water from
+// above the tent's peak and the clouds, so the tent cannot be read straight
+// ahead as a race's is, and only the gradient is drawn there (the floor's and
+// the clouds' textures are not set up). It is a dome round the camera
+// instead, inside the camera's far plane: the gradient's texture from the
+// horizon's t at the horizon up to the peak's at the top, as the sine of the
+// elevation, and the horizon's carried on below it to where the waves cover
+// it. Only its gradient list is given.
+bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists) {
+    static const bool keep = std::getenv("WR64_SKY_KEEP") != nullptr;
+    if (keep || segment6 == 0) return false;
+    int b = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (segment3 == kFrameBuffers[i]) b = i;
+    }
+    float eye[3], centre_x, centre_z, radius;
+    if (b < 0 || !water_built_for(segment3, eye, &centre_x, &centre_z, &radius)) return false;
+
+    std::array<Vertex, 7> tent;
+    for (uint32_t i = 0; i < 7; ++i) tent[i] = read_vertex(rdram, (segment6 & 0x00FFFFFFu) + 0x0E0 + i * 16);
+    if (tent[6].t == tent[0].t) return false;
+
+    // The far plane, from the game's projection at +0xE008 in the frame
+    // buffer: OpenGL's form, row vectors, multiplied through by a scale.
+    float m[4][4];
+    for (int i = 0; i < 16; ++i) {
+        const uint32_t at = segment3 + 0xE008;
+        const int16_t whole = *reinterpret_cast<const int16_t*>(rdram + ((at + i * 2) ^ 2));
+        const uint16_t part = *reinterpret_cast<const uint16_t*>(rdram + ((at + 32 + i * 2) ^ 2));
+        m[i / 4][i % 4] = float(whole) + float(part) / 65536.0f;
+    }
+    const float scale = -m[2][3];
+    if (scale == 0.0f) return false;
+    const float a = m[2][2] / scale, bias = m[3][2] / scale;
+    if (std::fabs(a + 1.0f) < 1e-6f) return false;
+    const float far_plane = bias / (a + 1.0f);
+    if (!(far_plane > 100.0f)) return false;
+    const float distance = std::min(far_plane * 0.8f, 30000.0f);
+
+    // Which way the game's tent faces seen from inside it, which is where
+    // the dome is seen from.
+    float inside[3] = { 0.0f, 1.0f, 0.0f };
+    for (int i = 0; i < 6; ++i) { inside[0] += tent[i].x / 6.0f; inside[2] += tent[i].z / 6.0f; }
+    const float reference = facing(tent[0], tent[1], tent[6], inside);
+    if (reference == 0.0f) return false;
+
+    static constexpr float kElevations[] = { -60, -30, -15, -5, 0, 2, 5, 10, 15, 20, 30, 45, 60, 75 };
+    constexpr uint32_t kRings = sizeof(kElevations) / sizeof(kElevations[0]);
+    std::vector<Vertex> v;
+    std::vector<std::array<uint32_t, 3>> tris;
+    for (const float degrees : kElevations) {
+        const float e = degrees * kPi / 180.0f;
+        const float t = tent[0].t + (tent[6].t - tent[0].t) * std::max(0.0f, std::sin(e));
+        for (int i = 0; i < kSegments; ++i) {
+            const float angle = 2.0f * kPi * float(i) / float(kSegments);
+            v.push_back({ eye[0] + distance * std::cos(e) * std::cos(angle), eye[1] + distance * std::sin(e),
+                          eye[2] + distance * std::cos(e) * std::sin(angle), tent[0].s, t, tent[0].rgba });
+        }
+    }
+    v.push_back({ eye[0], eye[1] + distance, eye[2], tent[6].s, tent[6].t, tent[6].rgba });
+    join_rings(tris, 0, kRings);
+    fan(tris, uint32_t(v.size() - 1), (kRings - 1) * kSegments);
+
+    const uint32_t base = kSky + uint32_t(b) * kSkyStride;
+    Writer writer(rdram, base, eye);
+    if (!writer.list(kGradientList, kCloudList, v, tris, reference)) return false;
+    lists->base = base;
+    lists->floor = 0;
+    lists->gradient = 0x06000000u | kGradientList;
+    lists->clouds = 0;
+
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        std::fprintf(stderr, "[wr64-sky] the results screen's sky is a dome round the camera, %.0f units away"
+                             " (its far plane is at %.0f)\n", distance, far_plane);
+        std::fflush(stderr);
+    }
+    return true;
+}
+
 }  // namespace wr64

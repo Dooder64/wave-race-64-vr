@@ -97,6 +97,14 @@ constexpr uint32_t kMeshSize = 0x5000;
 constexpr uint32_t kLatticeStart = 0x13D68;
 constexpr uint32_t kLatticeEnd = 0x15B18;
 
+// The full grid, which list 0x010082F0 draws from the same place for the
+// results screen: a hexagon of waves 16 rows each way round the origin, 817
+// points, with no ring round it, which ends here.
+constexpr uint32_t kFullGridEnd = 0x17078;
+
+// The game's view matrix in either frame buffer, after its projection.
+constexpr uint32_t kViewMatrix = 0xE088;
+
 // The turned builds: a quarter, a half and three quarters round.
 constexpr int kTurns = 3;
 
@@ -212,9 +220,10 @@ constexpr int kHalfStep = 32;
 
 // The hexagon of the merged mesh: up to kMaxRadius rows from the camera's
 // point each way (34 rows is about 1900 units), and the ring of flat quads
-// round it out to kFar units.
+// round it out to kFar units -- far enough that the camera of the results
+// screen, high above the water, does not see its edge.
 constexpr int kMaxRadius = 34;
-constexpr float kFar = 6000.0f;
+constexpr float kFar = 30000.0f;
 
 // A point of the game's lattice, with what the mesh gives it.
 struct LatticePoint { int16_t y, s, t; uint32_t rgba; int depth; };
@@ -230,9 +239,9 @@ int16_t half_at(const uint8_t* block, uint32_t offset) {
 // One mesh's lattice points, from a copy of a frame buffer's mesh area
 // (kMeshStart and on), each with its depth: how many points it lies inside
 // the hexagon's border, which is flattened to the water level.
-std::unordered_map<int64_t, LatticePoint> lattice_of(const std::vector<uint8_t>& mesh) {
+std::unordered_map<int64_t, LatticePoint> lattice_of(const std::vector<uint8_t>& mesh, uint32_t end) {
     std::unordered_map<int64_t, LatticePoint> points;
-    for (uint32_t v = kLatticeStart - kMeshStart; v + 16 <= kLatticeEnd - kMeshStart; v += 16) {
+    for (uint32_t v = kLatticeStart - kMeshStart; v + 16 <= end - kMeshStart; v += 16) {
         const int x = half_at(mesh.data(), v), z = half_at(mesh.data(), v + 4);
         // The game rounds each build's points on its own, so a mesh can lie a
         // unit or so off the lattice; it is still the same lattice.
@@ -275,9 +284,10 @@ struct MergeStats { uint32_t points, waves, triangles, loads; int radius; float 
 
 // Merges the game's mesh and the turned builds' into one, written with the
 // list that draws it into the merged area for frame buffer `b`. False when it
-// does not fit, which it always should.
+// does not fit, which it always should. The meshes' lattices end at
+// `lattice_end`.
 bool merge(uint8_t* rdram, int b, const std::vector<uint8_t> (&meshes)[1 + kTurns],
-           float eye_x, float eye_z, MergeStats& stats) {
+           float eye_x, float eye_z, MergeStats& stats, uint32_t lattice_end = kLatticeEnd) {
     // Each lattice point's height and shading, averaged over the meshes that
     // cover it, weighted by depth so that flattened borders count for nothing.
     struct Sum { float weight = 0, y = 0, s = 0, t = 0; };
@@ -289,7 +299,7 @@ bool merge(uint8_t* rdram, int b, const std::vector<uint8_t> (&meshes)[1 + kTurn
     if (((X0 ^ K0) & 1) != 0) ++X0;
     int radius = 4;
     for (const auto& mesh : meshes) {
-        for (const auto& [key, p] : lattice_of(mesh)) {
+        for (const auto& [key, p] : lattice_of(mesh, lattice_end)) {
             const int dk = std::abs(row_of(key) - K0), dX = std::abs(column_of(key) - X0);
             radius = std::max(radius, std::max(dk, (dX + dk + 1) / 2) + 1);
             if (!have_rgba) { rgba = p.rgba; have_rgba = true; }
@@ -637,6 +647,63 @@ bool water_merged(uint32_t segment3, uint32_t* base, uint32_t* list) {
         return true;
     }
     return false;
+}
+
+// For the display-list rewriter, VR only: the full grid of waves for the
+// frame buffer that segment 3 now points at, merged on its own -- the same
+// mesh given four times -- round its centre, which gives it the ring of flat
+// quads out to the distance that it lacks: on the results screen the camera
+// looks down on it from high above and saw its edge. Written into the merged
+// area for that buffer, in place of the race's merged mesh, and given to the
+// sky as that is, with the camera; the segment base its list expects and the
+// list, as water_merged gives them, or false.
+bool water_full_grid_ringed(uint8_t* rdram, uint32_t segment3, uint32_t* base, uint32_t* list) {
+    const int b = segment3 == kFrameBuffers[0] ? 0 : segment3 == kFrameBuffers[1] ? 1 : -1;
+    if (b < 0) return false;
+    g_copies_ready[b] = false;
+    static std::vector<uint8_t> meshes[1 + kTurns];
+    const uint8_t* mesh = rdram + segment3 + kMeshStart;
+    for (auto& copy : meshes) copy.assign(mesh, mesh + kMeshSize);
+    const auto points = lattice_of(meshes[0], kFullGridEnd);
+    if (points.empty()) return false;
+    float sum_x = 0.0f, sum_z = 0.0f;
+    for (const auto& [key, p] : points) {
+        sum_x += float(column_of(key) * kHalfStep);
+        sum_z += float(row_of(key)) * kRow;
+    }
+    MergeStats stats{};
+    if (!merge(rdram, b, meshes, sum_x / float(points.size()), sum_z / float(points.size()), stats, kFullGridEnd)) {
+        return false;
+    }
+    // The camera, for the sky (patches/sky_all_round.cpp): where the game's
+    // view matrix, which it builds beside its projection at +0xE088, puts the
+    // origin of its view. Row vectors, a turn and then a move t, so the eye
+    // is -t times the turn's transpose.
+    float view[4][4];
+    for (int i = 0; i < 16; ++i) {
+        const uint32_t at = segment3 + kViewMatrix;
+        const int16_t whole = *reinterpret_cast<const int16_t*>(rdram + ((at + i * 2) ^ 2));
+        const uint16_t part = *reinterpret_cast<const uint16_t*>(rdram + ((at + 32 + i * 2) ^ 2));
+        view[i / 4][i % 4] = float(whole) + float(part) / 65536.0f;
+    }
+    float eye[3];
+    for (int j = 0; j < 3; ++j) {
+        eye[j] = -(view[3][0] * view[j][0] + view[3][1] * view[j][1] + view[3][2] * view[j][2]);
+    }
+    g_built_for[b] = { { eye[0], eye[1], eye[2] }, stats.centre_x, stats.centre_z,
+                       float(stats.radius * 2 * kHalfStep) };
+    g_copies_ready[b] = true;
+
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        std::fprintf(stderr, "[wr64-water] the full grid is ringed: %u lattice points, %d rows each way; the camera"
+                             " at %.0f %.0f %.0f\n", stats.points, stats.radius, eye[0], eye[1], eye[2]);
+        std::fflush(stderr);
+    }
+    *base = kMerged + uint32_t(b) * kMergedStride;
+    *list = 0x03000000u | kMergedList;
+    return true;
 }
 
 // For the sky: the camera the merged mesh for the frame buffer that segment 3

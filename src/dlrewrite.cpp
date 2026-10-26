@@ -97,6 +97,21 @@
 // the middle of the view, so the scissor that names that region is widened
 // to the whole framebuffer. Everything else this walk does still sees the
 // game's own scissor. WR64_VR_KEEP_SCISSOR=1 leaves it alone, for comparison.
+//
+// 6. In VR mode RT64 draws a frame's scene through the headset's lens and
+// everything flat on a panel in front of the eyes (tools/patch_rt64_vr.py).
+// 3D that is not the scene belongs on the panel too, so a perspective
+// projection other than the game's camera's -- the one it builds each frame
+// at 0xE008 in segment 3, the only one the title loads -- is given a group of
+// its own: in a
+// race (the direction arrow over the HUD) G_EX_ASPECT_STRETCH, which at the
+// headset's 4:3 changes nothing but keeps it off the lens; anywhere else (the
+// jet skis of the menus) G_EX_ASPECT_ADJUST, which RT64 draws in front of the
+// scene behind the panel, in its box. The track model the course card turns
+// in its box is left out, box and all, for now: the game circles its camera
+// round it, so on the panel it sweeps out of the box whatever its size. The
+// title's lens flare and the sun's glints and glare, rectangles that would
+// hang on the panel in front of the player's face, are left out too.
 
 #include "wr64/dlrewrite.h"
 #include "wr64/display.h"
@@ -125,11 +140,15 @@ namespace wr64 {
 // patches/water_all_round.cpp: the merged wave mesh for the frame buffer
 // segment 3 points at -- the segment base it expects and its list.
 bool water_merged(uint32_t segment3, uint32_t* base, uint32_t* list);
+// The same for the full grid of the results screen, ringed out to the distance.
+bool water_full_grid_ringed(uint8_t* rdram, uint32_t segment3, uint32_t* base, uint32_t* list);
 void water_copy_camera(float* eye_x, float* eye_z, float* heading);
 // patches/sky_all_round.cpp: the sky's three draws rebuilt round the camera,
 // as lists through segment 6 and the segment base they expect.
 struct SkyLists { uint32_t base, floor, gradient, clouds; };
 bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists);
+// The same for the results screen: a gradient dome only.
+bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists);
 }
 
 namespace {
@@ -164,6 +183,27 @@ constexpr uint8_t kOpFillRect = 0xF6;
 bool is_rect(uint8_t op) {
     return op == kOpTexRect || op == kOpTexRectFlip || op == kOpFillRect;
 }
+
+// The sun's lens flare (circles of one texture at many sizes along a line
+// through the frame), its glints, and the glare that whitens the whole frame
+// while the sun is in view, drawn as rectangles under the scene's
+// perspective projection on the title; left out in VR (see 6. at the top).
+constexpr uint32_t kLensFlareTexture = 0x0100FAB0;
+constexpr uint32_t kSunGlintTexture = 0x08004400;
+constexpr uint32_t kSunGlareTexture = 0x01005748;
+
+// The course card's track model: the dark box it turns in, and the
+// projection it is drawn with, after which it is drawn by calls of lists in
+// segment 8, in the card's states. In VR both are left out, so the scene
+// shows where the box was as it does around the card (see 6. at the top).
+constexpr uint32_t kCardModelBoxTexture = 0x010545A8;
+constexpr uint32_t kCardModelProjection = 0x07000A40;
+constexpr uint32_t kCardModelSegment = 8;
+
+// The game's camera projection, which it builds each frame in its frame
+// buffer, reached through segment 3: in VR the scene seen through the lens
+// (see 6. at the top).
+constexpr uint32_t kSceneProjection = 0x0300E008;
 
 constexpr uint32_t kMtxProjection = 0x01;
 constexpr uint32_t kMtxLoad = 0x02;
@@ -377,6 +417,13 @@ struct Walker {
     bool centred = false;
     bool seen_ortho = false;
     RaceTest race_test;
+
+    // VR (see 6. at the top): whether a projection was given a group of its
+    // own that the next must undo.
+    bool own_group = false;
+    // VR: whether the course card's track model is being drawn, and so left
+    // out (see kCardModelProjection).
+    bool card_model = false;
     Class cls = Class::Auto;
     uint32_t centred_sections = 0;
     uint32_t class_changes = 0;
@@ -596,11 +643,36 @@ struct Walker {
     bool sky_replaced = false;
     wr64::SkyLists sky_lists{};
 
+    // VR, the results screen (state 0x34): the full grid of waves it draws,
+    // ringed out to the distance (patches/water_all_round.cpp), once a frame,
+    // first needed by the sky, which is built over it, and then drawn by the
+    // water's call; the segment base and list, or 0.
+    static constexpr uint32_t kResultsState = 0x34;
+    static constexpr uint32_t kSkyFirstList = 0x010102D0;
+    bool full_grid_tried = false;
+    uint32_t full_grid_base = 0, full_grid_list = 0;
+    bool ring_full_grid() {
+        if (!full_grid_tried) {
+            full_grid_tried = true;
+            if (!wr64::vr::all_round() ||
+                !wr64::water_full_grid_ringed(rdram, segments[3], &full_grid_base, &full_grid_list)) {
+                full_grid_list = 0;
+            }
+        }
+        return full_grid_list != 0;
+    }
+
     // Whether a top-level call draws part of the sky, and so was replaced.
+    // The results screen draws only the gradient, beginning with a call of
+    // 0x010102D0 (a matrix load) rather than of the floor's list, and only
+    // its gradient is replaced, since the floor's and the clouds' textures
+    // are not set up for them there.
     bool replace_sky_call(uint32_t list) {
-        if (list == kSkyFloorList && !sky_tried) {
+        const bool results = state == kResultsState;
+        if (!sky_tried && (list == kSkyFloorList || (results && list == kSkyFirstList))) {
             sky_tried = true;
-            sky_replaced = wr64::sky_all_round(rdram, segments[3], segments[6], &sky_lists);
+            sky_replaced = results ? ring_full_grid() && wr64::sky_results_dome(rdram, segments[3], segments[6], &sky_lists)
+                                   : wr64::sky_all_round(rdram, segments[3], segments[6], &sky_lists);
         }
         if (!sky_replaced) return false;
         const uint32_t own = list == kSkyFloorList ? sky_lists.floor
@@ -1354,6 +1426,31 @@ struct Tracer {
                     texture = w1;
                     std::fprintf(f, "%*stimg 0x%08X\n", depth * 2, "", w1);
                     continue;
+                case kOpSetScissor:
+                    std::fprintf(f, "%*sscissor (%u,%u)-(%u,%u)\n", depth * 2, "", ((w0 >> 12) & 0xFFF) >> 2,
+                                 (w0 & 0xFFF) >> 2, ((w1 >> 12) & 0xFFF) >> 2, (w1 & 0xFFF) >> 2);
+                    continue;
+                case kOpFillRect:
+                    std::fprintf(f, "%*sfill rect (%u,%u)-(%u,%u)\n", depth * 2, "", ((w1 >> 12) & 0xFFF) >> 2,
+                                 (w1 & 0xFFF) >> 2, ((w0 >> 12) & 0xFFF) >> 2, (w0 & 0xFFF) >> 2);
+                    continue;
+                case kOpTexRect:
+                case kOpTexRectFlip:
+                    std::fprintf(f, "%*stex rect (%u,%u)-(%u,%u) tex 0x%08X\n", depth * 2, "", ((w1 >> 12) & 0xFFF) >> 2,
+                                 (w1 & 0xFFF) >> 2, ((w0 >> 12) & 0xFFF) >> 2, (w0 & 0xFFF) >> 2, texture);
+                    continue;
+                case 0xFF: case 0xFE: case 0xF7:
+                    std::fprintf(f, "%*s%s 0x%08X\n", depth * 2, "",
+                                 op == 0xFF ? "color image" : op == 0xFE ? "depth image" : "fill color", w1);
+                    continue;
+                case kOpMoveMem:
+                    if (((w0 >> 16) & 0xFF) == kMoveMemViewport) {
+                        const uint32_t vp = physical(w1);
+                        std::fprintf(f, "%*sviewport 0x%08X scale (%.1f,%.1f) translate (%.1f,%.1f)\n", depth * 2, "",
+                                     w1, signed_half(vp) / 4.0f, signed_half(vp + 2) / 4.0f,
+                                     signed_half(vp + 8) / 4.0f, signed_half(vp + 10) / 4.0f);
+                    }
+                    continue;
                 case kOpVtx: {
                     const uint32_t count = (w0 >> 9) & 0x7F;
                     const uint32_t addr = physical(w1);
@@ -1838,6 +1935,14 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
         const uint8_t op = static_cast<uint8_t>(w0 >> 24);
         cursor += 8;
 
+        // VR: the sun's lens flare, glints and glare, and the course card's
+        // model box, are left out (see 6. at the top).
+        if (op == kOpTexRect && w.projection_is_perspective && wr64::vr::enabled() &&
+            (w.texture == kLensFlareTexture || w.texture == kSunGlintTexture || w.texture == kSunGlareTexture ||
+             w.texture == kCardModelBoxTexture)) {
+            continue;
+        }
+
         // Rectangles are held back with the commands between them until their
         // run ends (see push_rect); anything else ends the run.
         if (w.hud && is_rect(op)) {
@@ -1877,6 +1982,9 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             if (w.projection_is_perspective && w.replace_sky_call(w1)) {
                 continue;
             }
+            if (w.card_model && (w1 >> 24) == kCardModelSegment) {
+                continue;
+            }
             // A call under an orthographic projection is a 2D element drawn
             // from a static list: classify it by what the list draws.
             if (w.hud && w.have_projection && !w.projection_is_perspective) {
@@ -1898,9 +2006,15 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             // VR: the wave mesh merged from builds all round the camera
             // (patches/water_all_round.cpp) is drawn in place of the game's,
             // in the same state, by a list of its own reached through segment
-            // 3, which is moved to it for the call and then put back.
+            // 3, which is moved to it for the call and then put back. The
+            // full grid the results screen draws is ringed the same way.
             uint32_t merged_base = 0, merged_list = 0;
-            if (water && w1 == 0x0100B590 && wr64::water_merged(w.segments[3], &merged_base, &merged_list)) {
+            if (water && w1 == 0x010082F0 && w.ring_full_grid()) {
+                w.emit((uint32_t(kOpMoveWord) << 24) | ((3u * 4u) << 8) | kMoveWordSegment, w.full_grid_base);
+                w.emit(uint32_t(kOpDisplayList) << 24, w.full_grid_list);
+                w.emit((uint32_t(kOpMoveWord) << 24) | ((3u * 4u) << 8) | kMoveWordSegment, w.segments[3]);
+            }
+            else if (water && w1 == 0x0100B590 && wr64::water_merged(w.segments[3], &merged_base, &merged_list)) {
                 static const char* dump_path = std::getenv("WR64_WATER_DUMP");
                 static int dump_countdown = std::getenv("WR64_WATER_DUMP_AT") ? std::atoi(std::getenv("WR64_WATER_DUMP_AT")) : 300;
                 if (dump_path != nullptr && dump_countdown >= 0 && dump_countdown-- == 0) {
@@ -2043,6 +2157,38 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             }
 
             w.on_matrix(w0, w1);
+
+            // VR: 3D that is not the frame's scene is not seen through the
+            // headset's lens but drawn on its panel with the frame's flat
+            // elements (see 6. at the top). The group goes in before the load
+            // it is for, and the next load puts RT64's own back.
+            if (projection_load && wr64::vr::enabled()) {
+                const bool persp = w.projection_is_perspective;
+                w.card_model = (state == 0x1E || state == 0x1F) && w1 == kCardModelProjection;
+                // Each perspective projection a game state loads is reported
+                // once, so a screen drawn wrongly in the headset can be matched
+                // to what drew it.
+                if (persp) {
+                    static std::vector<uint64_t> reported;
+                    const uint64_t key = (uint64_t(state) << 32) | w1;
+                    if (std::find(reported.begin(), reported.end(), key) == reported.end()) {
+                        reported.push_back(key);
+                        std::fprintf(stderr, "[wr64-vr] state 0x%02X loads a perspective projection from 0x%08X (%s)\n",
+                                     state, w1, w1 == kSceneProjection ? "the scene" : "on the panel");
+                        std::fflush(stderr);
+                    }
+                }
+                if (persp && w1 != kSceneProjection) {
+                    const bool race_state = state == 0x07 || (state >= 0x28 && state <= 0x2F);
+                    w.projection_group(race_state ? G_EX_ASPECT_STRETCH : G_EX_ASPECT_ADJUST);
+                    w.own_group = true;
+                }
+                else if (w.own_group) {
+                    w.projection_group(G_EX_ASPECT_AUTO);
+                    w.own_group = false;
+                }
+            }
+
             if (projection_load && w.trace != nullptr) {
                 char line[160];
                 std::snprintf(line, sizeof(line), "[hud] state 0x%02X projection load %s [1][1]=%.3f [3][3]=%.3f"
