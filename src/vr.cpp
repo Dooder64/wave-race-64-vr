@@ -67,4 +67,11 @@ void cycle_stereo() {
     std::fflush(stderr);
 }
 
+#if !defined(_WIN32)
+// OpenXR is wired up for Direct3D 12 only; elsewhere VR mode is never on.
+bool enabled() { return false; }
+void attach(void*, void*) {}
+void shutdown() {}
+#endif
+
 }  // namespace wr64::vr

@@ -13,4 +13,15 @@ void cycle_debug_offset();
 // separation.
 void cycle_stereo();
 
+// VR mode, switched on by WR64_VR=1 (src/vr_openxr.cpp; Windows only).
+bool enabled();
+
+// Creates the OpenXR session on RT64's Direct3D 12 device and the command
+// queue of its present thread, once RT64 is set up. Does nothing when VR mode
+// is off, and turns it off with a message when the headset cannot be used.
+void attach(void* d3d12_device, void* d3d12_queue);
+
+// Ends the session. Called before RT64 shuts down, while the device lives.
+void shutdown();
+
 }  // namespace wr64::vr

@@ -223,6 +223,10 @@ if(WR64_WITH_RUNTIME AND WR64_WITH_RECOMPILED)
                              src/testdrive.cpp src/display.cpp src/dlrewrite.cpp src/water.cpp src/music.cpp src/textures.cpp
                              src/haptics.cpp src/haptics_mixer.cpp src/haptics_output.cpp src/haptics_observation.cpp
                              src/vr.cpp)
+    if(WIN32)
+        # VR mode's OpenXR session, on RT64's Direct3D 12 device.
+        list(APPEND WR64_SOURCES src/vr_openxr.cpp)
+    endif()
     if(WR64_WITH_FRONTEND)
         list(APPEND WR64_SOURCES src/frontend.cpp)
     endif()
@@ -326,7 +330,21 @@ if(WR64_WITH_RUNTIME)
 
     if(WIN32)
         target_include_directories(WaveRace64Recomp PRIVATE
-            "${WR64_LIB_DIR}/RT64/src/contrib/dxc/inc")
+            "${WR64_LIB_DIR}/RT64/src/contrib/dxc/inc"
+            # plume_d3d12.h, which src/renderer.cpp reads RT64's native device
+            # and queue through for VR mode, includes D3D12MemAlloc.h.
+            "${WR64_LIB_DIR}/RT64/src/contrib/plume/contrib/D3D12MemoryAllocator/include")
+
+        # VR mode: the OpenXR loader, linked statically (its Windows default),
+        # without the SDK's layers, tests or samples. It finds the headset's
+        # runtime -- Meta's for Quest Link, or SteamVR's -- when the game runs.
+        set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+        set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+        set(BUILD_SDK_TESTS OFF CACHE BOOL "" FORCE)
+        set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${WR64_LIB_DIR}/OpenXR-SDK" "${CMAKE_CURRENT_BINARY_DIR}/openxr" EXCLUDE_FROM_ALL)
+        target_link_libraries(WaveRace64Recomp PRIVATE OpenXR::openxr_loader)
 
         # RT64 vendors SDL2 for Windows and points at it with link_directories(),
         # which is directory-scoped: it applies to targets declared inside RT64's

@@ -48,4 +48,9 @@ private:
 std::unique_ptr<ultramodern::renderer::RendererContext> create_render_context(
     uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode);
 
+// Starts VR mode's OpenXR session on a set-up RT64 application, when WR64_VR
+// asks for it. Called by whichever context owns the application: the one
+// above, or RecompFrontend's when the frontend is built (src/frontend.cpp).
+void attach_vr(RT64::Application& app);
+
 }  // namespace wr64

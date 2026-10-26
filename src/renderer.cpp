@@ -15,6 +15,7 @@
 
 #include "wr64/renderer.h"
 #include "wr64/textures.h"
+#include "wr64/vr.h"
 
 #include <cstdio>
 #include <librecomp/game.hpp>
@@ -30,6 +31,11 @@
 #endif
 
 #include "hle/rt64_application.h"
+
+#if defined(_WIN32)
+// For the native device and queue OpenXR is given (see attach_vr below).
+#   include "plume_d3d12.h"
+#endif
 
 namespace {
 
@@ -73,6 +79,28 @@ RT64::UserConfiguration::Antialiasing to_rt64_msaa(ultramodern::renderer::Antial
 }  // namespace
 
 namespace wr64 {
+
+// VR mode puts an OpenXR session on the very device RT64 draws with, and on
+// the queue its present thread submits to, which is where the eye images are
+// copied out. Both are plume objects; OpenXR wants the Direct3D 12 ones
+// inside them, so VR needs RT64 to have chosen Direct3D 12.
+void attach_vr(RT64::Application& app) {
+    if (!vr::enabled()) {
+        return;
+    }
+#if defined(_WIN32)
+    if (app.chosenGraphicsAPI != RT64::UserConfiguration::GraphicsAPI::D3D12) {
+        std::fprintf(stderr, "[wr64-vr] VR needs the Direct3D 12 renderer; Graphics API is set to something"
+                             " else. VR is off for this run.\n");
+        return;
+    }
+    auto* device = static_cast<plume::D3D12Device*>(app.device.get());
+    auto* queue = static_cast<plume::D3D12CommandQueue*>(app.presentGraphicsWorker->commandQueue.get());
+    vr::attach(device->d3d, queue->d3d);
+#else
+    (void)app;
+#endif
+}
 
 RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle,
                          bool developer_mode) {
@@ -145,6 +173,7 @@ RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::WindowHandle win
     chosen_api = ultramodern::renderer::GraphicsApi::Auto;
     textures::setup(*app_, recomp::get_config_path());
     valid_ = true;
+    attach_vr(*app_);
     (void)developer_mode;
 }
 
@@ -241,6 +270,8 @@ void RT64Context::update_screen() {
 
 void RT64Context::shutdown() {
     if (valid_) {
+        // The OpenXR session lives on RT64's device, so it ends first.
+        wr64::vr::shutdown();
         app_->end();
         valid_ = false;
     }

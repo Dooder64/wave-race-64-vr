@@ -31,7 +31,9 @@
 #include "wr64/music.h"
 #include "wr64/textures.h"
 #include "wr64/haptics.h"
+#include "wr64/renderer.h"
 #include "wr64/rom.h"
+#include "wr64/vr.h"
 
 // The two globals recompui expects the port to define. It declares them extern
 // in its own translation units and links against whatever the port provides:
@@ -79,6 +81,7 @@ public:
             application_ = static_cast<recompui::renderer::RT64Context*>(inner_.get())->application();
         }
         if (application_) wr64::textures::setup(*application_, config_directory());
+        if (application_) wr64::attach_vr(*application_);
     }
 
     bool valid() override { return inner_->valid(); }
@@ -101,7 +104,12 @@ public:
         if (application_) wr64::textures::apply(*application_);
         inner_->update_screen();
     }
-    void shutdown() override { inner_->shutdown(); application_ = nullptr; }
+    void shutdown() override {
+        // The OpenXR session lives on RT64's device, so it ends first.
+        wr64::vr::shutdown();
+        inner_->shutdown();
+        application_ = nullptr;
+    }
     uint32_t get_display_framerate() const override { return inner_->get_display_framerate(); }
     float get_resolution_scale() const override { return inner_->get_resolution_scale(); }
 
