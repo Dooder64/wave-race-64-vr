@@ -3,17 +3,25 @@
 // WR64_VR=1 turns VR mode on. Once RT64 is set up, the renderer hands this
 // file RT64's Direct3D 12 device and the command queue its present thread
 // uses, and an OpenXR session is created on them -- the same objects RT64
-// draws with, so the eye images can later be copied straight into the
-// headset's swapchains. OpenXR insists the session lives on the graphics
-// card the headset is attached to; RT64 chooses its card itself, so the two
-// are compared, and VR is refused with a message rather than failing later
-// if they differ.
+// draws with, so the eye images can be drawn straight into the headset's
+// swapchains. OpenXR insists the session lives on the graphics card the
+// headset is attached to; RT64 chooses its card itself, so the two are
+// compared, and VR is refused with a message rather than failing later if
+// they differ.
 //
-// For now the session runs a frame loop of its own on a thread of its own,
-// submitting no images: it proves the lifecycle -- ready, focused, paused
-// when the headset comes off, resumed, stopped -- inside the game. The game
-// itself draws to the monitor exactly as before. Moving the frame loop into
-// RT64's present thread, where the eye images are, comes next.
+// The headset is a second output of RT64's present thread
+// (tools/patch_rt64_vr.py). Before each displayed frame the present thread
+// calls begin_frame, which handles the session's events, waits until the
+// headset wants a frame and hands over this frame's two eye images; RT64 draws
+// its left and right eyes into them, and end_frame gives them back and submits
+// the frame. So the headset sets the pace, and RT64's frame rate is set to
+// the headset's while it does. When the session is not running -- the headset
+// is off, or not yet ready -- begin_frame says so and RT64 paces itself to the
+// window as before.
+//
+// For now each eye is the game's own camera and lens, shown fixed to the face:
+// the projection layer is placed in VIEW space, so the picture follows the
+// head. The headset's lens and head tracking come next.
 //
 // tools/xr_test is the same path stripped of the game, for when something
 // here does not work and the question is whether it is the headset.
@@ -36,20 +44,70 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <thread>
 #include <vector>
+
+// RT64's side of the headset output; these mirror the definitions in
+// tools/patch_rt64_vr.py and must stay identical to them.
+namespace RT64 {
+struct RT64_XrEye {
+    void* resource;
+    uint32_t width;
+    uint32_t height;
+};
+
+struct RT64_XrFrame {
+    RT64_XrEye eyes[2];
+    int writeRaw;
+};
+
+typedef int (*RT64_XrBeginFrame)(void* user, RT64_XrFrame* frame);
+typedef void (*RT64_XrEndFrame)(void* user, int rendered);
+}  // namespace RT64
+
+extern "C" void RT64_SetXrOutput(RT64::RT64_XrBeginFrame begin, RT64::RT64_XrEndFrame end, void* user);
+extern "C" void RT64_SetXrRefreshRate(uint32_t rate);
+extern "C" void RT64_SetStereo(int mode, float separation);
 
 namespace wr64::vr {
 
 namespace {
+
+// Two units is about a human eye separation by the camera log's measure. The
+// headset reports the real one; using it is part of head tracking.
+constexpr float kVrStereoSeparation = 2.0f;
+
+struct Eye {
+    XrSwapchain swapchain = XR_NULL_HANDLE;
+    uint32_t width = 0, height = 0;
+    std::vector<XrSwapchainImageD3D12KHR> images;
+    uint32_t acquired = 0;
+};
 
 XrInstance g_instance = XR_NULL_HANDLE;
 XrSystemId g_system = XR_NULL_SYSTEM_ID;
 XrSession g_session = XR_NULL_HANDLE;
 XrSpace g_local = XR_NULL_HANDLE;
 XrSpace g_head = XR_NULL_HANDLE;
-std::thread g_thread;
-std::atomic<bool> g_stop{ false };
+Eye g_eyes[2];
+bool g_write_raw = false;
+
+// Every OpenXR call after attach is made under this lock: by the present
+// thread between begin_frame and end_frame (held across both, so a frame is
+// never interrupted), and by shutdown on the game's thread.
+std::mutex g_mutex;
+bool g_shutting_down = false;
+
+// Session and frame state, under g_mutex.
+bool g_running = false;
+XrFrameState g_frame_state{ XR_TYPE_FRAME_STATE };
+XrView g_views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+bool g_images_acquired = false;
+XrDuration g_reported_period = 0;
+uint64_t g_frames = 0;
+uint64_t g_drawn = 0;
+std::chrono::steady_clock::time_point g_last_report;
 
 bool ok(XrResult result, const char* what) {
     if (XR_SUCCEEDED(result)) return true;
@@ -75,6 +133,10 @@ const char* state_name(XrSessionState state) {
 }
 
 void destroy() {
+    for (Eye& eye : g_eyes) {
+        if (eye.swapchain != XR_NULL_HANDLE) xrDestroySwapchain(eye.swapchain);
+        eye = Eye{};
+    }
     if (g_head != XR_NULL_HANDLE) xrDestroySpace(g_head);
     if (g_local != XR_NULL_HANDLE) xrDestroySpace(g_local);
     if (g_session != XR_NULL_HANDLE) xrDestroySession(g_session);
@@ -84,101 +146,207 @@ void destroy() {
     g_instance = XR_NULL_HANDLE;
 }
 
-// The session's own loop: events, and while the session is running an empty
-// frame each display period, which is what keeps the runtime from deciding
-// the application has stopped responding. Once every two seconds it reports
-// the frame rate the headset is pacing it at and where the head is.
-void session_loop() {
-    bool running = false;
-    bool exit_requested = false;
-    std::chrono::steady_clock::time_point exit_requested_at;
-    uint64_t frames = 0;
-    XrDuration reported_period = 0;
-    auto last_report = std::chrono::steady_clock::now();
-
-    for (;;) {
-        XrEventDataBuffer event{ XR_TYPE_EVENT_DATA_BUFFER };
-        bool exiting = false;
-        while (xrPollEvent(g_instance, &event) == XR_SUCCESS) {
-            if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
-                const auto& changed = *reinterpret_cast<XrEventDataSessionStateChanged*>(&event);
-                std::fprintf(stderr, "[wr64-vr] session %s\n", state_name(changed.state));
-                std::fflush(stderr);
-                if (changed.state == XR_SESSION_STATE_READY) {
-                    XrSessionBeginInfo begin{ XR_TYPE_SESSION_BEGIN_INFO };
-                    begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-                    running = ok(xrBeginSession(g_session, &begin), "xrBeginSession");
-                }
-                else if (changed.state == XR_SESSION_STATE_STOPPING) {
-                    xrEndSession(g_session);
-                    running = false;
-                }
-                else if (changed.state == XR_SESSION_STATE_EXITING ||
-                         changed.state == XR_SESSION_STATE_LOSS_PENDING) {
-                    exiting = true;
-                }
-            }
-            else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
-                exiting = true;
-            }
-            event = { XR_TYPE_EVENT_DATA_BUFFER };
-        }
-        if (exiting) break;
-
-        // Shutting down: ask the runtime to end the session, and wait for it
-        // to say so -- but not for ever, so a runtime that never answers
-        // cannot keep the game from closing. A session that was never running
-        // can simply be left.
-        if (g_stop.load()) {
-            if (!running) break;
-            if (!exit_requested) {
-                exit_requested = true;
-                exit_requested_at = std::chrono::steady_clock::now();
-                xrRequestExitSession(g_session);
-            }
-            else if (std::chrono::steady_clock::now() - exit_requested_at > std::chrono::seconds(3)) {
-                std::fprintf(stderr, "[wr64-vr] the runtime did not end the session; leaving it\n");
-                break;
-            }
-        }
-
-        if (!running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-
-        XrFrameState frame_state{ XR_TYPE_FRAME_STATE };
-        if (!ok(xrWaitFrame(g_session, nullptr, &frame_state), "xrWaitFrame")) break;
-        if (!ok(xrBeginFrame(g_session, nullptr), "xrBeginFrame")) break;
-        XrFrameEndInfo end{ XR_TYPE_FRAME_END_INFO };
-        end.displayTime = frame_state.predictedDisplayTime;
-        end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        if (!ok(xrEndFrame(g_session, &end), "xrEndFrame")) break;
-        ++frames;
-
-        if (frame_state.predictedDisplayPeriod != reported_period && frame_state.predictedDisplayPeriod > 0) {
-            reported_period = frame_state.predictedDisplayPeriod;
-            std::fprintf(stderr, "[wr64-vr] the headset refreshes at %.1f Hz\n",
-                         1e9 / double(frame_state.predictedDisplayPeriod));
+// The session's events, under g_mutex. Returns false once the session has
+// ended for good.
+bool poll_events() {
+    XrEventDataBuffer event{ XR_TYPE_EVENT_DATA_BUFFER };
+    bool alive = true;
+    while (xrPollEvent(g_instance, &event) == XR_SUCCESS) {
+        if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+            const auto& changed = *reinterpret_cast<XrEventDataSessionStateChanged*>(&event);
+            std::fprintf(stderr, "[wr64-vr] session %s\n", state_name(changed.state));
             std::fflush(stderr);
+            if (changed.state == XR_SESSION_STATE_READY) {
+                XrSessionBeginInfo begin{ XR_TYPE_SESSION_BEGIN_INFO };
+                begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                g_running = ok(xrBeginSession(g_session, &begin), "xrBeginSession");
+            }
+            else if (changed.state == XR_SESSION_STATE_STOPPING) {
+                xrEndSession(g_session);
+                g_running = false;
+                // RT64 paces itself to the window again until the session is back.
+                RT64_SetXrRefreshRate(0);
+                g_reported_period = 0;
+            }
+            else if (changed.state == XR_SESSION_STATE_EXITING ||
+                     changed.state == XR_SESSION_STATE_LOSS_PENDING) {
+                alive = false;
+            }
         }
+        else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
+            alive = false;
+        }
+        event = { XR_TYPE_EVENT_DATA_BUFFER };
+    }
+    return alive;
+}
 
-        const auto now = std::chrono::steady_clock::now();
-        if (now - last_report >= std::chrono::seconds(2)) {
-            const double interval = std::chrono::duration<double>(now - last_report).count();
-            last_report = now;
-            XrSpaceLocation where{ XR_TYPE_SPACE_LOCATION };
-            xrLocateSpace(g_head, g_local, frame_state.predictedDisplayTime, &where);
-            std::fprintf(stderr, "[wr64-vr] %.0f frames a second, head at (%+.3f, %+.3f, %+.3f) m\n",
-                         double(frames) / interval, where.pose.position.x, where.pose.position.y,
-                         where.pose.position.z);
-            std::fflush(stderr);
-            frames = 0;
+// RT64's present thread, before each displayed frame. The lock taken here is
+// held until end_frame whenever a frame is begun (0 or 1 returned).
+int begin_frame(void*, RT64::RT64_XrFrame* frame) {
+    g_mutex.lock();
+    if (g_shutting_down || !poll_events() || !g_running) {
+        g_mutex.unlock();
+        return -1;
+    }
+
+    g_frame_state = { XR_TYPE_FRAME_STATE };
+    if (!ok(xrWaitFrame(g_session, nullptr, &g_frame_state), "xrWaitFrame") ||
+        !ok(xrBeginFrame(g_session, nullptr), "xrBeginFrame")) {
+        g_mutex.unlock();
+        return -1;
+    }
+
+    if (g_frame_state.predictedDisplayPeriod != g_reported_period && g_frame_state.predictedDisplayPeriod > 0) {
+        g_reported_period = g_frame_state.predictedDisplayPeriod;
+        const double hz = 1e9 / double(g_frame_state.predictedDisplayPeriod);
+        RT64_SetXrRefreshRate(uint32_t(std::lround(hz)));
+        std::fprintf(stderr, "[wr64-vr] the headset refreshes at %.1f Hz; RT64 now renders for it\n", hz);
+        std::fflush(stderr);
+    }
+
+    // The eyes as they sit in the head: VIEW space, since for now the picture
+    // is fixed to the face.
+    XrViewLocateInfo locate{ XR_TYPE_VIEW_LOCATE_INFO };
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = g_frame_state.predictedDisplayTime;
+    locate.space = g_head;
+    XrViewState view_state{ XR_TYPE_VIEW_STATE };
+    uint32_t located = 0;
+    g_views[0] = { XR_TYPE_VIEW };
+    g_views[1] = { XR_TYPE_VIEW };
+    xrLocateViews(g_session, &locate, &view_state, 2, &located, g_views);
+
+    g_images_acquired = false;
+    if (!g_frame_state.shouldRender || located != 2) {
+        return 0;
+    }
+
+    for (uint32_t e = 0; e < 2; ++e) {
+        Eye& eye = g_eyes[e];
+        xrAcquireSwapchainImage(eye.swapchain, nullptr, &eye.acquired);
+        XrSwapchainImageWaitInfo wait{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+        wait.timeout = XR_INFINITE_DURATION;
+        xrWaitSwapchainImage(eye.swapchain, &wait);
+        frame->eyes[e].resource = eye.images[eye.acquired].texture;
+        frame->eyes[e].width = eye.width;
+        frame->eyes[e].height = eye.height;
+    }
+    frame->writeRaw = g_write_raw ? 1 : 0;
+    g_images_acquired = true;
+    return 1;
+}
+
+// RT64's present thread, after the frame begun above, drawn or not. Its
+// command list has finished, so the images can go straight back.
+void end_frame(void*, int rendered) {
+    if (g_images_acquired) {
+        for (Eye& eye : g_eyes) {
+            xrReleaseSwapchainImage(eye.swapchain, nullptr);
         }
     }
 
-    std::fprintf(stderr, "[wr64-vr] session loop finished\n");
+    XrCompositionLayerProjectionView views[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW },
+                                                  { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
+    for (uint32_t e = 0; e < 2; ++e) {
+        views[e].pose = g_views[e].pose;
+        views[e].fov = g_views[e].fov;
+        views[e].subImage.swapchain = g_eyes[e].swapchain;
+        views[e].subImage.imageRect.extent = { int32_t(g_eyes[e].width), int32_t(g_eyes[e].height) };
+    }
+    XrCompositionLayerProjection layer{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+    layer.space = g_head;
+    layer.viewCount = 2;
+    layer.views = views;
+    const XrCompositionLayerBaseHeader* layers[] = { reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer) };
+
+    const bool submit = g_images_acquired && rendered != 0;
+    XrFrameEndInfo end{ XR_TYPE_FRAME_END_INFO };
+    end.displayTime = g_frame_state.predictedDisplayTime;
+    end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = submit ? 1 : 0;
+    end.layers = layers;
+    ok(xrEndFrame(g_session, &end), "xrEndFrame");
+    g_images_acquired = false;
+
+    ++g_frames;
+    if (submit) ++g_drawn;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_last_report >= std::chrono::seconds(2)) {
+        const double interval = std::chrono::duration<double>(now - g_last_report).count();
+        if (g_last_report.time_since_epoch().count() != 0) {
+            std::fprintf(stderr, "[wr64-vr] %.0f headset frames a second, %.0f of them drawn\n",
+                         double(g_frames) / interval, double(g_drawn) / interval);
+            std::fflush(stderr);
+        }
+        g_last_report = now;
+        g_frames = 0;
+        g_drawn = 0;
+    }
+
+    g_mutex.unlock();
+}
+
+// One swapchain per eye at the size the headset recommends. sRGB is asked
+// for, so the compositor reads the images as the gamma-encoded pictures they
+// are. What the runtime makes of that decides how RT64 writes to them: a
+// typeless image takes the VI's output as it is through a plain view, while
+// an image made in the sRGB format itself encodes as it is written, and is
+// given the output linearised.
+bool create_swapchains() {
+    uint32_t view_count = 0;
+    xrEnumerateViewConfigurationViews(g_instance, g_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &view_count, nullptr);
+    std::vector<XrViewConfigurationView> views(view_count, { XR_TYPE_VIEW_CONFIGURATION_VIEW });
+    xrEnumerateViewConfigurationViews(g_instance, g_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, view_count, &view_count, views.data());
+    if (view_count != 2) {
+        std::fprintf(stderr, "[wr64-vr] expected two views, the runtime reports %u\n", view_count);
+        return false;
+    }
+
+    uint32_t format_count = 0;
+    xrEnumerateSwapchainFormats(g_session, 0, &format_count, nullptr);
+    std::vector<int64_t> formats(format_count);
+    xrEnumerateSwapchainFormats(g_session, format_count, &format_count, formats.data());
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    for (DXGI_FORMAT wanted : { DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM }) {
+        for (int64_t f : formats) {
+            if (f == wanted && format == DXGI_FORMAT_UNKNOWN) format = wanted;
+        }
+    }
+    if (format == DXGI_FORMAT_UNKNOWN) {
+        std::fprintf(stderr, "[wr64-vr] the runtime offers no RGBA8 swapchain format\n");
+        return false;
+    }
+
+    for (uint32_t e = 0; e < 2; ++e) {
+        Eye& eye = g_eyes[e];
+        eye.width = views[e].recommendedImageRectWidth;
+        eye.height = views[e].recommendedImageRectHeight;
+        XrSwapchainCreateInfo info{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
+        info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+        info.format = format;
+        info.sampleCount = 1;
+        info.width = eye.width;
+        info.height = eye.height;
+        info.faceCount = 1;
+        info.arraySize = 1;
+        info.mipCount = 1;
+        if (!ok(xrCreateSwapchain(g_session, &info, &eye.swapchain), "xrCreateSwapchain")) return false;
+        uint32_t count = 0;
+        xrEnumerateSwapchainImages(eye.swapchain, 0, &count, nullptr);
+        eye.images.assign(count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR });
+        xrEnumerateSwapchainImages(eye.swapchain, count, &count,
+                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(eye.images.data()));
+    }
+
+    const DXGI_FORMAT made = g_eyes[0].images[0].texture->GetDesc().Format;
+    g_write_raw = (made == DXGI_FORMAT_R8G8B8A8_TYPELESS) || (format == DXGI_FORMAT_R8G8B8A8_UNORM);
+    std::fprintf(stderr, "[wr64-vr] eye images %u x %u, %zu per eye, %s, %s\n", g_eyes[0].width,
+                 g_eyes[0].height, g_eyes[0].images.size(),
+                 format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ? "sRGB" : "linear",
+                 g_write_raw ? "written as they are" : "encoded as they are written");
     std::fflush(stderr);
+    return true;
 }
 
 }  // namespace
@@ -276,24 +444,56 @@ void attach(void* d3d12_device, void* d3d12_queue) {
         return;
     }
 
-    uint32_t view_count = 0;
-    xrEnumerateViewConfigurationViews(g_instance, g_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &view_count, nullptr);
-    std::vector<XrViewConfigurationView> views(view_count, { XR_TYPE_VIEW_CONFIGURATION_VIEW });
-    xrEnumerateViewConfigurationViews(g_instance, g_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, view_count, &view_count, views.data());
-    if (view_count == 2) {
-        std::fprintf(stderr, "[wr64-vr] the headset asks for %u x %u per eye\n",
-                     views[0].recommendedImageRectWidth, views[0].recommendedImageRectHeight);
+    if (!create_swapchains()) {
+        destroy();
+        return;
     }
-    std::fflush(stderr);
 
-    g_stop = false;
-    g_thread = std::thread(session_loop);
+    // The headset needs two eyes, so stereo is on whatever F8 last chose.
+    RT64_SetStereo(1, kVrStereoSeparation);
+    g_shutting_down = false;
+    RT64_SetXrOutput(begin_frame, end_frame, nullptr);
+    std::fprintf(stderr, "[wr64-vr] RT64 will draw the headset's eye images\n");
+    std::fflush(stderr);
 }
 
 void shutdown() {
     if (g_instance == XR_NULL_HANDLE) return;
-    g_stop = true;
-    if (g_thread.joinable()) g_thread.join();
+
+    // RT64 stops calling in; a frame already begun finishes first, since its
+    // lock is held until it ends.
+    RT64_SetXrOutput(nullptr, nullptr, nullptr);
+    RT64_SetXrRefreshRate(0);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_shutting_down = true;
+
+    // Ask the runtime to end the session, and wait for it to say so -- but not
+    // for ever, so a runtime that never answers cannot keep the game from
+    // closing. Empty frames keep the session moving towards its end, since
+    // RT64 no longer supplies any.
+    if (g_running) {
+        xrRequestExitSession(g_session);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (g_running && std::chrono::steady_clock::now() < deadline) {
+            if (!poll_events()) break;
+            if (!g_running) break;
+            XrFrameState state{ XR_TYPE_FRAME_STATE };
+            if (XR_SUCCEEDED(xrWaitFrame(g_session, nullptr, &state)) &&
+                XR_SUCCEEDED(xrBeginFrame(g_session, nullptr))) {
+                XrFrameEndInfo end{ XR_TYPE_FRAME_END_INFO };
+                end.displayTime = state.predictedDisplayTime;
+                end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+                xrEndFrame(g_session, &end);
+            }
+            else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        if (g_running) {
+            std::fprintf(stderr, "[wr64-vr] the runtime did not end the session; leaving it\n");
+        }
+    }
+
     destroy();
     std::fprintf(stderr, "[wr64-vr] OpenXR shut down\n");
     std::fflush(stderr);

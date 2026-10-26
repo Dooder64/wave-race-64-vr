@@ -38,6 +38,18 @@ decided once and kept with the frame's counters, so the two queues cannot
 disagree about it. A frame RT64 has no target to redraw shows the left eye
 in both halves.
 
+A headset is a second output beside the window. The port registers two
+callbacks through RT64_SetXrOutput, and the present queue calls the first
+before each displayed frame: it waits until the headset wants a frame and
+hands over the two eye images to draw into, which the VI renderer fills from
+the same pictures as the window's halves. The second hands the frame back
+once the command list that drew it has finished. While a headset sets the
+pace this way the present queue does not also pace itself to the window,
+and RT64_SetXrRefreshRate lets the frame rate follow the headset's rather
+than stop at the window's. RT64 knows nothing of OpenXR: the images arrive
+as Direct3D 12 resources, wrapped as plume textures the way the swap chain's
+buffers are.
+
 Scripted and idempotent because it patches a submodule: a submodule update
 would otherwise revert it silently.
 
@@ -171,37 +183,53 @@ VI_PARAMS_REPLACEMENT = """            bool removeBlackBorders = false;
 
             // wr64: the part of the window to draw into, from regionX and
             // regionWidth pixels wide, for side-by-side stereo. A width of
-            // zero (the default) is the whole window.
+            // zero (the default) is the whole window. regionHeight is the
+            // height of the target when it is not the window -- a headset's
+            // eye image -- and zero is the window's.
             float regionX = 0.0f;
             float regionWidth = 0.0f;
+            float regionHeight = 0.0f;
+
+            // wr64: multiplies the VI's gamma. A target that encodes to sRGB
+            // as it is written is given the VI's output linearised (2.2), so
+            // the two cancel rather than brightening the picture twice.
+            float gammaScale = 1.0f;
         };
 """
 
 VI_DECL_ANCHOR = """        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
 """
 
-VI_DECL_REPLACEMENT = """        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor, float regionX = 0.0f, float regionWidth = 0.0f);
+VI_DECL_REPLACEMENT = """        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor, float regionX = 0.0f, float regionWidth = 0.0f, float regionHeight = 0.0f);
 """
 
 VI_CALL_ANCHOR = """        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
 """
 
-VI_CALL_REPLACEMENT = """        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor, p.regionX, p.regionWidth);
+VI_CALL_REPLACEMENT = """        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor, p.regionX, p.regionWidth, p.regionHeight);
 """
 
 VI_DEF_ANCHOR = """    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
 """
 
-VI_DEF_REPLACEMENT = """    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor, float regionX, float regionWidth) {
+VI_DEF_REPLACEMENT = """    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor, float regionX, float regionWidth, float regionHeight) {
 """
 
 VI_SIZE_ANCHOR = """        const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
 """
 
-VI_SIZE_REPLACEMENT = """        // wr64: a region is laid out as a window of its own width, then moved
-        // into place at the end.
+VI_SIZE_REPLACEMENT = """        // wr64: a region is laid out as a window of its own width -- and, in a
+        // target that is not the window, its own height -- then moved into
+        // place at the end.
         const float layoutWidth = (regionWidth > 0.0f) ? regionWidth : float(swapChain->getWidth());
-        const hlslpp::float2 windowSize = { layoutWidth, float(swapChain->getHeight()) };
+        const float layoutHeight = (regionHeight > 0.0f) ? regionHeight : float(swapChain->getHeight());
+        const hlslpp::float2 windowSize = { layoutWidth, layoutHeight };
+"""
+
+VI_GAMMA_ANCHOR = """        pushConstants.gamma = p.vi->gamma();
+"""
+
+VI_GAMMA_REPLACEMENT = """        pushConstants.gamma = p.vi->gamma() * p.gammaScale; // wr64: see gammaScale.
 """
 
 VI_REGION_ANCHOR = """            scissor.bottom = std::min(scissor.bottom, int32_t(windowSize.y));
@@ -356,7 +384,12 @@ PRESENT_DRAW_ANCHOR = """                if (renderParams.texture != nullptr) {
                 }
 """
 
-PRESENT_DRAW_REPLACEMENT = """                if (renderParams.texture != nullptr) {
+PRESENT_DRAW_REPLACEMENT = """                // wr64: what each eye was drawn to the window from, for the
+                // headset's images below. Without a picture this frame both stay
+                // empty, and the headset's images are only cleared.
+                VIRenderer::RenderParams wr64EyeParams[2];
+
+                if (renderParams.texture != nullptr) {
                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
 
                     // wr64: side-by-side stereo draws the left eye into the left
@@ -397,11 +430,259 @@ PRESENT_DRAW_REPLACEMENT = """                if (renderParams.texture != nullpt
                         // Its own VI renderer: each holds the texture it samples in
                         // a descriptor set, and both draws are in one command list.
                         wr64RightViRenderer->render(rightParams);
+                        wr64EyeParams[0] = renderParams;
+                        wr64EyeParams[1] = rightParams;
                     }
                     else {
                         viRenderer->render(renderParams);
+                        wr64EyeParams[0] = renderParams;
+                        wr64EyeParams[1] = renderParams;
                     }
                 }
+"""
+
+# --- a headset as a second output -------------------------------------------
+
+XR_DECL_ANCHOR = """    // PresentQueue
+
+    PresentQueue::PresentQueue() {
+"""
+
+XR_DECL_REPLACEMENT = """    // wr64: a headset as a second output, supplied by the port (src/vr_openxr.cpp,
+    // which mirrors these two structs and must keep them identical). begin
+    // waits until the headset wants a frame and returns -1 for no headset frame
+    // (none attached, or its session not running), 0 for a frame it does not
+    // want drawn, and 1 for a frame whose eye images are to be drawn; every
+    // frame begun is handed back through end, drawn or not. writeRaw says the
+    // images take the VI's output as it is; otherwise they encode to sRGB as
+    // they are written, and are given it linearised.
+    struct RT64_XrEye {
+        void *resource;
+        uint32_t width;
+        uint32_t height;
+    };
+
+    struct RT64_XrFrame {
+        RT64_XrEye eyes[2];
+        int writeRaw;
+    };
+
+    typedef int (*RT64_XrBeginFrame)(void *user, RT64_XrFrame *frame);
+    typedef void (*RT64_XrEndFrame)(void *user, int rendered);
+
+    struct Wr64XrOutput {
+        RT64_XrBeginFrame begin = nullptr;
+        RT64_XrEndFrame end = nullptr;
+        void *user = nullptr;
+    };
+
+    static std::mutex wr64XrOutputMutex;
+    static Wr64XrOutput wr64XrOutput;
+
+    // wr64: the headset's refresh rate while it sets the pace, zero otherwise.
+    // Read by the workload queue, which renders frames for that rate.
+    std::atomic<uint32_t> wr64XrRefreshRate{ 0 };
+
+    extern "C" void RT64_SetXrOutput(RT64_XrBeginFrame begin, RT64_XrEndFrame end, void *user) {
+        std::scoped_lock lock(wr64XrOutputMutex);
+        wr64XrOutput.begin = begin;
+        wr64XrOutput.end = end;
+        wr64XrOutput.user = user;
+    }
+
+    extern "C" void RT64_SetXrRefreshRate(uint32_t rate) {
+        wr64XrRefreshRate.store(rate, std::memory_order_relaxed);
+    }
+
+    // PresentQueue
+
+    PresentQueue::PresentQueue() {
+"""
+
+XR_INCLUDE_ANCHOR = """#include "rt64_present_queue.h"
+
+#include "common/rt64_thread.h"
+"""
+
+XR_INCLUDE_REPLACEMENT = """#include "rt64_present_queue.h"
+
+#include "common/rt64_thread.h"
+
+#if defined(_WIN32)
+// wr64: the headset's eye images are Direct3D 12 resources, wrapped as plume
+// textures to draw into.
+#   include "plume_d3d12.h"
+#endif
+"""
+
+XR_BEGIN_ANCHOR = """            uint32_t swapChainIndex = 0;
+"""
+
+XR_BEGIN_REPLACEMENT = """            // wr64: when a headset is attached it sets the pace: beginning its frame
+            // waits until it wants one. Without one the wrapped images it left
+            // are forgotten.
+            Wr64XrOutput wr64Xr;
+            {
+                std::scoped_lock lock(wr64XrOutputMutex);
+                wr64Xr = wr64XrOutput;
+            }
+            if (wr64Xr.begin == nullptr) {
+                wr64XrTargets.clear();
+            }
+
+            RT64_XrFrame wr64XrFrame = {};
+            const int wr64XrState = (wr64Xr.begin != nullptr) ? wr64Xr.begin(wr64Xr.user, &wr64XrFrame) : -1;
+            bool wr64XrRendered = false;
+
+            uint32_t swapChainIndex = 0;
+"""
+
+XR_DRAW_ANCHOR = """                RenderHookDraw *drawHook = GetRenderHookDraw();
+"""
+
+XR_DRAW_REPLACEMENT = """#               if defined(_WIN32)
+                // wr64: the headset's eye images, drawn from the same pictures as
+                // the window's halves. Each image is wrapped once, by its resource,
+                // as a plume texture with a framebuffer of its own, the way the
+                // swap chain's buffers are; the wrapper owns nothing, so the
+                // runtime's images are never released here. The runtime hands an
+                // image over in the render-target state and takes it back so.
+                if (wr64XrState == 1) {
+                    for (uint32_t eye = 0; eye < 2; eye++) {
+                        const RT64_XrEye &xrEye = wr64XrFrame.eyes[eye];
+                        Wr64XrTarget &xrTarget = wr64XrTargets[xrEye.resource];
+                        if (xrTarget.texture == nullptr) {
+                            auto xrTexture = std::make_unique<D3D12Texture>();
+                            xrTexture->d3d = static_cast<ID3D12Resource *>(xrEye.resource);
+                            xrTexture->device = static_cast<D3D12Device *>(ext.device);
+                            xrTexture->desc.dimension = RenderTextureDimension::TEXTURE_2D;
+                            xrTexture->desc.width = xrEye.width;
+                            xrTexture->desc.height = xrEye.height;
+                            xrTexture->desc.depth = 1;
+                            xrTexture->desc.mipLevels = 1;
+                            xrTexture->desc.arraySize = 1;
+                            // Raw: a view that writes the bytes as they are. Otherwise
+                            // the view takes the image's own sRGB format.
+                            xrTexture->desc.format = wr64XrFrame.writeRaw ? RenderFormat::R8G8B8A8_UNORM : RenderFormat::UNKNOWN;
+                            xrTexture->desc.flags = RenderTextureFlag::RENDER_TARGET;
+                            const RenderTexture *xrAttachment = xrTexture.get();
+                            xrTarget.framebuffer = ext.device->createFramebuffer(RenderFramebufferDesc(&xrAttachment, 1));
+                            xrTarget.texture = std::move(xrTexture);
+                        }
+
+                        D3D12Texture *xrTexture = static_cast<D3D12Texture *>(xrTarget.texture.get());
+                        xrTexture->resourceStates = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                        xrTexture->layout = RenderTextureLayout::COLOR_WRITE;
+                        commandList->setFramebuffer(xrTarget.framebuffer.get());
+                        commandList->clearColor();
+                        if (wr64EyeParams[eye].texture != nullptr) {
+                            VIRenderer::RenderParams xrParams = wr64EyeParams[eye];
+                            xrParams.regionX = 0.0f;
+                            xrParams.regionWidth = float(xrEye.width);
+                            xrParams.regionHeight = float(xrEye.height);
+                            xrParams.gammaScale = wr64XrFrame.writeRaw ? 1.0f : 2.2f;
+                            if (wr64XrViRenderers[eye] == nullptr) {
+                                wr64XrViRenderers[eye] = std::make_unique<VIRenderer>();
+                            }
+
+                            wr64XrViRenderers[eye]->render(xrParams);
+                        }
+                    }
+
+                    commandList->setFramebuffer(swapChainFramebuffer);
+                    wr64XrRendered = true;
+                }
+#               endif
+
+                RenderHookDraw *drawHook = GetRenderHookDraw();
+"""
+
+XR_END_ANCHOR = """                    ext.presentGraphicsWorker->wait();
+                }
+            }
+"""
+
+XR_END_REPLACEMENT = """                    ext.presentGraphicsWorker->wait();
+                }
+            }
+
+            // wr64: hand the headset its frame back, drawn or not. The command list
+            // that drew its images has been executed and waited on, so the GPU is
+            // done with them before the runtime takes them back.
+            if (wr64XrState >= 0) {
+                wr64Xr.end(wr64Xr.user, wr64XrRendered ? 1 : 0);
+            }
+"""
+
+XR_SLEEP_ANCHOR = """                if ((presentTimestamp != Timestamp()) && (targetRate > 0) && (targetRate > viOriginalRate)) {
+"""
+
+XR_SLEEP_REPLACEMENT = """                // wr64: not while a headset sets the pace; its frame wait already has.
+                if ((wr64XrState < 0) && (presentTimestamp != Timestamp()) && (targetRate > 0) && (targetRate > viOriginalRate)) {
+"""
+
+XR_WAIT_ANCHOR = """                if (presentWaitEnabled) {
+"""
+
+XR_WAIT_REPLACEMENT = """                // wr64: nor wait for the window's refresh, which would hold the
+                // headset to it.
+                if (presentWaitEnabled && (wr64XrState < 0)) {
+"""
+
+XR_MEMBERS_ANCHOR = """        std::unique_ptr<Inspector> inspector;
+"""
+
+XR_MEMBERS_REPLACEMENT = """        std::unique_ptr<Inspector> inspector;
+
+        // wr64: the headset's eye images, wrapped to draw into and kept by the
+        // runtime's resource, and a VI renderer for each eye.
+        struct Wr64XrTarget {
+            std::unique_ptr<RenderTexture> texture;
+            std::unique_ptr<RenderFramebuffer> framebuffer;
+        };
+        std::unordered_map<void *, Wr64XrTarget> wr64XrTargets;
+        std::unique_ptr<VIRenderer> wr64XrViRenderers[2];
+"""
+
+XR_HEADER_INCLUDE_ANCHOR = """#include "rt64_shared_queue_resources.h"
+"""
+
+XR_HEADER_INCLUDE_REPLACEMENT = """#include "rt64_shared_queue_resources.h"
+
+#include <unordered_map> // wr64: the headset's wrapped eye images.
+"""
+
+# --- the frame rate follows the headset -------------------------------------
+
+XR_RATE_EXTERN_ANCHOR = """#include "rt64_present_queue.h"
+
+#define ENABLE_HIGH_RESOLUTION_RENDERER 1
+"""
+
+XR_RATE_EXTERN_REPLACEMENT = """#include "rt64_present_queue.h"
+
+#include <atomic>
+
+namespace RT64 {
+    // wr64: the headset's refresh rate while it sets the pace, zero otherwise
+    // (rt64_present_queue.cpp).
+    extern std::atomic<uint32_t> wr64XrRefreshRate;
+};
+
+#define ENABLE_HIGH_RESOLUTION_RENDERER 1
+"""
+
+XR_RATE_ANCHOR = """        ext.sharedResources->targetRate = workloadConfig.targetRate;
+"""
+
+XR_RATE_REPLACEMENT = """        // wr64: a headset that sets the pace sets the frame rate too, past the
+        // window's refresh rate that caps every other choice above.
+        const uint32_t wr64XrRate = wr64XrRefreshRate.load(std::memory_order_relaxed);
+        if (wr64XrRate > 0) {
+            workloadConfig.targetRate = wr64XrRate;
+        }
+
+        ext.sharedResources->targetRate = workloadConfig.targetRate;
 """
 
 PRESENT_MEMBER_ANCHOR = """        std::unique_ptr<VIRenderer> viRenderer;
@@ -456,8 +737,20 @@ def main():
     patch(VI_RENDERER, VI_DEF_ANCHOR, VI_DEF_REPLACEMENT, "stereo (region definition)")
     patch(VI_RENDERER, VI_SIZE_ANCHOR, VI_SIZE_REPLACEMENT, "stereo (region size)")
     patch(VI_RENDERER, VI_REGION_ANCHOR, VI_REGION_REPLACEMENT, "stereo (region placement)")
+    patch(VI_RENDERER, VI_GAMMA_ANCHOR, VI_GAMMA_REPLACEMENT, "headset (gamma)")
     patch(PRESENT_QUEUE, PRESENT_EXTERN_ANCHOR, PRESENT_EXTERN_REPLACEMENT, "stereo (present switch)")
     patch(PRESENT_QUEUE, PRESENT_DRAW_ANCHOR, PRESENT_DRAW_REPLACEMENT, "stereo (present halves)")
+    patch(PRESENT_QUEUE, XR_INCLUDE_ANCHOR, XR_INCLUDE_REPLACEMENT, "headset (include)")
+    patch(PRESENT_QUEUE, XR_DECL_ANCHOR, XR_DECL_REPLACEMENT, "headset (output)")
+    patch(PRESENT_QUEUE, XR_BEGIN_ANCHOR, XR_BEGIN_REPLACEMENT, "headset (frame begun)")
+    patch(PRESENT_QUEUE, XR_DRAW_ANCHOR, XR_DRAW_REPLACEMENT, "headset (eye images drawn)")
+    patch(PRESENT_QUEUE, XR_END_ANCHOR, XR_END_REPLACEMENT, "headset (frame ended)")
+    patch(PRESENT_QUEUE, XR_SLEEP_ANCHOR, XR_SLEEP_REPLACEMENT, "headset (no window pacing)")
+    patch(PRESENT_QUEUE, XR_WAIT_ANCHOR, XR_WAIT_REPLACEMENT, "headset (no window wait)")
+    patch(PRESENT_HEADER, XR_HEADER_INCLUDE_ANCHOR, XR_HEADER_INCLUDE_REPLACEMENT, "headset (header include)")
+    patch(PRESENT_HEADER, XR_MEMBERS_ANCHOR, XR_MEMBERS_REPLACEMENT, "headset (wrapped images)")
+    patch(WORKLOAD_QUEUE, XR_RATE_EXTERN_ANCHOR, XR_RATE_EXTERN_REPLACEMENT, "headset (rate switch)")
+    patch(WORKLOAD_QUEUE, XR_RATE_ANCHOR, XR_RATE_REPLACEMENT, "headset (frame rate)")
     print("Rebuild to pick it up.")
 
 

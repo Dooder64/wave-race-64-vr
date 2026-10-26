@@ -4,6 +4,21 @@
 // race camera sideways through RT64's view offset (tools/patch_rt64_vr.py);
 // the headset will be driven from here as well.
 
+namespace RT64 {
+struct Application;
+}
+
+namespace wr64 {
+
+// Starts VR mode's OpenXR session on a set-up RT64 application, when WR64_VR
+// asks for it, by handing attach() below RT64's native device and queue.
+// Called by whichever render context owns the application: the port's own
+// (src/renderer.cpp, which defines this), or RecompFrontend's when the
+// frontend is built (src/frontend.cpp).
+void attach_vr(RT64::Application& app);
+
+}  // namespace wr64
+
 namespace wr64::vr {
 
 // F7: steps the view offset through left, right and back to none.

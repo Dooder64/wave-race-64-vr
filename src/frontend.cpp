@@ -31,7 +31,6 @@
 #include "wr64/music.h"
 #include "wr64/textures.h"
 #include "wr64/haptics.h"
-#include "wr64/renderer.h"
 #include "wr64/rom.h"
 #include "wr64/vr.h"
 
