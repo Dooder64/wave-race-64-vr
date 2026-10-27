@@ -525,8 +525,11 @@ bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyList
 // the clouds' textures are not set up). It is a dome round the camera
 // instead, inside the camera's far plane: the gradient's texture from the
 // horizon's t at the horizon up to the peak's at the top, as the sine of the
-// elevation, and the horizon's carried on below it to where the waves cover
-// it. Only its gradient list is given.
+// elevation, and the horizon's carried on just below it, to past where the
+// ringed waves end (6000 units out, 1000 below: under 11 degrees). No
+// further: Drake Lake's water mixes in what is behind it (its authored
+// reflection), and dome behind some of the water but not the rest showed as
+// a dark disc in a pale lake. Only its gradient list is given.
 bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists) {
     static const bool keep = std::getenv("WR64_SKY_KEEP") != nullptr;
     if (keep || segment6 == 0) return false;
@@ -565,7 +568,7 @@ bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyL
     const float reference = facing(tent[0], tent[1], tent[6], inside);
     if (reference == 0.0f) return false;
 
-    static constexpr float kElevations[] = { -60, -30, -15, -5, 0, 2, 5, 10, 15, 20, 30, 45, 60, 75 };
+    static constexpr float kElevations[] = { -12, -5, 0, 2, 5, 10, 15, 20, 30, 45, 60, 75 };
     constexpr uint32_t kRings = sizeof(kElevations) / sizeof(kElevations[0]);
     std::vector<Vertex> v;
     std::vector<std::array<uint32_t, 3>> tris;

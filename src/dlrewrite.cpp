@@ -107,11 +107,13 @@
 // race (the direction arrow over the HUD) G_EX_ASPECT_STRETCH, which at the
 // headset's 4:3 changes nothing but keeps it off the lens; anywhere else (the
 // jet skis of the menus) G_EX_ASPECT_ADJUST, which RT64 draws in front of the
-// scene behind the panel, in its box. The track model the course card turns
-// in its box is left out, box and all, for now: the game circles its camera
-// round it, so on the panel it sweeps out of the box whatever its size. The
-// title's lens flare and the sun's glints and glare, rectangles that would
-// hang on the panel in front of the player's face, are left out too.
+// scene behind the panel, in its box -- the course card's and course
+// select's track model too. The title's lens flare and the sun's glints and
+// glare, rectangles that would hang on the panel in front of the player's
+// face, are left out. So is the screen-wide rectangle the results and course
+// select screens paint behind their water, the first rectangle after a call
+// of 0x0106F8A0 (kBackdropSetupList): on the panel, where the water is not, it
+// hid the view behind a sheet of colour.
 
 #include "wr64/dlrewrite.h"
 #include "wr64/display.h"
@@ -197,13 +199,10 @@ constexpr uint32_t kLensFlareTexture = 0x0100FAB0;
 constexpr uint32_t kSunGlintTexture = 0x08004400;
 constexpr uint32_t kSunGlareTexture = 0x01005748;
 
-// The course card's track model: the dark box it turns in, and the
-// projection it is drawn with, after which it is drawn by calls of lists in
-// segment 8, in the card's states. In VR both are left out, so the scene
-// shows where the box was as it does around the card (see 6. at the top).
-constexpr uint32_t kCardModelBoxTexture = 0x010545A8;
-constexpr uint32_t kCardModelProjection = 0x07000A40;
-constexpr uint32_t kCardModelSegment = 8;
+// The list the results and course select screens call before painting the
+// whole picture behind their water; that rectangle is left out in VR (see 6.
+// at the top).
+constexpr uint32_t kBackdropSetupList = 0x0106F8A0;
 
 // The game's camera projection, which it builds each frame in its frame
 // buffer, reached through segment 3: in VR the scene seen through the lens
@@ -430,9 +429,9 @@ struct Walker {
     // VR (see 6. at the top): whether a projection was given a group of its
     // own that the next must undo.
     bool own_group = false;
-    // VR: whether the course card's track model is being drawn, and so left
-    // out (see kCardModelProjection).
-    bool card_model = false;
+    // VR: whether kBackdropSetupList has been called, on the results or
+    // course select screen, and the next rectangle not yet seen.
+    bool backdrop_next = false;
     // First person: the rider's view for this frame, worked out at the
     // game's first view multiply (which shrinks the head), or 0.
     bool first_person_tried = false;
@@ -687,11 +686,12 @@ struct Walker {
     bool sky_replaced = false;
     wr64::SkyLists sky_lists{};
 
-    // VR, the results screen (state 0x34): the full grid of waves it draws,
+    // VR, the results and course-select screens: the full grid of waves it draws,
     // ringed out to the distance (patches/water_all_round.cpp), once a frame,
     // first needed by the sky, which is built over it, and then drawn by the
     // water's call; the segment base and list, or 0.
     static constexpr uint32_t kResultsState = 0x34;
+    static constexpr uint32_t kCourseSelectState = 0x14;   // looks down on the same grid
     static constexpr uint32_t kSkyFirstList = 0x010102D0;
     bool full_grid_tried = false;
     uint32_t full_grid_base = 0, full_grid_list = 0;
@@ -712,7 +712,7 @@ struct Walker {
     // its gradient is replaced, since the floor's and the clouds' textures
     // are not set up for them there.
     bool replace_sky_call(uint32_t list) {
-        const bool results = state == kResultsState;
+        const bool results = state == kResultsState || state == kCourseSelectState;
         if (!sky_tried && (list == kSkyFloorList || (results && list == kSkyFirstList))) {
             sky_tried = true;
             sky_replaced = results ? ring_full_grid() && wr64::sky_results_dome(rdram, segments[3], segments[6], &sky_lists)
@@ -1991,13 +1991,31 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
         const uint32_t w1 = c[1];
         const uint8_t op = static_cast<uint8_t>(w0 >> 24);
         cursor += 8;
+        if (op == kOpDisplayList && w1 == kBackdropSetupList && wr64::vr::enabled() && (state == 0x34 || state == 0x14)) {
+            w.backdrop_next = true;
+        }
 
-        // VR: the sun's lens flare, glints and glare, and the course card's
-        // model box, are left out (see 6. at the top).
+        // VR: the sun's lens flare, glints and glare are left out (see 6. at
+        // the top).
         if (op == kOpTexRect && w.projection_is_perspective && wr64::vr::enabled() &&
-            (w.texture == kLensFlareTexture || w.texture == kSunGlintTexture || w.texture == kSunGlareTexture ||
-             w.texture == kCardModelBoxTexture)) {
+            (w.texture == kLensFlareTexture || w.texture == kSunGlintTexture || w.texture == kSunGlareTexture)) {
             continue;
+        }
+        // VR, the results and course select screens: the rectangle over the
+        // whole picture painted behind the water is left out (see 6. at the
+        // top).
+        if (op == kOpFillRect && w.backdrop_next) {
+            w.backdrop_next = false;
+            if (((w1 >> 12) & 0xFFF) <= 8 * 4 && (w1 & 0xFFF) <= 20 * 4 &&
+                ((w0 >> 12) & 0xFFF) >= 311 * 4 && (w0 & 0xFFF) >= 219 * 4) {
+                static uint32_t reported = 0;
+                if (reported != state) {
+                    reported = state;
+                    std::fprintf(stderr, "[wr64-vr] state 0x%02X: the backdrop behind the water is left out\n", state);
+                    std::fflush(stderr);
+                }
+                continue;
+            }
         }
 
         // Rectangles are held back with the commands between them until their
@@ -2037,9 +2055,6 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
                 continue;
             }
             if (w.projection_is_perspective && w.replace_sky_call(w1)) {
-                continue;
-            }
-            if (w.card_model && (w1 >> 24) == kCardModelSegment) {
                 continue;
             }
             // VR, in a race and its finish: a call that loads a perspective
@@ -2280,7 +2295,6 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             // it is for, and the next load puts RT64's own back.
             if (projection_load && wr64::vr::enabled()) {
                 const bool persp = w.projection_is_perspective;
-                w.card_model = (state == 0x1E || state == 0x1F) && w1 == kCardModelProjection;
                 // Each perspective projection a game state loads is reported
                 // once, so a screen drawn wrongly in the headset can be matched
                 // to what drew it.

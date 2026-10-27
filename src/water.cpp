@@ -261,6 +261,11 @@ void publish_frame(const uint8_t *rdram, uint32_t display_list) {
     // The authored lake reflection was reviewed in the one-player fog path.
     // Do not apply that compatibility input to a different original layout.
     if (word(rdram,0x800DAB28)!=1) frame.optics.y=0;
+    // VR, the results and course-select screens: no mirrored scenery there,
+    // and what is behind the water through the headset's wide view is partly
+    // nothing, which showed as a flat, unfogged patch under the camera.
+    const uint32_t state=word(rdram,0x800DAB24);
+    if (wr64::vr::enabled() && (state==0x34 || state==0x14)) frame.optics.y=0;
     const uint32_t count=std::min(word(rdram,0x801982F0),4u);
     for (uint32_t i=0;i<4;i++) {
         interop::float4 craft{0,0,0,-1};

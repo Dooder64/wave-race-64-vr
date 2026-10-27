@@ -1611,15 +1611,41 @@ PANEL_CLEAR_REPLACEMENT = """                    clearRect.rect = convertFixedRe
                     // wr64: in the HUD's own passes (rt64_projection_processor.cpp),
                     // the frame's clear -- a fill most of the frame wide and tall --
                     // is black in the first and white in the second, which is what
-                    // the two are told apart by.
+                    // the two are told apart by. Any other fill of the picture is a
+                    // flat element, and goes onto the panel with the rest of them
+                    // (wr64PanelTransform) -- out of the eyes when the panel is a
+                    // layer of its own, which leaves it empty. The frame's depth
+                    // clear, through a headset's lens, clears the whole eye: the
+                    // game clears only inside its border, and the wider eye sees
+                    // past it, where old depth hid the water in bands at the top
+                    // and bottom.
                     {
                         extern int wr64PanelPass;
+                        extern bool wr64LensUsed;
+                        bool wr64PanelTransform(float out[4]);
                         const int32_t clearWidth = call.callDesc.rect.lrx - call.callDesc.rect.ulx;
                         const int32_t clearHeight = call.callDesc.rect.lry - call.callDesc.rect.uly;
-                        if ((wr64PanelPass != 0) && (p.fbStorage->colorTarget != nullptr) &&
-                            (clearWidth >= int32_t(p.fbWidth) * 3) && (clearHeight * 5 >= int32_t(p.fbHeight) * 12)) {
+                        const bool frameClear = (clearWidth >= int32_t(p.fbWidth) * 3) && (clearHeight * 5 >= int32_t(p.fbHeight) * 12);
+                        float wr64Panel[4];
+                        if ((wr64PanelPass != 0) && (p.fbStorage->colorTarget != nullptr) && frameClear) {
                             const float level = (wr64PanelPass == 2) ? 1.0f : 0.0f;
                             clearRect.color = RenderColor(level, level, level, 1.0f);
+                        }
+                        else if ((p.fbStorage->colorTarget == nullptr) && frameClear && wr64LensUsed) {
+                            clearRect.rect.left = 0;
+                            clearRect.rect.top = 0;
+                            clearRect.rect.right = int32_t(p.fbStorage->depthTarget->width);
+                            clearRect.rect.bottom = int32_t(p.fbStorage->depthTarget->height);
+                        }
+                        else if ((p.fbStorage->colorTarget != nullptr) && !frameClear && wr64PanelTransform(wr64Panel)) {
+                            const float halfWidth = framebuffer.viewport.width / 2.0f, halfHeight = framebuffer.viewport.height / 2.0f;
+                            auto across = [&](int32_t px) { return int32_t(std::lround(((px - halfWidth) / halfWidth * wr64Panel[0] + wr64Panel[1]) * halfWidth + halfWidth)); };
+                            auto down = [&](int32_t py) { return int32_t(std::lround(halfHeight - ((halfHeight - py) / halfHeight * wr64Panel[2] + wr64Panel[3]) * halfHeight)); };
+                            const int32_t width = int32_t(framebuffer.viewport.width), height = int32_t(framebuffer.viewport.height);
+                            clearRect.rect.left = std::clamp(across(clearRect.rect.left), 0, width);
+                            clearRect.rect.right = std::clamp(across(clearRect.rect.right), 0, width);
+                            clearRect.rect.top = std::clamp(down(clearRect.rect.top), 0, height);
+                            clearRect.rect.bottom = std::clamp(down(clearRect.rect.bottom), 0, height);
                         }
                     }
 """
@@ -1772,6 +1798,21 @@ PANEL_FRAME_CLEAR_REPLACEMENT = """        bool depthState = false;
 
 """
 
+# A fill moved off the picture has nothing left to clear.
+PANEL_FILL_GUARD_ANCHOR = """            case InstanceDrawCall::Type::FillRect: {
+                const auto &clearRect = drawCall.clearRect;
+"""
+
+PANEL_FILL_GUARD_REPLACEMENT = """            case InstanceDrawCall::Type::FillRect: {
+                const auto &clearRect = drawCall.clearRect;
+                // wr64: a fill moved off the picture onto the panel (in the eyes,
+                // when the panel is a layer of its own) has nothing left to clear.
+                if ((clearRect.rect.right <= clearRect.rect.left) || (clearRect.rect.bottom <= clearRect.rect.top)) {
+                    break;
+                }
+
+"""
+
 def ensure_file(target, content, name):
     if target.exists() and target.read_text() == content:
         print(f"  {target.name}: {name} already in place")
@@ -1843,6 +1884,7 @@ def main():
     patch(FRAMEBUFFER_RENDERER, PANEL_FRAMED_CLIP_ANCHOR, PANEL_FRAMED_CLIP_REPLACEMENT, "headset (framed viewports onto the panel)")
     patch(FRAMEBUFFER_RENDERER, PANEL_CLEAR_ANCHOR, PANEL_CLEAR_REPLACEMENT, "headset (the HUD's passes cleared black and white)")
     patch(FRAMEBUFFER_RENDERER, PANEL_FRAME_CLEAR_ANCHOR, PANEL_FRAME_CLEAR_REPLACEMENT, "headset (the HUD's pictures started black and white)")
+    patch(FRAMEBUFFER_RENDERER, PANEL_FILL_GUARD_ANCHOR, PANEL_FILL_GUARD_REPLACEMENT, "headset (fills moved off the picture)")
     patch(DESCRIPTOR_SETS, PANEL_SET_ANCHOR, PANEL_SET_REPLACEMENT, "headset (HUD combination's descriptors)")
     patch(SHADER_LIBRARY_HEADER, PANEL_RECORD_ANCHOR, PANEL_RECORD_REPLACEMENT, "headset (HUD combination's record)")
     patch(SHADER_LIBRARY, PANEL_SPIRV_ANCHOR, PANEL_SPIRV_REPLACEMENT, "headset (HUD combination, SPIR-V)")

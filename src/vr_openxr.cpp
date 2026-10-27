@@ -214,6 +214,9 @@ XrVector3f g_centre_position{ 0.0f, 0.0f, 0.0f };
 // the head were turned right by it -- for checking, with the headset still,
 // what stays put in the seated space and what follows the head.
 float g_centre_yaw = float(std::atof(std::getenv("WR64_VR_TEST_YAW") ? std::getenv("WR64_VR_TEST_YAW") : "0")) * 0.0174532925f;
+// WR64_VR_TEST_PITCH tilts the eyes that many degrees up, likewise, for
+// looking with the headset still at what lies above or below straight ahead.
+const float g_test_pitch = float(std::atof(std::getenv("WR64_VR_TEST_PITCH") ? std::getenv("WR64_VR_TEST_PITCH") : "0")) * 0.0174532925f;
 // ---- the Touch controllers ---------------------------------------------------
 //
 // Read through OpenXR actions, bound to Meta's Touch controller profile: each
@@ -538,7 +541,8 @@ void eye_transform(const XrPosef& pose, float out[16]) {
     const float pz = (-s * dx + c * dz) * scale;
 
     const XrQuaternionf unturn{ 0.0f, std::sin(-g_centre_yaw * 0.5f), 0.0f, std::cos(-g_centre_yaw * 0.5f) };
-    const XrQuaternionf q = multiply(unturn, pose.orientation);
+    const XrQuaternionf tilt{ std::sin(g_test_pitch * 0.5f), 0.0f, 0.0f, std::cos(g_test_pitch * 0.5f) };
+    const XrQuaternionf q = multiply(tilt, multiply(unturn, pose.orientation));
     const float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
     const float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
     const float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
