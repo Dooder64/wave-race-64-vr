@@ -87,6 +87,8 @@ bool enabled() { return false; }
 void attach(void*, void*) {}
 void shutdown() {}
 void recenter() {}
+Controllers controllers() { return {}; }
+void set_controller_rumble(float, float) {}
 #endif
 
 bool all_round() {

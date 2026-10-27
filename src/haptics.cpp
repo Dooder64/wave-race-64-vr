@@ -1,4 +1,6 @@
 #include "wr64/haptics.h"
+#include "wr64/vr.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -78,6 +80,11 @@ void update_output(SDL_GameController* controller, bool allowed) {
     // Own both SDL rumble channels only here, on the native main loop. The
     // transport refreshes at 125 Hz and expires after 50 ms if this loop stalls.
     controller_output.update(controller,levels,allowed,now);
+    // The headset's Touch controllers, one motor each: the heavy one and the
+    // left trigger's on the left hand, the light one and the right trigger's
+    // on the right.
+    wr64::vr::set_controller_rumble(allowed ? std::max(levels.low, levels.left_trigger) : 0.0f,
+                                    allowed ? std::max(levels.high, levels.right_trigger) : 0.0f);
 }
 void shutdown(SDL_GameController* controller) {
     controller_output.stop(controller);

@@ -57,6 +57,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -207,6 +208,28 @@ XrVector3f g_centre_position{ 0.0f, 0.0f, 0.0f };
 // the head were turned right by it -- for checking, with the headset still,
 // what stays put in the seated space and what follows the head.
 float g_centre_yaw = float(std::atof(std::getenv("WR64_VR_TEST_YAW") ? std::getenv("WR64_VR_TEST_YAW") : "0")) * 0.0174532925f;
+// ---- the Touch controllers ---------------------------------------------------
+//
+// Read through OpenXR actions, bound to Meta's Touch controller profile: each
+// hand's thumbstick, trigger and grip, the right hand's A and B, the left's
+// menu button and thumbstick click, and each hand's vibration. The present
+// thread syncs them each headset frame, under g_mutex, and leaves what it read
+// in atomics for the game's input (controllers()) -- only while the session
+// is focused, so the headset's own menus never steer the jet ski. Vibration
+// asked for by the port's haptics (set_controller_rumble) is sent from the
+// same place, a pulse a little longer than a frame, renewed each frame.
+XrActionSet g_action_set = XR_NULL_HANDLE;
+XrAction g_stick_action[2] = {}, g_trigger_action[2] = {}, g_grip_action[2] = {};
+XrAction g_a_action = XR_NULL_HANDLE, g_b_action = XR_NULL_HANDLE, g_menu_action = XR_NULL_HANDLE;
+XrAction g_stick_click_action = XR_NULL_HANDLE, g_haptic_action = XR_NULL_HANDLE;
+XrPath g_hand_paths[2] = { XR_NULL_PATH, XR_NULL_PATH };
+std::atomic<bool> g_pads_live{ false };
+std::atomic<float> g_pad_stick[2][2], g_pad_trigger[2], g_pad_grip[2];
+std::atomic<bool> g_pad_a{ false }, g_pad_b{ false }, g_pad_menu{ false };
+std::atomic<float> g_rumble[2];
+bool g_rumbling[2] = { false, false };
+bool g_stick_click_was = false;
+
 uint64_t g_frames = 0;
 uint64_t g_drawn = 0;
 uint64_t g_screen_frames = 0;
@@ -235,7 +258,148 @@ const char* state_name(XrSessionState state) {
     }
 }
 
+// The Touch controllers' actions, bound and attached to the session. False,
+// with a message, if anything is refused; the game then simply has no
+// controllers from the headset.
+bool create_controllers() {
+    XrActionSetCreateInfo set_info{ XR_TYPE_ACTION_SET_CREATE_INFO };
+    std::strcpy(set_info.actionSetName, "wr64");
+    std::strcpy(set_info.localizedActionSetName, "Wave Race 64");
+    if (!ok(xrCreateActionSet(g_instance, &set_info, &g_action_set), "xrCreateActionSet")) return false;
+
+    xrStringToPath(g_instance, "/user/hand/left", &g_hand_paths[0]);
+    xrStringToPath(g_instance, "/user/hand/right", &g_hand_paths[1]);
+    auto action = [&](XrAction* out, XrActionType type, const char* name, const char* shown, bool both_hands) {
+        XrActionCreateInfo info{ XR_TYPE_ACTION_CREATE_INFO };
+        info.actionType = type;
+        std::strcpy(info.actionName, name);
+        std::strcpy(info.localizedActionName, shown);
+        if (both_hands) {
+            info.countSubactionPaths = 2;
+            info.subactionPaths = g_hand_paths;
+        }
+        return ok(xrCreateAction(g_action_set, &info, out), name);
+    };
+    if (!action(&g_stick_action[0], XR_ACTION_TYPE_VECTOR2F_INPUT, "left_stick", "Left thumbstick", false) ||
+        !action(&g_stick_action[1], XR_ACTION_TYPE_VECTOR2F_INPUT, "right_stick", "Right thumbstick", false) ||
+        !action(&g_trigger_action[0], XR_ACTION_TYPE_FLOAT_INPUT, "left_trigger", "Left trigger", false) ||
+        !action(&g_trigger_action[1], XR_ACTION_TYPE_FLOAT_INPUT, "right_trigger", "Right trigger", false) ||
+        !action(&g_grip_action[0], XR_ACTION_TYPE_FLOAT_INPUT, "left_grip", "Left grip", false) ||
+        !action(&g_grip_action[1], XR_ACTION_TYPE_FLOAT_INPUT, "right_grip", "Right grip", false) ||
+        !action(&g_a_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "a", "A", false) ||
+        !action(&g_b_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "b", "B", false) ||
+        !action(&g_menu_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu", false) ||
+        !action(&g_stick_click_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "left_stick_click", "Left thumbstick click", false) ||
+        !action(&g_haptic_action, XR_ACTION_TYPE_VIBRATION_OUTPUT, "rumble", "Rumble", true)) {
+        return false;
+    }
+
+    const struct { XrAction action; const char* path; } bindings[] = {
+        { g_stick_action[0], "/user/hand/left/input/thumbstick" },
+        { g_stick_action[1], "/user/hand/right/input/thumbstick" },
+        { g_trigger_action[0], "/user/hand/left/input/trigger/value" },
+        { g_trigger_action[1], "/user/hand/right/input/trigger/value" },
+        { g_grip_action[0], "/user/hand/left/input/squeeze/value" },
+        { g_grip_action[1], "/user/hand/right/input/squeeze/value" },
+        { g_a_action, "/user/hand/right/input/a/click" },
+        { g_b_action, "/user/hand/right/input/b/click" },
+        { g_menu_action, "/user/hand/left/input/menu/click" },
+        { g_stick_click_action, "/user/hand/left/input/thumbstick/click" },
+        { g_haptic_action, "/user/hand/left/output/haptic" },
+        { g_haptic_action, "/user/hand/right/output/haptic" },
+    };
+    std::vector<XrActionSuggestedBinding> suggested;
+    for (const auto& binding : bindings) {
+        XrPath path = XR_NULL_PATH;
+        xrStringToPath(g_instance, binding.path, &path);
+        suggested.push_back({ binding.action, path });
+    }
+    XrInteractionProfileSuggestedBinding profile{ XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+    xrStringToPath(g_instance, "/interaction_profiles/oculus/touch_controller", &profile.interactionProfile);
+    profile.countSuggestedBindings = uint32_t(suggested.size());
+    profile.suggestedBindings = suggested.data();
+    if (!ok(xrSuggestInteractionProfileBindings(g_instance, &profile), "xrSuggestInteractionProfileBindings")) {
+        return false;
+    }
+
+    XrSessionActionSetsAttachInfo attach_info{ XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
+    attach_info.countActionSets = 1;
+    attach_info.actionSets = &g_action_set;
+    return ok(xrAttachSessionActionSets(g_session, &attach_info), "xrAttachSessionActionSets");
+}
+
+// Each headset frame, under g_mutex: the controllers read, and the rumble
+// asked for sent.
+void update_controllers() {
+    if (g_action_set == XR_NULL_HANDLE) return;
+    XrActiveActionSet active{ g_action_set, XR_NULL_PATH };
+    XrActionsSyncInfo sync{ XR_TYPE_ACTIONS_SYNC_INFO };
+    sync.countActiveActionSets = 1;
+    sync.activeActionSets = &active;
+    // Anything but XR_SUCCESS -- XR_SESSION_NOT_FOCUSED, with the headset's
+    // own menu up, say -- leaves the game with no input from them.
+    const bool live = xrSyncActions(g_session, &sync) == XR_SUCCESS;
+    g_pads_live.store(live, std::memory_order_relaxed);
+    if (!live) {
+        g_stick_click_was = false;
+        return;
+    }
+
+    auto get_float = [](XrAction action) {
+        XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
+        info.action = action;
+        XrActionStateFloat state{ XR_TYPE_ACTION_STATE_FLOAT };
+        return XR_SUCCEEDED(xrGetActionStateFloat(g_session, &info, &state)) && state.isActive ? state.currentState : 0.0f;
+    };
+    auto get_bool = [](XrAction action) {
+        XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
+        info.action = action;
+        XrActionStateBoolean state{ XR_TYPE_ACTION_STATE_BOOLEAN };
+        return XR_SUCCEEDED(xrGetActionStateBoolean(g_session, &info, &state)) && state.isActive && state.currentState;
+    };
+    for (int hand = 0; hand < 2; ++hand) {
+        XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
+        info.action = g_stick_action[hand];
+        XrActionStateVector2f stick{ XR_TYPE_ACTION_STATE_VECTOR2F };
+        const bool got = XR_SUCCEEDED(xrGetActionStateVector2f(g_session, &info, &stick)) && stick.isActive;
+        g_pad_stick[hand][0].store(got ? stick.currentState.x : 0.0f, std::memory_order_relaxed);
+        g_pad_stick[hand][1].store(got ? stick.currentState.y : 0.0f, std::memory_order_relaxed);
+        g_pad_trigger[hand].store(get_float(g_trigger_action[hand]), std::memory_order_relaxed);
+        g_pad_grip[hand].store(get_float(g_grip_action[hand]), std::memory_order_relaxed);
+    }
+    g_pad_a.store(get_bool(g_a_action), std::memory_order_relaxed);
+    g_pad_b.store(get_bool(g_b_action), std::memory_order_relaxed);
+    g_pad_menu.store(get_bool(g_menu_action), std::memory_order_relaxed);
+
+    // The left thumbstick's click switches first person, as F5 does.
+    const bool click = get_bool(g_stick_click_action);
+    if (click && !g_stick_click_was) toggle_first_person();
+    g_stick_click_was = click;
+
+    for (int hand = 0; hand < 2; ++hand) {
+        const float strength = std::clamp(g_rumble[hand].load(std::memory_order_relaxed), 0.0f, 1.0f);
+        XrHapticActionInfo info{ XR_TYPE_HAPTIC_ACTION_INFO };
+        info.action = g_haptic_action;
+        info.subactionPath = g_hand_paths[hand];
+        if (strength > 0.01f) {
+            XrHapticVibration vibration{ XR_TYPE_HAPTIC_VIBRATION };
+            vibration.amplitude = strength;
+            vibration.duration = 40'000'000;       // 40 ms, renewed each frame
+            vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
+            xrApplyHapticFeedback(g_session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
+            g_rumbling[hand] = true;
+        }
+        else if (g_rumbling[hand]) {
+            xrStopHapticFeedback(g_session, &info);
+            g_rumbling[hand] = false;
+        }
+    }
+}
+
 void destroy() {
+    if (g_action_set != XR_NULL_HANDLE) xrDestroyActionSet(g_action_set);     // and its actions
+    g_action_set = XR_NULL_HANDLE;
+    g_pads_live.store(false, std::memory_order_relaxed);
     for (Eye* eye : { &g_eyes[0], &g_eyes[1], &g_screen }) {
         if (eye->swapchain != XR_NULL_HANDLE) xrDestroySwapchain(eye->swapchain);
         *eye = Eye{};
@@ -367,6 +531,7 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
         g_mutex.unlock();
         return -1;
     }
+    update_controllers();
 
     if (g_frame_state.predictedDisplayPeriod != g_reported_period && g_frame_state.predictedDisplayPeriod > 0) {
         g_reported_period = g_frame_state.predictedDisplayPeriod;
@@ -741,6 +906,13 @@ void attach(void* d3d12_device, void* d3d12_queue) {
         destroy();
         return;
     }
+    if (create_controllers()) {
+        std::fprintf(stderr, "[wr64-vr] the Touch controllers are bound\n");
+    }
+    else if (g_action_set != XR_NULL_HANDLE) {
+        xrDestroyActionSet(g_action_set);
+        g_action_set = XR_NULL_HANDLE;
+    }
 
     // The headset needs two eyes, so stereo is on whatever F8 last chose; the
     // eyes' separation is the headset's own, in each eye's pose, so RT64 adds
@@ -756,6 +928,29 @@ void attach(void* d3d12_device, void* d3d12_queue) {
 void recenter() {
     if (!enabled()) return;
     g_recenter_requested = true;
+}
+
+Controllers controllers() {
+    Controllers c{};
+    c.live = g_pads_live.load(std::memory_order_relaxed);
+    if (!c.live) return c;
+    c.left_x = g_pad_stick[0][0].load(std::memory_order_relaxed);
+    c.left_y = g_pad_stick[0][1].load(std::memory_order_relaxed);
+    c.right_x = g_pad_stick[1][0].load(std::memory_order_relaxed);
+    c.right_y = g_pad_stick[1][1].load(std::memory_order_relaxed);
+    c.left_trigger = g_pad_trigger[0].load(std::memory_order_relaxed);
+    c.right_trigger = g_pad_trigger[1].load(std::memory_order_relaxed);
+    c.left_grip = g_pad_grip[0].load(std::memory_order_relaxed);
+    c.right_grip = g_pad_grip[1].load(std::memory_order_relaxed);
+    c.a = g_pad_a.load(std::memory_order_relaxed);
+    c.b = g_pad_b.load(std::memory_order_relaxed);
+    c.menu = g_pad_menu.load(std::memory_order_relaxed);
+    return c;
+}
+
+void set_controller_rumble(float left, float right) {
+    g_rumble[0].store(left, std::memory_order_relaxed);
+    g_rumble[1].store(right, std::memory_order_relaxed);
 }
 
 void shutdown() {

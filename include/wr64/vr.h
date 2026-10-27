@@ -49,6 +49,21 @@ void recenter();
 bool first_person();
 void toggle_first_person();
 
+// The headset's Touch controllers as last read, for the game's input
+// (src/callbacks.cpp): live only in VR mode with the session focused. Sticks
+// run -1 to 1, up and right positive; triggers and grips 0 to 1.
+struct Controllers {
+    bool live = false;
+    float left_x = 0, left_y = 0, right_x = 0, right_y = 0;
+    float left_trigger = 0, right_trigger = 0, left_grip = 0, right_grip = 0;
+    bool a = false, b = false, menu = false;
+};
+Controllers controllers();
+
+// Each Touch controller's vibration, 0 to 1, from the port's haptics; held
+// until changed.
+void set_controller_rumble(float left, float right);
+
 // Whether the game draws objects all round its camera rather than only those
 // a flat screen would show: in VR mode, or with WR64_CULL_ALL_ROUND=1.
 bool all_round();

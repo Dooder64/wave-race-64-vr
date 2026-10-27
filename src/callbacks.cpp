@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -236,6 +237,29 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
 
         stick_x = axis_to_n64(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_LEFTX));
         stick_y = -axis_to_n64(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_LEFTY));
+    }
+
+    // VR: the headset's Touch controllers, alongside the rest. The right
+    // trigger is the throttle (A, which the A button also gives, for menus),
+    // the left trigger Z, the grips L and R, the right thumbstick the C
+    // buttons as on a gamepad, and the left controller's menu button Start;
+    // the left thumbstick is the N64's stick, wherever it is pushed further.
+    const wr64::vr::Controllers touch = wr64::vr::controllers();
+    if (touch.live) {
+        if (touch.right_trigger > 0.3f || touch.a) pressed |= BTN_A;
+        if (touch.b)                               pressed |= BTN_B;
+        if (touch.left_trigger > 0.3f)             pressed |= BTN_Z;
+        if (touch.left_grip > 0.5f)                pressed |= BTN_L;
+        if (touch.right_grip > 0.5f)               pressed |= BTN_R;
+        if (touch.menu)                            pressed |= BTN_START;
+        if (touch.right_x < -0.5f) pressed |= BTN_CLEFT;
+        if (touch.right_x >  0.5f) pressed |= BTN_CRIGHT;
+        if (touch.right_y >  0.5f) pressed |= BTN_CUP;
+        if (touch.right_y < -0.5f) pressed |= BTN_CDOWN;
+        const float tx = std::clamp(touch.left_x, -1.0f, 1.0f) * 80.0f;
+        const float ty = std::clamp(touch.left_y, -1.0f, 1.0f) * 80.0f;
+        if (std::fabs(tx) > std::fabs(stick_x)) stick_x = tx;
+        if (std::fabs(ty) > std::fabs(stick_y)) stick_y = ty;
     }
 
     // Keyboard fallback, so the port is testable without a gamepad attached.
@@ -887,7 +911,8 @@ void update_gfx(ultramodern::gfx_callbacks_t::gfx_data_t) {
     }
     ++ticks;
     poll_input();
-    bool feedback_allowed = g_window && (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS);
+    // In VR mode the player is in the headset, whichever window has focus.
+    bool feedback_allowed = (g_window && (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS)) || wr64::vr::enabled();
 #if WR64_WITH_FRONTEND
     feedback_allowed = feedback_allowed && !wr64::frontend::capturing_input();
 #endif
