@@ -67,6 +67,10 @@ Controllers controllers();
 // until changed.
 void set_controller_rumble(float left, float right);
 
+// How big the menus' flat screen and the HUD panel are drawn, 1 their own
+// size (the settings' VR tab).
+void set_panel_size(float size);
+
 // Whether the game draws objects all round its camera rather than only those
 // a flat screen would show: in VR mode, or with WR64_CULL_ALL_ROUND=1.
 bool all_round();

@@ -89,6 +89,7 @@ void shutdown() {}
 void recenter() {}
 Controllers controllers() { return {}; }
 void set_controller_rumble(float, float) {}
+void set_panel_size(float) {}
 #endif
 
 bool all_round() {

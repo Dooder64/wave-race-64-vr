@@ -97,6 +97,7 @@ extern "C" void RT64_SetStereo(int mode, float separation);
 extern "C" void RT64_SetXrPanel(float distance, float width, float separation, int followHead);
 extern "C" void RT64_SetXrFramed(float scale, float x, float y);
 extern "C" void RT64_SetXrPanelPose(const float* centre, const float* right, const float* up);
+extern "C" void RT64_SetXrPanelLayer(int on);
 
 namespace wr64::vr {
 
@@ -148,9 +149,13 @@ float screen_distance() {
     return distance;
 }
 
+// The settings' panel and menu size: how much bigger than their own widths
+// below the flat screen and the panel are drawn (set_panel_size).
+std::atomic<float> g_panel_size{ 1.0f };
+
 float screen_width() {
     static const float width = setting("WR64_VR_SCREEN_WIDTH", 2.0f);
-    return width;
+    return width * g_panel_size.load(std::memory_order_relaxed);
 }
 
 // The panel a frame's flat elements are drawn on in front of the eyes.
@@ -161,7 +166,7 @@ float hud_distance() {
 
 float hud_width() {
     static const float width = setting("WR64_VR_HUD_WIDTH", 1.6f);
-    return width;
+    return width * g_panel_size.load(std::memory_order_relaxed);
 }
 
 // Framed 3D -- a model a menu turns in a box of its own, such as a jet ski
@@ -562,21 +567,26 @@ void eye_transform(const XrPosef& pose, float out[16]) {
 // as the head turns: the runtime shifts each picture at the last moment to
 // where the head has got to since it was drawn, which is right for the world
 // but drags what should stay with the eyes, and by an amount that changes
-// with each picture's age. So by default (WR64_VR_HUD_MODE=soft) the panel
-// hangs in the seated space and follows the head there softly -- straight
-// ahead of it again within about WR64_VR_HUD_LAG seconds (0.03) -- which the
-// runtime's shift keeps steady like the rest of the world. =locked holds it
-// in front of the eyes as before; =fixed hangs it straight ahead of the
-// seated position for good (or WR64_VR_HUD_FIXED=1, as before).
-enum class HudMode { Soft, Locked, Fixed };
+// with each picture's age -- and RT64 places it only once a game frame. So by
+// default (WR64_VR_HUD_MODE=layer) the panel is a layer of its own: RT64 draws
+// the flat elements apart from the eyes, over black and over white, combines
+// the two into a see-through image on the screen's swapchain
+// (RT64_SetXrPanelLayer), and the runtime holds it in front of the eyes itself
+// every refresh. =soft hangs it in the seated space and follows the head
+// there, straight ahead of it again within about WR64_VR_HUD_LAG seconds
+// (0.03); =locked holds it in front of the eyes in their pictures; =fixed
+// hangs it straight ahead of the seated position for good (or
+// WR64_VR_HUD_FIXED=1).
+enum class HudMode { Layer, Soft, Locked, Fixed };
 
 HudMode hud_mode() {
     static const HudMode mode = [] {
         if (std::getenv("WR64_VR_HUD_FIXED") != nullptr) return HudMode::Fixed;
         const char* value = std::getenv("WR64_VR_HUD_MODE");
+        if (value != nullptr && std::strcmp(value, "soft") == 0) return HudMode::Soft;
         if (value != nullptr && std::strcmp(value, "locked") == 0) return HudMode::Locked;
         if (value != nullptr && std::strcmp(value, "fixed") == 0) return HudMode::Fixed;
-        return HudMode::Soft;
+        return HudMode::Layer;
     }();
     return mode;
 }
@@ -720,6 +730,7 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
     const float scale = world_scale();
     RT64_SetXrPanel(hud_distance() * scale, hud_width() * scale, std::sqrt(sx * sx + sy * sy + sz * sz) * scale,
                     hud_mode() == HudMode::Locked ? 1 : 0);
+    RT64_SetXrPanelLayer(hud_mode() == HudMode::Layer ? 1 : 0);
     if (hud_mode() == HudMode::Soft) {
         place_panel(hud_distance() * scale,
                     float(std::max<XrDuration>(g_frame_state.predictedDisplayPeriod, 1)) / 1e9f);
@@ -804,15 +815,34 @@ void end_frame(void*, int rendered, uint64_t head_tag) {
                              g_centre_position.z - distance * std::cos(g_centre_yaw) };
     screen.size = { screen_width(), screen_width() * float(g_screen.height) / float(g_screen.width) };
 
-    const XrCompositionLayerBaseHeader* layers[] = {
+    // The HUD on a layer of its own (3): the see-through image RT64 left on the
+    // screen's swapchain, straight ahead of the eyes in the head's own space,
+    // so the runtime holds it there itself at every refresh. Its colour is
+    // already multiplied by how solid it is.
+    XrCompositionLayerQuad panel{ XR_TYPE_COMPOSITION_LAYER_QUAD };
+    panel.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    panel.space = g_head;
+    panel.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    panel.subImage.swapchain = g_screen.swapchain;
+    panel.subImage.imageRect.extent = { int32_t(g_screen.width), int32_t(g_screen.height) };
+    panel.pose.orientation = { 0.0f, 0.0f, 0.0f, 1.0f };
+    panel.pose.position = { 0.0f, 0.0f, -hud_distance() };
+    panel.size = { hud_width(), hud_width() * float(g_screen.height) / float(g_screen.width) };
+
+    const XrCompositionLayerBaseHeader* layers[2] = {
         rendered == 2 ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&screen)
-                      : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer) };
+                      : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer),
+        reinterpret_cast<XrCompositionLayerBaseHeader*>(&panel) };
     static int last_rendered = 0;
     if (rendered != 0 && rendered != last_rendered) {
         last_rendered = rendered;
         if (rendered == 2) {
             std::fprintf(stderr, "[wr64-vr] frames go to the flat screen, %.1f m away and %.1f m wide\n",
                          distance, screen.size.width);
+        }
+        else if (rendered == 3) {
+            std::fprintf(stderr, "[wr64-vr] frames go to the eyes, flat elements on a layer of their own %.1f m away"
+                                 " and %.1f m wide\n", hud_distance(), hud_width());
         }
         else {
             std::fprintf(stderr, "[wr64-vr] frames go to the eyes, flat elements on a panel %.1f m away and %.1f m wide\n",
@@ -825,7 +855,7 @@ void end_frame(void*, int rendered, uint64_t head_tag) {
     XrFrameEndInfo end{ XR_TYPE_FRAME_END_INFO };
     end.displayTime = g_frame_state.predictedDisplayTime;
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    end.layerCount = submit ? 1 : 0;
+    end.layerCount = submit ? (rendered == 3 ? 2 : 1) : 0;
     end.layers = layers;
     ok(xrEndFrame(g_session, &end), "xrEndFrame");
     g_images_acquired = false;
@@ -906,7 +936,9 @@ bool create_swapchains() {
         g_screen.width = kScreenWidth;
         g_screen.height = kScreenHeight;
         XrSwapchainCreateInfo info{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
-        info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+        // Also written by RT64's combination of the HUD's two passes, a compute
+        // shader, when the panel is a layer of its own.
+        info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT;
         info.format = format;
         info.sampleCount = 1;
         info.width = g_screen.width;
@@ -928,6 +960,11 @@ bool create_swapchains() {
                  g_eyes[0].height, g_eyes[0].images.size(),
                  format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ? "sRGB" : "linear",
                  g_write_raw ? "written as they are" : "encoded as they are written");
+    const D3D12_RESOURCE_DESC screen_desc = g_screen.images[0].texture->GetDesc();
+    std::fprintf(stderr, "[wr64-vr] screen images %u x %u, format %d, %s\n", g_screen.width, g_screen.height,
+                 int(screen_desc.Format),
+                 (screen_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) ? "writable by compute shaders"
+                                                                                  : "NOT writable by compute shaders");
     std::fflush(stderr);
     return true;
 }
@@ -1071,6 +1108,10 @@ Controllers controllers() {
     c.b = g_pad_b.load(std::memory_order_relaxed);
     c.menu = g_pad_menu.load(std::memory_order_relaxed);
     return c;
+}
+
+void set_panel_size(float size) {
+    g_panel_size.store(std::clamp(size, 0.25f, 4.0f), std::memory_order_relaxed);
 }
 
 void set_controller_rumble(float left, float right) {

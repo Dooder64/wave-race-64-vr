@@ -203,6 +203,16 @@ OFFSET_REPLACEMENT = """            // wr64: move the camera by the port's offse
                 }
 
                 projMatrix = wr64EyeLens(projMatrix, wr64EyeIndex);
+                // wr64: in the HUD's own passes the scene is left out: nothing
+                // seen through the lens reaches the picture.
+                if (wr64PanelPass != 0) {
+                    for (int row = 0; row < 4; row++) {
+                        for (int column = 0; column < 4; column++) {
+                            projMatrix[row][column] = 0.0f;
+                        }
+                    }
+                }
+
                 prevProjTransform = projMatrix;
                 wr64LensUsed = true;
             }
@@ -290,6 +300,18 @@ LENS_REPLACEMENT = """    // wr64: a headset's lens for each eye, as the tangent
         wr64PanelPosed.store(true, std::memory_order_relaxed);
     }
 
+    // wr64: the HUD on a layer of its own, set by the port: the eyes are drawn
+    // without the frame's flat elements, and the workload queue draws those
+    // alone twice more -- over black (wr64PanelPass 1) and over white (2), the
+    // scene seen through the lens left out -- for the present queue to make into
+    // one see-through image the headset holds in front of the eyes itself.
+    std::atomic<bool> wr64PanelLayer{ false };
+    int wr64PanelPass = 0;
+
+    extern "C" void RT64_SetXrPanelLayer(int on) {
+        wr64PanelLayer.store(on != 0, std::memory_order_relaxed);
+    }
+
     // wr64: the head's transform for an eye, from the seated space into the
     // eye's, as the frame being drawn took it (below, with the head).
     bool wr64HeadForEye(int eye, float out[16]);
@@ -351,6 +373,16 @@ LENS_REPLACEMENT = """    // wr64: a headset's lens for each eye, as the tangent
     bool wr64PanelTransform(float out[4]) {
         if (!wr64XrLensActive.load(std::memory_order_relaxed) || !wr64LensUsed) {
             return false;
+        }
+
+        // On a layer of its own, the HUD is drawn where the frame has it in its
+        // own passes, and out of the picture in the eyes'.
+        if (wr64PanelLayer.load(std::memory_order_relaxed)) {
+            out[0] = (wr64PanelPass != 0) ? 1.0f : 0.0f;
+            out[1] = (wr64PanelPass != 0) ? 0.0f : 4.0f;
+            out[2] = out[0];
+            out[3] = out[1];
+            return true;
         }
 
         const float tanLeft = wr64XrLensTangents[wr64EyeIndex][0].load(std::memory_order_relaxed);
@@ -721,6 +753,10 @@ TARGETS_REPLACEMENT = """        std::vector<std::unique_ptr<RenderTarget>> inte
         // wr64: the right eye of each displayed frame, in the order the frames
         // are rendered and presented. The left eye is wherever RT64 put it.
         std::vector<std::unique_ptr<RenderTarget>> wr64StereoTargets;
+
+        // wr64: the HUD's own passes of each displayed frame, over black and over
+        // white, in the same order (rt64_projection_processor.cpp).
+        std::vector<std::unique_ptr<RenderTarget>> wr64PanelTargets[2];
 """
 
 HEAD_TAGS_ANCHOR = """        InterpolatedFrameCounters interpolatedFrames[2];
@@ -735,6 +771,10 @@ HEAD_TAGS_REPLACEMENT = """        // wr64: the head pose each displayed frame w
         // wr64: whether each displayed frame is for a headset's flat screen --
         // drawn without the headset's lens -- in the same order.
         std::array<bool, 16> wr64ScreenFrames = {};
+
+        // wr64: whether each displayed frame's HUD was drawn on its own, in the
+        // same order.
+        std::array<bool, 16> wr64PanelFrames = {};
 
         InterpolatedFrameCounters interpolatedFrames[2];
 """
@@ -770,6 +810,8 @@ namespace RT64 {
     extern float wr64EyeOffsetX;
     extern int wr64EyeIndex;
     extern bool wr64LensUsed;
+    extern std::atomic<bool> wr64PanelLayer;
+    extern int wr64PanelPass;
     bool wr64CameraOffsetActive();
 
     // wr64: the right eye's targets carry modifier keys of their own, clear of
@@ -790,6 +832,8 @@ WORKLOAD_CLEAR_ANCHOR = """            ext.sharedResources->interpolatedColorTar
 
 WORKLOAD_CLEAR_REPLACEMENT = """            ext.sharedResources->interpolatedColorTargets.clear();
             ext.sharedResources->wr64StereoTargets.clear();
+            ext.sharedResources->wr64PanelTargets[0].clear();
+            ext.sharedResources->wr64PanelTargets[1].clear();
 """
 
 WORKLOAD_DECIDE_ANCHOR = """                curFrameCounters.count = displayFrames;
@@ -808,6 +852,17 @@ WORKLOAD_DECIDE_REPLACEMENT = """                curFrameCounters.count = displa
                     const bool stereoHDR = ext.sharedResources->renderTargetManager.usesHDR;
                     while (stereoTargets.size() < displayFrames) {
                         stereoTargets.emplace_back(std::make_unique<RenderTarget>(interpolationTargetKey.address, Framebuffer::Type::Color, RenderMultisampling(), stereoHDR));
+                    }
+                }
+
+                // wr64: and the HUD on its own, when the port asks for it.
+                const bool wr64Panel = wr64Stereo && wr64PanelLayer.load(std::memory_order_relaxed);
+                if (wr64Panel) {
+                    const bool panelHDR = ext.sharedResources->renderTargetManager.usesHDR;
+                    for (auto &panelTargets : ext.sharedResources->wr64PanelTargets) {
+                        while (panelTargets.size() < displayFrames) {
+                            panelTargets.emplace_back(std::make_unique<RenderTarget>(interpolationTargetKey.address, Framebuffer::Type::Color, RenderMultisampling(), panelHDR));
+                        }
                     }
                 }
 """
@@ -850,6 +905,29 @@ WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: a headset's head, 
                         wr64EyeOffsetX = 0.5f * wr64Separation;
                         threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
                             interpolationTargetKey, interpolationTargetFbPairIndex, rightTarget, wr64StereoModifierBase + framesRendered, velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
+                    }
+
+                    // wr64: and the HUD on its own, twice -- over black, then over
+                    // white -- once the eyes have shown the frame put a scene
+                    // through the lens, into targets of its own.
+                    bool wr64PanelDrawn = false;
+                    auto &wr64PanelTargets = ext.sharedResources->wr64PanelTargets;
+                    if (wr64Panel && wr64LensUsed && (framesRendered < wr64PanelTargets[0].size()) && (framesRendered < wr64PanelTargets[1].size())) {
+                        for (int pass = 0; pass < 2; pass++) {
+                            wr64EyeIndex = 0;
+                            wr64EyeOffsetX = 0.0f;
+                            wr64PanelPass = pass + 1;
+                            threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                                interpolationTargetKey, interpolationTargetFbPairIndex, wr64PanelTargets[pass][framesRendered].get(), wr64StereoModifierBase + 0x100 * (pass + 1) + framesRendered,
+                                velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
+                        }
+
+                        wr64PanelPass = 0;
+                        wr64PanelDrawn = true;
+                    }
+
+                    if (framesRendered < ext.sharedResources->wr64PanelFrames.size()) {
+                        ext.sharedResources->wr64PanelFrames[framesRendered] = wr64PanelDrawn;
                     }
 
                     wr64EyeIndex = 0;
@@ -1076,7 +1154,8 @@ XR_DRAW_REPLACEMENT = """#               if defined(_WIN32)
                             // Raw: a view that writes the bytes as they are. Otherwise
                             // the view takes the image's own sRGB format.
                             xrTexture->desc.format = wr64XrFrame.writeRaw ? RenderFormat::R8G8B8A8_UNORM : RenderFormat::UNKNOWN;
-                            xrTexture->desc.flags = RenderTextureFlag::RENDER_TARGET;
+                            // The screen's image is also written by the HUD's combination.
+                            xrTexture->desc.flags = (eye == 2) ? (RenderTextureFlag::RENDER_TARGET | RenderTextureFlag::UNORDERED_ACCESS) : RenderTextureFlag::RENDER_TARGET;
                             const RenderTexture *xrAttachment = xrTexture.get();
                             xrTarget.framebuffer = ext.device->createFramebuffer(RenderFramebufferDesc(&xrAttachment, 1));
                             xrTarget.texture = std::move(xrTexture);
@@ -1104,8 +1183,132 @@ XR_DRAW_REPLACEMENT = """#               if defined(_WIN32)
                         }
                     }
 
+                    // wr64: the HUD, drawn on its own over black and over white by
+                    // the workload queue, made into one see-through image on the
+                    // screen's, for the headset to hold in front of the eyes. Each
+                    // pass is first drawn at the screen's size the way the eyes
+                    // are; what differs between the two is how see-through it is.
+                    const auto &wr64PanelFrames = ext.sharedResources->wr64PanelFrames;
+                    const RT64_XrEye &xrScreen = wr64XrFrame.screen;
+                    bool wr64Panel = !wr64Screen && (xrScreen.resource != nullptr) && wr64XrFrame.writeRaw &&
+                        (uint32_t(i) < wr64PanelFrames.size()) && wr64PanelFrames[i] && (wr64EyeParams[0].texture != nullptr);
+                    Wr64XrTarget *screenTarget = nullptr;
+                    if (wr64Panel) {
+                        auto found = wr64XrTargets.find(xrScreen.resource);
+                        screenTarget = (found != wr64XrTargets.end()) ? &found->second : nullptr;
+                        if (screenTarget == nullptr) {
+                            Wr64XrTarget &made = wr64XrTargets[xrScreen.resource];
+                            auto screenTexture = std::make_unique<D3D12Texture>();
+                            screenTexture->d3d = static_cast<ID3D12Resource *>(xrScreen.resource);
+                            screenTexture->device = static_cast<D3D12Device *>(ext.device);
+                            screenTexture->desc.dimension = RenderTextureDimension::TEXTURE_2D;
+                            screenTexture->desc.width = xrScreen.width;
+                            screenTexture->desc.height = xrScreen.height;
+                            screenTexture->desc.depth = 1;
+                            screenTexture->desc.mipLevels = 1;
+                            screenTexture->desc.arraySize = 1;
+                            screenTexture->desc.format = RenderFormat::R8G8B8A8_UNORM;
+                            screenTexture->desc.flags = RenderTextureFlag::RENDER_TARGET | RenderTextureFlag::UNORDERED_ACCESS;
+                            const RenderTexture *screenAttachment = screenTexture.get();
+                            made.framebuffer = ext.device->createFramebuffer(RenderFramebufferDesc(&screenAttachment, 1));
+                            made.texture = std::move(screenTexture);
+                            screenTarget = &made;
+                        }
+                    }
+
+                    if (wr64Panel && ((wr64PanelImageWidth != xrScreen.width) || (wr64PanelImageHeight != xrScreen.height))) {
+                        for (int pass = 0; pass < 2; pass++) {
+                            wr64PanelFramebuffers[pass].reset();
+                            wr64PanelImages[pass] = ext.device->createTexture(RenderTextureDesc::ColorTarget(xrScreen.width, xrScreen.height, RenderFormat::B8G8R8A8_UNORM));
+                            const RenderTexture *panelAttachment = wr64PanelImages[pass].get();
+                            wr64PanelFramebuffers[pass] = ext.device->createFramebuffer(RenderFramebufferDesc(&panelAttachment, 1));
+                        }
+
+                        wr64PanelCombined = ext.device->createTexture(RenderTextureDesc::Texture2D(xrScreen.width, xrScreen.height, 1, RenderFormat::R8G8B8A8_UNORM, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
+
+                        wr64PanelImageWidth = xrScreen.width;
+                        wr64PanelImageHeight = xrScreen.height;
+                    }
+
+                    for (int pass = 0; wr64Panel && (pass < 2); pass++) {
+                        auto &panelTargets = ext.sharedResources->wr64PanelTargets[pass];
+                        RenderTarget *panelTarget = (uint32_t(i) < panelTargets.size()) ? panelTargets[i].get() : nullptr;
+                        if ((panelTarget == nullptr) || (panelTarget->width == 0)) {
+                            wr64Panel = false;
+                            break;
+                        }
+
+                        VIRenderer::RenderParams panelParams = wr64EyeParams[0];
+                        panelParams.textureFormat = panelTarget->format;
+                        panelParams.resolutionScale = panelTarget->resolutionScale;
+                        panelParams.downsamplingScale = 1;
+                        if (panelTarget->downsampleMultiplier > 1) {
+                            panelTarget->downsampleTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
+                            panelParams.texture = panelTarget->downsampledTexture.get();
+                            panelParams.textureWidth = panelTarget->width / panelTarget->downsampleMultiplier;
+                            panelParams.textureHeight = panelTarget->height / panelTarget->downsampleMultiplier;
+                            panelParams.downsamplingScale = panelTarget->downsampleMultiplier;
+                        }
+                        else {
+                            panelTarget->resolveTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
+                            panelParams.texture = panelTarget->getResolvedTexture();
+                            panelParams.textureWidth = panelTarget->width;
+                            panelParams.textureHeight = panelTarget->height;
+                        }
+
+                        panelParams.regionX = 0.0f;
+                        panelParams.regionWidth = float(xrScreen.width);
+                        panelParams.regionHeight = float(xrScreen.height);
+                        panelParams.gammaScale = 1.0f;
+                        panelParams.fillRegion = true;
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, {
+                            RenderTextureBarrier(panelParams.texture, RenderTextureLayout::SHADER_READ),
+                            RenderTextureBarrier(wr64PanelImages[pass].get(), RenderTextureLayout::COLOR_WRITE)
+                        });
+                        commandList->setFramebuffer(wr64PanelFramebuffers[pass].get());
+                        commandList->clearColor();
+                        if (wr64PanelViRenderers[pass] == nullptr) {
+                            wr64PanelViRenderers[pass] = std::make_unique<VIRenderer>();
+                        }
+
+                        wr64PanelViRenderers[pass]->render(panelParams);
+                    }
+
+                    if (wr64Panel && (screenTarget != nullptr)) {
+                        D3D12Texture *screenTexture = static_cast<D3D12Texture *>(screenTarget->texture.get());
+                        screenTexture->resourceStates = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                        screenTexture->layout = RenderTextureLayout::COLOR_WRITE;
+                        commandList->setFramebuffer(nullptr);
+                        commandList->barriers(RenderBarrierStage::COMPUTE, {
+                            RenderTextureBarrier(wr64PanelImages[0].get(), RenderTextureLayout::SHADER_READ),
+                            RenderTextureBarrier(wr64PanelImages[1].get(), RenderTextureLayout::SHADER_READ),
+                            RenderTextureBarrier(wr64PanelCombined.get(), RenderTextureLayout::GENERAL)
+                        });
+                        if (wr64PanelCombineSet == nullptr) {
+                            wr64PanelCombineSet = std::make_unique<Wr64PanelCombineDescriptorSet>(ext.device);
+                        }
+
+                        wr64PanelCombineSet->setTexture(wr64PanelCombineSet->gBlack, wr64PanelImages[0].get(), RenderTextureLayout::SHADER_READ);
+                        wr64PanelCombineSet->setTexture(wr64PanelCombineSet->gWhite, wr64PanelImages[1].get(), RenderTextureLayout::SHADER_READ);
+                        wr64PanelCombineSet->setTexture(wr64PanelCombineSet->gOutput, wr64PanelCombined.get(), RenderTextureLayout::GENERAL);
+                        const uint32_t combineSize[2] = { xrScreen.width, xrScreen.height };
+                        commandList->setPipeline(ext.shaderLibrary->wr64PanelCombine.pipeline.get());
+                        commandList->setComputePipelineLayout(ext.shaderLibrary->wr64PanelCombine.pipelineLayout.get());
+                        commandList->setComputePushConstants(0, combineSize);
+                        commandList->setComputeDescriptorSet(wr64PanelCombineSet->get(), 0);
+                        commandList->dispatch((xrScreen.width + 7) / 8, (xrScreen.height + 7) / 8, 1);
+                        // The headset's image takes the result by a copy: written by a
+                        // compute shader directly, it lost the device.
+                        commandList->barriers(RenderBarrierStage::COPY, {
+                            RenderTextureBarrier(wr64PanelCombined.get(), RenderTextureLayout::COPY_SOURCE),
+                            RenderTextureBarrier(screenTexture, RenderTextureLayout::COPY_DEST)
+                        });
+                        commandList->copyTexture(screenTexture, wr64PanelCombined.get());
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(screenTexture, RenderTextureLayout::COLOR_WRITE));
+                    }
+
                     commandList->setFramebuffer(swapChainFramebuffer);
-                    wr64XrRendered = wr64Screen ? 2 : 1;
+                    wr64XrRendered = wr64Screen ? 2 : (wr64Panel ? 3 : 1);
                 }
 #               endif
 
@@ -1159,6 +1362,16 @@ XR_MEMBERS_REPLACEMENT = """        std::unique_ptr<Inspector> inspector;
         };
         std::unordered_map<void *, Wr64XrTarget> wr64XrTargets;
         std::unique_ptr<VIRenderer> wr64XrViRenderers[3];
+
+        // wr64: the HUD's two passes at the screen's size, each with its own VI
+        // renderer to draw it there, and what combines them.
+        std::unique_ptr<RenderTexture> wr64PanelImages[2];
+        std::unique_ptr<RenderFramebuffer> wr64PanelFramebuffers[2];
+        std::unique_ptr<VIRenderer> wr64PanelViRenderers[2];
+        std::unique_ptr<RenderTexture> wr64PanelCombined;
+        uint32_t wr64PanelImageWidth = 0;
+        uint32_t wr64PanelImageHeight = 0;
+        std::unique_ptr<Wr64PanelCombineDescriptorSet> wr64PanelCombineSet;
 """
 
 XR_HEADER_INCLUDE_ANCHOR = """#include "rt64_shared_queue_resources.h"
@@ -1167,6 +1380,8 @@ XR_HEADER_INCLUDE_ANCHOR = """#include "rt64_shared_queue_resources.h"
 XR_HEADER_INCLUDE_REPLACEMENT = """#include "rt64_shared_queue_resources.h"
 
 #include <unordered_map> // wr64: the headset's wrapped eye images.
+
+#include "render/rt64_descriptor_sets.h" // wr64: the HUD's passes combined.
 """
 
 # --- the frame rate follows the headset -------------------------------------
@@ -1376,6 +1591,195 @@ PANEL_FRAMED_CLIP_REPLACEMENT = """                viewportClip = convertViewpor
 """
 
 
+# --- the HUD on a layer of its own (RT64_SetXrPanelLayer) -------------------
+#
+# In the HUD's own passes (wr64PanelPass, rt64_projection_processor.cpp) the
+# frame's clear is black in the first and white in the second; the present
+# queue combines the two with this shader.
+
+DESCRIPTOR_SETS = RT64 / "render" / "rt64_descriptor_sets.h"
+SHADER_LIBRARY_HEADER = RT64 / "render" / "rt64_shader_library.h"
+SHADER_LIBRARY = RT64 / "render" / "rt64_shader_library.cpp"
+RT64_CMAKE = REPO / "lib" / "RT64" / "CMakeLists.txt"
+PANEL_SHADER = RT64 / "shaders" / "Wr64PanelCombineCS.hlsl"
+
+PANEL_CLEAR_ANCHOR = """                    clearRect.rect = convertFixedRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+"""
+
+PANEL_CLEAR_REPLACEMENT = """                    clearRect.rect = convertFixedRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+
+                    // wr64: in the HUD's own passes (rt64_projection_processor.cpp),
+                    // the frame's clear -- a fill most of the frame wide and tall --
+                    // is black in the first and white in the second, which is what
+                    // the two are told apart by.
+                    {
+                        extern int wr64PanelPass;
+                        const int32_t clearWidth = call.callDesc.rect.lrx - call.callDesc.rect.ulx;
+                        const int32_t clearHeight = call.callDesc.rect.lry - call.callDesc.rect.uly;
+                        if ((wr64PanelPass != 0) && (p.fbStorage->colorTarget != nullptr) &&
+                            (clearWidth >= int32_t(p.fbWidth) * 3) && (clearHeight * 5 >= int32_t(p.fbHeight) * 12)) {
+                            const float level = (wr64PanelPass == 2) ? 1.0f : 0.0f;
+                            clearRect.color = RenderColor(level, level, level, 1.0f);
+                        }
+                    }
+"""
+
+PANEL_SET_ANCHOR = """    struct FramebufferClearChangesDescriptorSet : RenderDescriptorSetBase {
+"""
+
+PANEL_SET_REPLACEMENT = """    // wr64: the HUD's two passes, over black and over white, made into one
+    // see-through image (rt64_present_queue.cpp).
+    struct Wr64PanelCombineDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gBlack;
+        uint32_t gWhite;
+        uint32_t gOutput;
+
+        Wr64PanelCombineDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gBlack = builder.addTexture(1);
+            gWhite = builder.addTexture(2);
+            gOutput = builder.addReadWriteTexture(3);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
+    struct FramebufferClearChangesDescriptorSet : RenderDescriptorSetBase {
+"""
+
+PANEL_RECORD_ANCHOR = """        ShaderRecord boxFilter;
+"""
+
+PANEL_RECORD_REPLACEMENT = """        ShaderRecord boxFilter;
+        ShaderRecord wr64PanelCombine; // wr64: see rt64_present_queue.cpp.
+"""
+
+PANEL_SPIRV_ANCHOR = """#include "shaders/BoxFilterCS.hlsl.spirv.h"
+"""
+
+PANEL_SPIRV_REPLACEMENT = """#include "shaders/BoxFilterCS.hlsl.spirv.h"
+#include "shaders/Wr64PanelCombineCS.hlsl.spirv.h"
+"""
+
+PANEL_DXIL_ANCHOR = """#   include "shaders/BoxFilterCS.hlsl.dxil.h"
+"""
+
+PANEL_DXIL_REPLACEMENT = """#   include "shaders/BoxFilterCS.hlsl.dxil.h"
+#   include "shaders/Wr64PanelCombineCS.hlsl.dxil.h"
+"""
+
+PANEL_METAL_ANCHOR = """#   include "shaders/BoxFilterCS.hlsl.metal.h"
+"""
+
+PANEL_METAL_REPLACEMENT = """#   include "shaders/BoxFilterCS.hlsl.metal.h"
+#   include "shaders/Wr64PanelCombineCS.hlsl.metal.h"
+"""
+
+PANEL_PIPELINE_ANCHOR = """        // Box filter.
+        {
+"""
+
+PANEL_PIPELINE_REPLACEMENT = """        // wr64: the HUD's two passes combined (rt64_present_queue.cpp).
+        {
+            Wr64PanelCombineDescriptorSet descriptorSet;
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(uint32_t) * 2, RenderShaderStageFlag::COMPUTE);
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            wr64PanelCombine.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> computeShader = device->createShader(CREATE_SHADER_INPUTS(Wr64PanelCombineCSBlobDXIL, Wr64PanelCombineCSBlobSPIRV, Wr64PanelCombineCSBlobMSL, "CSMain", shaderFormat));
+            RenderComputePipelineDesc pipelineDesc(wr64PanelCombine.pipelineLayout.get(), computeShader.get(), 8, 8, 1);
+            wr64PanelCombine.pipeline = device->createComputePipeline(pipelineDesc);
+        }
+
+        // Box filter.
+        {
+"""
+
+PANEL_CMAKE_ANCHOR = """build_compute_shader(rt64 "src/shaders/FbChangesClearCS.hlsl")
+"""
+
+PANEL_CMAKE_REPLACEMENT = """build_compute_shader(rt64 "src/shaders/FbChangesClearCS.hlsl")
+build_compute_shader(rt64 "src/shaders/Wr64PanelCombineCS.hlsl")
+"""
+
+PANEL_SHADER_SOURCE = """//
+// wr64: the HUD, drawn twice -- over black and over white -- made into one
+// see-through image for a headset to hold in front of the eyes. Where the two
+// agree the HUD is solid; where they differ completely there is none of it;
+// in between, it lets through as much as they differ. Over black is the HUD's
+// colour already multiplied by how solid it is, which is what the headset
+// takes. Written for tools/patch_rt64_vr.py.
+//
+
+#define BLOCK_SIZE 8
+
+struct Wr64PanelCombineCB {
+    uint2 Resolution;
+};
+
+[[vk::push_constant]] ConstantBuffer<Wr64PanelCombineCB> gConstants : register(b0);
+Texture2D<float4> gBlack : register(t1);
+Texture2D<float4> gWhite : register(t2);
+RWTexture2D<float4> gOutput : register(u3);
+
+[numthreads(BLOCK_SIZE, BLOCK_SIZE, 1)]
+void CSMain(uint2 coord : SV_DispatchThreadID) {
+    if (any(coord >= gConstants.Resolution)) {
+        return;
+    }
+
+    const float3 black = gBlack.Load(int3(coord, 0)).rgb;
+    const float3 white = gWhite.Load(int3(coord, 0)).rgb;
+    const float3 through = saturate(white - black);
+    const float alpha = 1.0f - max(max(through.r, through.g), through.b);
+    gOutput[coord] = float4(min(black, alpha), alpha);
+}
+"""
+
+
+# The HUD's passes start each picture black, then white, where the frame first
+# draws to it.
+PANEL_FRAME_CLEAR_ANCHOR = """        bool depthState = false;
+        worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorDepthWrite.get());
+"""
+
+PANEL_FRAME_CLEAR_REPLACEMENT = """        bool depthState = false;
+        worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorDepthWrite.get());
+
+        // wr64: in the HUD's own passes (rt64_projection_processor.cpp) the picture
+        // starts black in the first and white in the second -- the game itself
+        // seldom clears it, its sky covering everything -- which is what the two
+        // are told apart by. Only where the frame first draws to it: the game
+        // may draw elsewhere mid-frame (the course card clears a depth buffer)
+        // and come back, and what it drew before must stay.
+        {
+            extern int wr64PanelPass;
+            bool wr64FirstUse = true;
+            for (uint32_t i = 0; wr64FirstUse && (i < framebufferIndex); i++) {
+                wr64FirstUse = (framebufferVector[i].renderTargetDrawCall.fbStorage->colorTarget != colorTarget);
+            }
+
+            if ((wr64PanelPass != 0) && (colorTarget != nullptr) && wr64FirstUse) {
+                const float level = (wr64PanelPass == 2) ? 1.0f : 0.0f;
+                worker->commandList->clearColor(0, RenderColor(level, level, level, 1.0f));
+            }
+        }
+
+"""
+
+def ensure_file(target, content, name):
+    if target.exists() and target.read_text() == content:
+        print(f"  {target.name}: {name} already in place")
+        return
+    target.write_text(content)
+    print(f"  {target.name}: {name} written")
+
+
 def patch(target, anchor, replacement, name):
     text = target.read_text()
     if replacement in text:
@@ -1437,6 +1841,16 @@ def main():
     patch(FRAMEBUFFER_RENDERER, PANEL_RECT_ANCHOR, PANEL_RECT_REPLACEMENT, "headset (rectangles onto the panel)")
     patch(FRAMEBUFFER_RENDERER, PANEL_SCISSOR_ANCHOR, PANEL_SCISSOR_REPLACEMENT, "headset (scissors onto the panel)")
     patch(FRAMEBUFFER_RENDERER, PANEL_FRAMED_CLIP_ANCHOR, PANEL_FRAMED_CLIP_REPLACEMENT, "headset (framed viewports onto the panel)")
+    patch(FRAMEBUFFER_RENDERER, PANEL_CLEAR_ANCHOR, PANEL_CLEAR_REPLACEMENT, "headset (the HUD's passes cleared black and white)")
+    patch(FRAMEBUFFER_RENDERER, PANEL_FRAME_CLEAR_ANCHOR, PANEL_FRAME_CLEAR_REPLACEMENT, "headset (the HUD's pictures started black and white)")
+    patch(DESCRIPTOR_SETS, PANEL_SET_ANCHOR, PANEL_SET_REPLACEMENT, "headset (HUD combination's descriptors)")
+    patch(SHADER_LIBRARY_HEADER, PANEL_RECORD_ANCHOR, PANEL_RECORD_REPLACEMENT, "headset (HUD combination's record)")
+    patch(SHADER_LIBRARY, PANEL_SPIRV_ANCHOR, PANEL_SPIRV_REPLACEMENT, "headset (HUD combination, SPIR-V)")
+    patch(SHADER_LIBRARY, PANEL_DXIL_ANCHOR, PANEL_DXIL_REPLACEMENT, "headset (HUD combination, DXIL)")
+    patch(SHADER_LIBRARY, PANEL_METAL_ANCHOR, PANEL_METAL_REPLACEMENT, "headset (HUD combination, Metal)")
+    patch(SHADER_LIBRARY, PANEL_PIPELINE_ANCHOR, PANEL_PIPELINE_REPLACEMENT, "headset (HUD combination's pipeline)")
+    patch(RT64_CMAKE, PANEL_CMAKE_ANCHOR, PANEL_CMAKE_REPLACEMENT, "headset (HUD combination built)")
+    ensure_file(PANEL_SHADER, PANEL_SHADER_SOURCE, "headset (HUD combination's shader)")
     print("Rebuild to pick it up.")
 
 

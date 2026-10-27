@@ -270,6 +270,11 @@ void init(bool auto_start) {
         if (context != recomp::config::OptionChangeContext::Temporary)
             wr64::vr::set_first_person_intensity(float(std::get<double>(value)) / 100.0f);
     });
+    vr.add_number_option("vr_panel_size", "Menu and HUD size", "How big the floating menus and the race HUD look in the headset. Larger makes small text easier to read but covers more of the view.", 50, 200, 5, 0, true, 100);
+    vr.add_option_change_callback("vr_panel_size", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::vr::set_panel_size(float(std::get<double>(value)) / 100.0f);
+    });
     auto &graphics = recompui::config::create_graphics_tab();
     graphics.add_enum_option("texture_quality", "Textures", "Use the bundled HD texture pack or your installed replacement pack. Textures without a replacement keep their original appearance.",
         {{0, "original", "Original"}, {1, "hd", "HD"}}, 1u);
