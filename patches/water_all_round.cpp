@@ -142,6 +142,10 @@ float g_copy_camera[3] = { 0.0f, 0.0f, 0.0f };
 struct BuiltFor { float eye[3]; float centre_x, centre_z, radius; };
 BuiltFor g_built_for[2] = {};
 
+// For each frame buffer, the merged mesh's height at each lattice point, for
+// the swim back after a fall (src/first_person.cpp).
+std::unordered_map<int64_t, int16_t> g_heights[2];
+
 uint32_t physical(uint32_t address) { return address & 0x00FFFFFFu; }
 
 float& word_f(uint8_t* rdram, uint32_t address) {
@@ -461,6 +465,9 @@ bool merge(uint8_t* rdram, int b, const std::vector<uint8_t> (&meshes)[1 + kTurn
     }
     if (!flush() || !command(0xB8u << 24, 0)) return false;
 
+    g_heights[b].clear();
+    for (const auto& [key, i] : index) g_heights[b][key] = points[i].y;
+
     stats.points = lattice_points;
     stats.waves = waves;
     stats.triangles = uint32_t(triangles.size());
@@ -704,6 +711,32 @@ bool water_full_grid_ringed(uint8_t* rdram, uint32_t segment3, uint32_t* base, u
     *base = kMerged + uint32_t(b) * kMergedStride;
     *list = 0x03000000u | kMergedList;
     return true;
+}
+
+// The water's height at (x, z) in the merged mesh for the frame buffer that
+// segment 3 points at: the lattice points nearest it, weighted by how near
+// they are; 0, the water's level, outside the mesh or without one.
+float water_height_at(uint32_t segment3, float x, float z) {
+    int b = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (segment3 == kFrameBuffers[i] && g_copies_ready[i]) b = i;
+    }
+    if (b < 0) return 0.0f;
+    const int k0 = int(std::lround(z / kRow));
+    float weight = 0.0f, sum = 0.0f;
+    for (int k = k0 - 1; k <= k0 + 1; ++k) {
+        int X0 = int(std::lround(x / float(kHalfStep)));
+        if (((X0 ^ k) & 1) != 0) ++X0;
+        for (int X = X0 - 2; X <= X0 + 2; X += 2) {
+            const auto it = g_heights[b].find(key_of(k, X));
+            if (it == g_heights[b].end()) continue;
+            const float dx = float(X * kHalfStep) - x, dz = float(k) * kRow - z;
+            const float w = 1.0f / (dx * dx + dz * dz + 1.0f);
+            weight += w;
+            sum += w * float(it->second);
+        }
+    }
+    return weight > 0.0f ? sum / weight : 0.0f;
 }
 
 // For the sky: the camera the merged mesh for the frame buffer that segment 3

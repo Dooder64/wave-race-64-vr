@@ -151,7 +151,9 @@ bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyList
 bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists);
 // src/first_person.cpp: a view from the player's rider to multiply onto the
 // projection in place of the game's, its head shrunk away; or 0.
-uint32_t first_person_view(uint8_t* rdram, uint32_t segment3);
+uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity);
+// patches/swim_back.cpp: once a frame.
+void swim_frame(uint8_t* rdram);
 }
 
 namespace {
@@ -435,6 +437,10 @@ struct Walker {
     // game's first view multiply (which shrinks the head), or 0.
     bool first_person_tried = false;
     uint32_t first_person_view = 0;
+    // The haze to draw round a first-person eye below the waves, its matrix,
+    // and whether it has been drawn this frame.
+    uint32_t haze_list = 0, haze_identity = 0;
+    bool haze_drawn = false;
     Class cls = Class::Auto;
     uint32_t centred_sections = 0;
     uint32_t class_changes = 0;
@@ -1896,6 +1902,7 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
     wr64::water::begin_frame(list_vaddr);
     trace_3d(rdram, list_vaddr, state);
     survey_frame(rdram, list_vaddr, state);
+    wr64::swim_frame(rdram);
 
     Walker w{};
     w.rdram = rdram;
@@ -2176,9 +2183,35 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             if ((params & kMtxProjection) && !(params & kMtxLoad) && w1 == kSceneView && racing(state)) {
                 if (!w.first_person_tried) {
                     w.first_person_tried = true;
-                    w.first_person_view = wr64::first_person_view(rdram, w.segments[3]);
+                    w.first_person_view = wr64::first_person_view(rdram, w.segments[3], &w.haze_list, &w.haze_identity);
                 }
                 if (w.first_person_view != 0) matrix = w.first_person_view;
+            }
+
+            // With the first-person eye below the waves, the haze round it
+            // goes in once the scene is drawn, before the HUD's first flat
+            // projection, in a state of its own that RT64 puts back after:
+            // untextured, unlit, unfogged, not culled, shaded by its
+            // vertices' colours, opaque, neither tested against depth nor
+            // writing it.
+            if (projection_load && w.haze_list != 0 && !w.haze_drawn && racing(state) &&
+                !Walker::perspective(w.read_matrix(w.physical(w1)))) {
+                w.haze_drawn = true;
+                const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
+                w.emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
+                w.emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
+                w.emit(ex | G_EX_PUSHCOMBINE_V1, 0);
+                w.emit(0xB6000000u, 0x000F3001u);                   // clear z-buffer, cull, fog, lighting, texgen
+                w.emit(0xB7000000u, 0x00000204u);                   // set shade, smooth shading
+                w.emit(0xBA001402u, 0x00000000u);                   // one cycle
+                w.emit(0xB900031Du, 0x0F0A4000u);                   // opaque surface, no depth
+                w.emit(0xFCFFFFFFu, 0xFFFE793Cu);                   // shade colour, both cycles
+                w.emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, w.haze_identity);
+                w.emit(uint32_t(kOpDisplayList) << 24, w.haze_list);
+                w.emit(0xBD000000u, 0);                             // pop the modelview
+                w.emit(ex | G_EX_POPCOMBINE_V1, 0);
+                w.emit(ex | G_EX_POPOTHERMODE_V1, 0);
+                w.emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
             }
 
             w.on_matrix(w0, matrix);

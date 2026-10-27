@@ -7,7 +7,8 @@
 // for every character (measured with WR64_3D_TRACE): 0 the jet ski's hull,
 // 1 its handlebars, 3 the head and helmet, 4 the chest, 5 the hips, 6 and 12
 // the upper arms, and the arms' and legs' other parts after, in pairs. The
-// player is rider 0.
+// player's rider is the human's race slot (as src/haptics_observation.cpp
+// reads it).
 //
 // So the camera is replaced where the frame is rewritten, after the game has
 // built all of it: the game's view, the projection multiply of 0xE088 in
@@ -27,6 +28,24 @@
 // WR64_FP_PITCH degrees (30), with its -y up. The eye is placed from the
 // head's origin, its neck, in the head's own units: WR64_FP_EYE_UP above and
 // WR64_FP_EYE_FORWARD ahead, along those axes.
+//
+// Thrown off (animation 23), the view rides the tumbling chest until the eye
+// meets the water. There the game sinks the body out of sight and, after a
+// second or so, would start the climb back on (animation 7) -- placing the
+// rider by the jet ski's stern, wherever it has drifted. Instead the view
+// stays where it went in -- after a hard throw, fast or high, sinking into the
+// haze for up to three seconds first, carried on a little by the throw --
+// comes up to just above the waves, levels out, turns
+// to the jet ski and swims to its stern at WR64_SWIM_SPEED km/h (25), and the
+// climb is held back until it arrives (patches/swim_back.cpp; the game asks
+// again every frame). Climbing, the view follows the rider's eyes up out of
+// the water, still level -- the chest leans far back on the way up -- and
+// turns to look out over the bow; seated, the chest's view takes over. A swim
+// of more than 20 seconds gives up and lets the climb start where the view is.
+//
+// Wherever the eye is below the waves -- going in, or swimming low -- an
+// opaque haze close to the sky's colour, lighter above, is drawn round it
+// after the scene and before the HUD.
 
 #include "wr64/vr.h"
 
@@ -40,6 +59,11 @@
 
 namespace wr64 {
 
+// patches/water_all_round.cpp: the waves' height at a point.
+float water_height_at(uint32_t segment3, float x, float z);
+// patches/swim_back.cpp: whether the climb back on is held back.
+void swim_set_holding(bool holding);
+
 namespace {
 
 // The game's two frame buffers, each the base of segment 3 while its frame is
@@ -49,7 +73,16 @@ constexpr uint32_t kFrameBuffers[2] = { 0x11F8E8, 0x1388D0 };
 // The game's view matrix, and the player's parts, in either buffer.
 constexpr uint32_t kViewMatrix = 0xE088;
 constexpr uint32_t kRiderParts = 0xE108;
+constexpr uint32_t kRiderStride = 0x40;
 constexpr uint32_t kPartStride = 0x100;
+
+// The human's race slot, and each slot's rider state: its animation and the
+// frame it is at, and the countdown to climbing back on after a fall (USA
+// Rev A, as src/haptics_observation.cpp reads them), in physical memory.
+constexpr uint32_t kHumanSlot = 0x0D48DC;
+constexpr uint32_t kRiderState = 0x192690;
+constexpr uint32_t kRiderStateStride = 0x1718;
+constexpr uint32_t kAnimation = 0xC54, kAnimationFrame = 0xC58, kRecoverCountdown = 0x1608;
 constexpr uint32_t kHead = 3, kChest = 4, kHull = 0;
 
 // The view written for each frame buffer, in physical memory above the
@@ -57,6 +90,26 @@ constexpr uint32_t kHead = 3, kChest = 4, kHull = 0;
 // copy at 0x7E0000.
 constexpr uint32_t kView = 0x7D0000;
 constexpr uint32_t kViewStride = 0x40;
+
+// The haze for each frame buffer, after the views: an identity matrix, then
+// the sphere's vertices, then the list that draws them.
+constexpr uint32_t kHaze = 0x7D1000;
+constexpr uint32_t kHazeStride = 0x2000;
+constexpr uint32_t kHazeVertices = 0x40;
+constexpr uint32_t kHazeList = 0x1800;
+
+// The rider's animations: riding, thrown off, and climbing back on.
+constexpr int32_t kRiding = 22, kThrown = 23, kClimbing = 7;
+
+// The game's race runs at 30 frames a second, one view a frame.
+constexpr float kFrameTime = 1.0f / 30.0f;
+
+// Game units to a metre (as src/vr_openxr.cpp has it).
+constexpr float kUnitsPerMetre = 33.3f;
+
+// Where the game places the climbing rider: this far behind the hull's
+// origin, which is near its bow (measured with WR64_FP_TRACE).
+constexpr float kStern = 55.0f;
 
 struct Vec { float x, y, z; };
 
@@ -98,6 +151,81 @@ float setting(const char* name, float fallback) {
     return value != nullptr ? float(std::atof(value)) : fallback;
 }
 
+float clamp01(float v) { return std::min(1.0f, std::max(0.0f, v)); }
+Vec normalised(Vec v) { const float l = length(v); return l > 1e-6f ? v * (1.0f / l) : Vec{ 0.0f, 0.0f, 1.0f }; }
+Vec mix(Vec a, Vec b, float t) { return a + (b - a) * t; }
+
+// A camera: where the eye is and which way it looks, square.
+struct Camera { Vec eye, right, up, ahead; };
+
+Camera level_camera(Vec eye, Vec ahead) {
+    const Vec up{ 0.0f, 1.0f, 0.0f };
+    ahead = normalised(Vec{ ahead.x, 0.0f, ahead.z });
+    return { eye, cross(ahead, up), up, ahead };
+}
+
+Camera blend(const Camera& a, const Camera& b, float t) {
+    const Vec ahead = normalised(mix(a.ahead, b.ahead, t));
+    Vec up = mix(a.up, b.up, t);
+    up = normalised(up - ahead * dot(up, ahead));
+    return { mix(a.eye, b.eye, t), cross(ahead, up), up, ahead };
+}
+
+// The swim back after a fall (see the top).
+enum class Swim { Riding, Thrown, Swimming, Arrived, Climbing, Mounted };
+struct SwimState {
+    Swim phase = Swim::Riding;
+    Vec eye{};
+    Vec facing{ 0.0f, 0.0f, 1.0f };
+    int frames = 0;
+    int out_of_water = 0;
+    // Thrown: where from, the chest's eye a frame ago, and the highest it
+    // has been. In the water after a hard throw: how many
+    // frames more to stay under, how deep, and the way the throw still
+    // carries the swimmer.
+    Vec thrown_from{}, last{};
+    float peak = 0.0f;
+    int under = 0;
+    float depth = 0.0f;
+    Vec drift{};
+};
+SwimState g_swim;
+
+// The human's race slot, 0 to 3; 0 when it reads as anything else.
+uint32_t human_slot(const uint8_t* rdram) {
+    const int32_t slot = *reinterpret_cast<const int32_t*>(rdram + kHumanSlot);
+    return slot >= 0 && slot < 4 ? uint32_t(slot) : 0;
+}
+
+// WR64_FP_TRACE=<file>: every race frame's hull, chest and head, how far the
+// chest is from the hull, and the rider's animation, its frame and the
+// countdown to climbing back on, first person or not, for studying falls.
+void trace_frame(const uint8_t* rdram, uint32_t parts, uint32_t slot) {
+    static std::FILE* trace = [] {
+        const char* path = std::getenv("WR64_FP_TRACE");
+        std::FILE* f = path != nullptr ? std::fopen(path, "w") : nullptr;
+        if (f != nullptr) {
+            std::fprintf(f, "frame slot hull_x hull_y hull_z hull_up_y chest_x chest_y chest_z head_x head_y head_z apart"
+                            " animation animation_frame countdown\n");
+        }
+        return f;
+    }();
+    if (trace == nullptr) return;
+    static uint32_t traced = 0;
+    const Matrix hull = read_matrix(rdram, parts + kHull * kPartStride);
+    const Matrix chest = read_matrix(rdram, parts + kChest * kPartStride);
+    const Matrix head = read_matrix(rdram, parts + kHead * kPartStride);
+    const Vec h = row(hull, 3), c = row(chest, 3), n = row(head, 3);
+    const float hull_up = length(row(hull, 1)) > 0.0f ? row(hull, 1).y / length(row(hull, 1)) : 0.0f;
+    const uint32_t state = kRiderState + slot * kRiderStateStride;
+    const int32_t animation = *reinterpret_cast<const int32_t*>(rdram + state + kAnimation);
+    const int32_t animation_frame = *reinterpret_cast<const int32_t*>(rdram + state + kAnimationFrame);
+    const uint16_t countdown = *reinterpret_cast<const uint16_t*>(rdram + ((state + kRecoverCountdown) ^ 2));
+    std::fprintf(trace, "%u %u %.1f %.1f %.1f %.2f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %d %d %u\n", traced++, slot,
+                 h.x, h.y, h.z, hull_up, c.x, c.y, c.z, n.x, n.y, n.z, length(c - h), animation, animation_frame, countdown);
+    std::fflush(trace);
+}
+
 // Off, on, or not yet decided (-1): on in VR mode unless WR64_VR_FIRST_PERSON=0,
 // and with WR64_VR_FIRST_PERSON=1 without a headset too.
 std::atomic<int> g_on{ -1 };
@@ -126,18 +254,252 @@ void toggle_first_person() {
 
 }  // namespace vr
 
+namespace {
+
+// The haze round `eye` for frame buffer `b`: a sphere of seven rings,
+// opaque, its colour from WR64_HAZE_COLOR's red, green and blue (a pale sky
+// blue) at the horizon, lighter above and darker below, drawn untextured.
+// Returns its list's address.
+uint32_t build_haze(uint8_t* rdram, int b, Vec eye) {
+    static const Vec colour = [] {
+        Vec c{ 150.0f, 190.0f, 225.0f };
+        if (const char* value = std::getenv("WR64_HAZE_COLOR")) {
+            std::sscanf(value, "%f %f %f", &c.x, &c.y, &c.z);
+        }
+        return c;
+    }();
+    const uint32_t base = kHaze + uint32_t(b) * kHazeStride;
+
+    Matrix identity{};
+    for (int i = 0; i < 4; ++i) identity.m[i][i] = 1.0f;
+    write_matrix(rdram, base, identity);
+
+    constexpr int kRings = 7, kAround = 12;
+    constexpr float kRadius = 25.0f;
+    auto put_half = [&](uint32_t address, float value) {
+        *reinterpret_cast<int16_t*>(rdram + (address ^ 2)) = int16_t(std::lround(std::clamp(value, -32768.0f, 32767.0f)));
+    };
+    uint32_t vertex = 0;
+    for (int r = 0; r < kRings; ++r) {
+        const float elevation = -1.5707963f + 3.14159265f * float(r) / float(kRings - 1);
+        const float light = std::sin(elevation);          // -1 below to 1 above
+        const float scale = light >= 0.0f ? 1.0f + 0.25f * light : 1.0f + 0.45f * light;
+        const uint32_t rgba = (uint32_t(std::clamp(colour.x * scale, 0.0f, 255.0f)) << 24) |
+                              (uint32_t(std::clamp(colour.y * scale, 0.0f, 255.0f)) << 16) |
+                              (uint32_t(std::clamp(colour.z * scale, 0.0f, 255.0f)) << 8) | 0xFFu;
+        for (int i = 0; i < kAround; ++i) {
+            const float around = 6.2831853f * float(i) / float(kAround);
+            const uint32_t v = base + kHazeVertices + vertex++ * 16;
+            put_half(v + 0, eye.x + kRadius * std::cos(elevation) * std::cos(around));
+            put_half(v + 2, eye.y + kRadius * std::sin(elevation));
+            put_half(v + 4, eye.z + kRadius * std::cos(elevation) * std::sin(around));
+            put_half(v + 6, 0.0f); put_half(v + 8, 0.0f); put_half(v + 10, 0.0f);
+            *reinterpret_cast<uint32_t*>(rdram + v + 12) = rgba;
+        }
+    }
+
+    // Band by band: its two rings loaded together (24 vertices), then its
+    // triangles, the cache entries named five times their number.
+    uint32_t* out = reinterpret_cast<uint32_t*>(rdram + base + kHazeList);
+    uint32_t commands = 0;
+    auto command = [&](uint32_t w0, uint32_t w1) { out[commands * 2] = w0; out[commands * 2 + 1] = w1; ++commands; };
+    for (int r = 0; r + 1 < kRings; ++r) {
+        const uint32_t n = 2 * kAround;
+        command((0x04u << 24) | (n << 9) | (n * 16 - 1), base + kHazeVertices + uint32_t(r * kAround) * 16);
+        for (uint32_t i = 0; i < uint32_t(kAround); ++i) {
+            const uint32_t j = (i + 1) % kAround;
+            const uint32_t a = i, bb = j, c = kAround + i, d = kAround + j;
+            command(0xBFu << 24, ((a * 5) << 16) | ((bb * 5) << 8) | (d * 5));
+            command(0xBFu << 24, ((a * 5) << 16) | ((d * 5) << 8) | (c * 5));
+        }
+    }
+    command(0xB8u << 24, 0);
+    return base + kHazeList;
+}
+
+// One frame of the swim back (see the top): from the rider's animation, the
+// view from the chest and the hull, the view to show. Holds back the climb
+// while the swimmer is on the way.
+Camera swim_step(uint32_t segment3, int32_t animation, const Camera& chest, const Matrix& hull) {
+    static const float speed = setting("WR64_SWIM_SPEED", 25.0f) / 3.6f * kUnitsPerMetre;    // units a second
+    static const float eye_height = setting("WR64_SWIM_EYE", 4.0f);                         // above the waves
+    constexpr float kTurnRate = 4.0f;       // radians a second
+    constexpr float kRiseRate = 120.0f;     // units a second, coming up
+    constexpr float kArrived = 12.0f;       // units from the stern
+    constexpr int kNeverWet = 45;           // frames thrown without meeting the water: let the game have it
+    constexpr int kGiveUp = 20 * 30;        // frames of swimming
+    constexpr int kHandBack = 12;           // frames over which the view passes back to the climbing rider
+    // A hard throw: the body flying across the water faster than this, in
+    // units a second (about 50 km/h), or rising higher than this. The
+    // hardest -- twice as fast, or three times as high -- keep the swimmer
+    // under for three seconds, 60 units down; WR64_SWIM_SINK scales it, 0
+    // never.
+    constexpr float kHardAcross = 460.0f, kHardHeight = 40.0f;
+    constexpr float kSinkRate = 60.0f;      // units a second, going down
+    static const float sink = setting("WR64_SWIM_SINK", 1.0f);
+
+    SwimState& s = g_swim;
+    const Vec bow = normalised(Vec{ row(hull, 2).x, 0.0f, row(hull, 2).z });
+    const Vec stern = row(hull, 3) - bow * kStern;
+    auto surface = [&](Vec p) { return water_height_at(segment3, p.x, p.z); };
+    // Turns the way the swimmer faces towards `towards`, as far as a frame
+    // allows; returns the angle that was left before turning.
+    auto turn_to = [&](Vec towards) {
+        const Vec want = normalised(Vec{ towards.x - s.eye.x, 0.0f, towards.z - s.eye.z });
+        const float left = std::atan2(s.facing.z * want.x - s.facing.x * want.z, dot(s.facing, want));
+        const float step = std::clamp(left, -kTurnRate * kFrameTime, kTurnRate * kFrameTime);
+        const float c = std::cos(step), sn = std::sin(step);
+        s.facing = normalised(Vec{ s.facing.x * c + s.facing.z * sn, 0.0f, -s.facing.x * sn + s.facing.z * c });
+        return left;
+    };
+    auto swimmer = [&]() { return level_camera(s.eye, s.facing); };
+
+    Camera shown = chest;
+    switch (s.phase) {
+    case Swim::Riding:
+        if (animation == kThrown) {
+            s.phase = Swim::Thrown;
+            s.frames = 0;
+            s.thrown_from = s.last = chest.eye;
+            s.peak = chest.eye.y;
+        }
+        break;
+    case Swim::Thrown:
+        if (animation != kThrown || ++s.frames > kNeverWet) {
+            s.phase = Swim::Riding;
+        }
+        else if (chest.eye.y < surface(chest.eye)) {
+            s.phase = Swim::Swimming;
+            s.eye = chest.eye;
+            s.facing = length(Vec{ chest.ahead.x, 0.0f, chest.ahead.z }) > 0.1f
+                           ? normalised(Vec{ chest.ahead.x, 0.0f, chest.ahead.z }) : bow;
+            // How hard the throw was: how fast across the water the body
+            // flew, and how high. A hard one keeps the swimmer under.
+            const Vec flown{ chest.eye.x - s.thrown_from.x, 0.0f, chest.eye.z - s.thrown_from.z };
+            const float across = length(flown) / (float(s.frames) * kFrameTime);
+            const float climbed = s.peak - s.thrown_from.y;
+            const float hard = std::max(clamp01((across - kHardAcross) / kHardAcross),
+                                        clamp01((climbed - kHardHeight) / (2.0f * kHardHeight))) * sink;
+            s.under = hard > 0.1f ? int(45.0f + 45.0f * hard) : 0;
+            s.depth = 25.0f + 35.0f * hard;
+            s.drift = Vec{ chest.eye.x - s.last.x, 0.0f, chest.eye.z - s.last.z } * (0.5f / kFrameTime);
+            static const bool log = std::getenv("WR64_SWIM_LOG") != nullptr;
+            if (log) {
+                std::fprintf(stderr, "[wr64-swim] in the water: flew %.0f units a second, rose %.0f; %s\n", across, climbed,
+                             s.under > 0 ? "a hard throw, staying under" : "coming straight up");
+                std::fflush(stderr);
+            }
+            s.frames = 0;
+            shown = swimmer();
+        }
+        else {
+            s.peak = std::max(s.peak, chest.eye.y);
+            s.last = chest.eye;
+        }
+        break;
+    case Swim::Swimming: {
+        if (animation != kThrown) {
+            // The game moved on without the swimmer: the race ended, say.
+            s.phase = animation == kClimbing ? Swim::Climbing : Swim::Riding;
+            s.out_of_water = 0;
+            shown = s.phase == Swim::Climbing ? swimmer() : chest;
+            break;
+        }
+        if (s.under > 0) {
+            // Under after a hard throw: sinking, carried on by the throw a
+            // little way, turning towards the jet ski unseen.
+            --s.under;
+            turn_to(stern);
+            s.eye = s.eye + s.drift * kFrameTime;
+            s.drift = s.drift * 0.9f;
+            const float down = surface(s.eye) - s.depth - s.eye.y;
+            s.eye.y += std::clamp(down, -kSinkRate * kFrameTime, kRiseRate * kFrameTime);
+            ++s.frames;
+            shown = swimmer();
+            break;
+        }
+        const float left = turn_to(stern);
+        const Vec to{ stern.x - s.eye.x, 0.0f, stern.z - s.eye.z };
+        const float distance = length(to);
+        // Swimming the way it faces, slowed while still turning far round.
+        const float pace = clamp01(std::cos(left) * 1.5f - 0.5f);
+        const float move = std::min(distance, speed * kFrameTime * pace);
+        s.eye = s.eye + s.facing * move;
+        const float rise = surface(s.eye) + eye_height - s.eye.y;
+        s.eye.y += std::clamp(rise, -3.0f * kRiseRate * kFrameTime, kRiseRate * kFrameTime);
+        if (distance - move < kArrived || ++s.frames > kGiveUp) {
+            s.phase = Swim::Arrived;
+        }
+        shown = swimmer();
+        break;
+    }
+    case Swim::Arrived:
+        turn_to(row(hull, 3));
+        if (animation == kClimbing) {
+            s.phase = Swim::Climbing;
+            s.out_of_water = 0;
+        }
+        else if (animation != kThrown) {
+            s.phase = Swim::Riding;
+            break;
+        }
+        shown = swimmer();
+        break;
+    case Swim::Climbing: {
+        // Climbing, the chest leans far back, so the view only follows the
+        // eyes up, level, turning to look out over the bow.
+        turn_to(row(hull, 3) + bow * 300.0f);
+        if (chest.eye.y > surface(chest.eye)) ++s.out_of_water;
+        s.eye = mix(s.eye, chest.eye, clamp01(float(s.out_of_water) / float(kHandBack)));
+        if (animation == kRiding) {
+            s.phase = Swim::Mounted;
+            s.frames = 0;
+        }
+        else if (animation != kClimbing) {
+            s.phase = Swim::Riding;
+            break;
+        }
+        shown = swimmer();
+        break;
+    }
+    case Swim::Mounted: {
+        // Seated: the chest's view takes over.
+        const float t = clamp01(float(++s.frames) / float(kHandBack));
+        if (t >= 1.0f || animation == kThrown) {
+            s.phase = Swim::Riding;
+            break;
+        }
+        shown = blend(swimmer(), chest, t);
+        break;
+    }
+    }
+    swim_set_holding(s.phase == Swim::Thrown || s.phase == Swim::Swimming);
+    return shown;
+}
+
+}  // namespace
+
 // For the display-list rewriter, in a race: the address of a view from the
-// player's rider's eyes to multiply onto the projection in place of the
-// game's, with the rider's head shrunk away; or 0, leaving the frame as it is.
-uint32_t first_person_view(uint8_t* rdram, uint32_t segment3) {
-    if (!vr::first_person()) return 0;
+// player's rider's eyes -- or swimming back to the jet ski -- to multiply
+// onto the projection in place of the game's, with the rider's head shrunk
+// away; or 0, leaving the frame as it is. With the eye below the waves,
+// `haze` is given the list drawing the haze round it and `identity` an
+// identity matrix to draw it with; otherwise `haze` is 0.
+uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity) {
+    *haze = 0;
     int b = -1;
     for (int i = 0; i < 2; ++i) {
         if (segment3 == kFrameBuffers[i]) b = i;
     }
     if (b < 0) return 0;
-
-    const uint32_t parts = segment3 + kRiderParts;
+    const uint32_t slot = human_slot(rdram);
+    const uint32_t parts = segment3 + kRiderParts + slot * kRiderStride;
+    trace_frame(rdram, parts, slot);
+    if (!vr::first_person()) {
+        g_swim.phase = Swim::Riding;
+        swim_set_holding(false);
+        return 0;
+    }
     const Matrix head = read_matrix(rdram, parts + kHead * kPartStride);
     const Matrix chest = read_matrix(rdram, parts + kChest * kPartStride);
 
@@ -160,16 +522,27 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3) {
     static const float eye_up = setting("WR64_FP_EYE_UP", 70.0f);
     static const float eye_forward = setting("WR64_FP_EYE_FORWARD", 20.0f);
     const Vec neck = row(head, 3);
-    const Vec eye = neck + up * (eye_up * scale) + ahead * (eye_forward * scale);
+    const Vec chest_eye = neck + up * (eye_up * scale) + ahead * (eye_forward * scale);
+
+    // Thrown off, the swim back takes over the view.
+    const int32_t animation = *reinterpret_cast<const int32_t*>(
+        rdram + kRiderState + slot * kRiderStateStride + kAnimation);
+    const Matrix hull = read_matrix(rdram, parts + kHull * kPartStride);
+    const Camera camera = swim_step(segment3, animation, Camera{ chest_eye, right, up, ahead }, hull);
+    const Vec eye = camera.eye;
+    if (eye.y < water_height_at(segment3, eye.x, eye.z)) {
+        *haze = 0x80000000u | build_haze(rdram, b, eye);
+        *identity = 0x80000000u | (kHaze + uint32_t(b) * kHazeStride);
+    }
 
     // The view: the world turned into the eye's space, looking down -z with y
     // up, as the game's own camera is. Row vectors.
-    const Vec back = ahead * -1.0f;
+    const Vec back = camera.ahead * -1.0f;
     Matrix view{};
-    view.m[0][0] = right.x; view.m[0][1] = up.x; view.m[0][2] = back.x;
-    view.m[1][0] = right.y; view.m[1][1] = up.y; view.m[1][2] = back.y;
-    view.m[2][0] = right.z; view.m[2][1] = up.z; view.m[2][2] = back.z;
-    view.m[3][0] = -dot(eye, right); view.m[3][1] = -dot(eye, up); view.m[3][2] = -dot(eye, back);
+    view.m[0][0] = camera.right.x; view.m[0][1] = camera.up.x; view.m[0][2] = back.x;
+    view.m[1][0] = camera.right.y; view.m[1][1] = camera.up.y; view.m[1][2] = back.y;
+    view.m[2][0] = camera.right.z; view.m[2][1] = camera.up.z; view.m[2][2] = back.z;
+    view.m[3][0] = -dot(eye, camera.right); view.m[3][1] = -dot(eye, camera.up); view.m[3][2] = -dot(eye, back);
     view.m[3][3] = 1.0f;
     const uint32_t address = kView + uint32_t(b) * kViewStride;
     write_matrix(rdram, address, view);
@@ -203,6 +576,7 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3) {
         axes("chest", chest);
         std::fflush(stderr);
     }
+
     return 0x80000000u | address;
 }
 
