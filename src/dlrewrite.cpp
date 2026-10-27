@@ -154,6 +154,9 @@ bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyL
 // src/first_person.cpp: a view from the player's rider to multiply onto the
 // projection in place of the game's, its head shrunk away; or 0.
 uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity, uint32_t* underside);
+// src/body_splash.cpp: the game's bow splash round the thrown rider's
+// skidding body, to call after the game's particles; or 0.
+uint32_t body_splash_list(uint8_t* rdram, uint32_t list, uint32_t segment5, uint32_t segment3);
 // patches/swim_back.cpp: once a frame.
 void swim_frame(uint8_t* rdram);
 // src/seafloor.cpp: the list drawing the course's seafloor, and an identity
@@ -442,8 +445,9 @@ struct Walker {
     // game's first view multiply (which shrinks the head), or 0.
     bool first_person_tried = false;
     uint32_t first_person_view = 0;
-    // The haze to draw round a first-person eye below the waves, its matrix,
-    // and whether it has been drawn this frame.
+    // With a first-person eye below the waves: the water's fog to draw round
+    // it, the matrix for it, the waves' underside to draw in their place, and
+    // whether the fog has been drawn this frame.
     uint32_t haze_list = 0, haze_identity = 0, underside_list = 0;
     bool haze_drawn = false;
     Class cls = Class::Auto;
@@ -2278,6 +2282,14 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             }
             else {
                 w.emit(w0, w1);
+                // First person: the game's bow splash round the thrown rider's
+                // skidding body, after the game's own particles, which a race
+                // draws from a list it builds each frame behind segment 5.
+                if (w1 == 0x05000000u && racing(state)) {
+                    if (const uint32_t splash = wr64::body_splash_list(rdram, w.physical(w1), w.segments[5], w.segments[3])) {
+                        w.emit(uint32_t(kOpDisplayList) << 24, splash);
+                    }
+                }
             }
             if (modern_water) w.water_material(false);
             if (water && w.water_interp) w.vertex_interp_group(G_EX_ID_AUTO);

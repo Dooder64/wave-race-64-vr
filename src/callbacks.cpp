@@ -12,6 +12,7 @@
 #include "wr64/callbacks.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -57,6 +58,13 @@
 // fail to resolve; with extern "C" it would get a different mangled name. Both
 // produce the same undefined symbol at link time and neither is obvious.
 RspExitReason aspMain_run(uint8_t* rdram, uint32_t ucode_addr);
+
+// The stick as the game last read it (-1 full left to 1 full right), for
+// the first-person falls (src/first_person.cpp: a crash in a sharp turn).
+namespace wr64 {
+std::atomic<float> g_stick_x{ 0.0f };
+float last_stick_x() { return g_stick_x.load(std::memory_order_relaxed); }
+}
 
 namespace {
 
@@ -304,6 +312,7 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
     // the final N64 octagonal-gate conversion itself.
     *x = stick_x / 80.0f;
     *y = stick_y / 80.0f;
+    wr64::g_stick_x.store(*x, std::memory_order_relaxed);
     wr64::trace_input(controller_num,*buttons,*x,*y);
     return true;
 }

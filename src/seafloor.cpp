@@ -5,8 +5,9 @@
 // water's own level, so the water looks bottomless everywhere and a view
 // from below the surface has nothing to see. Dolphin Park (course 0) is
 // given a floor of its own instead: the course's sand, shallow beside the
-// palm island and the piers in the middle, sloping gently deeper away from
-// them, and at the buoy barrier (a ring of radius 7700 about the origin)
+// palm island and the piers in the middle, deepening quickly away from them
+// (some 4 m a hundred and fifty metres out) to about 10 m, and at the buoy
+// barrier (a ring of radius 7700 about the origin)
 // falling away steeply into deep water. It is built once when the course is
 // loaded, in world space, and drawn in place of the game's flat floor, before
 // the water, so the water's depth tint (RT64's WaterPS: the deeper what lies
@@ -15,6 +16,12 @@
 // The island and the piers were measured from the course itself: the island
 // from where its collision meets the waterline (WR64_SHORE_DUMP), the piers
 // from the bottoms of their pillars (WR64_3D_TRACE_VERTS).
+//
+// The swim back after a fall (src/first_person.cpp) goes round what stands
+// out of the water here: the two ramps, the three rocks of the stone arches,
+// the piers' pillars and the stone wall by them, and the island's cliff and
+// the pillar beside it, measured the same way. (The island's collision
+// slopes gently up where its cliff rises: walked on, it led through it.)
 //
 // Memory. Above the game's 4 MB, below the rewriter's scratch list at
 // 0x700000: the floor at 0x500000, the fog at 0x5C0000. The cartridge never
@@ -81,8 +88,9 @@ float depth_at(float x, float z) {
     for (const Anchor& a : kShore) shore = std::min(shore, std::hypot(x - a.x, z - a.z) - a.radius);
     shore = std::max(shore, 0.0f);
     const float r = std::hypot(x, z);
-    // Shallow by the shore, a gentle slope out to about 7.5 m.
-    float depth = 18.0f + 232.0f * smoothstep(0.0f, 5500.0f, shore);
+    // Shallow by the shore, deepening quickly at first and levelling off at
+    // about 10 m: deep enough for ramps and stunts to land in.
+    float depth = 25.0f + 315.0f * (1.0f - std::exp(-shore / 1100.0f));
     // Broad, low swells in the sand, flattening out towards the drop. Far
     // longer than the grid's cells: shorter ripples sampled at 256 units
     // showed as stripes.
@@ -92,6 +100,49 @@ float depth_at(float x, float z) {
     depth += 5200.0f * smoothstep(kBarrier + 150.0f, kBarrier + 1600.0f, r) +
              std::max(0.0f, r - (kBarrier + 1600.0f)) * 0.6f;
     return depth;
+}
+
+// What the swimmer goes round, each as its outline at the waterline (a
+// convex polygon in x, z, in order round it) or a circle.
+struct Outline { int count; float x[12], z[12]; };
+constexpr Outline kSolid[] = {
+    // The ramps.
+    { 4, { -1716, -1294, -568, -990 }, { 3915, 4821, 4483, 3577 } },
+    { 4, { 1033, 1049, 1849, 1833 }, { 3126, 4126, 4112, 3112 } },
+    // The rocks of the stone arches, north to south.
+    { 7, { 3053, 3200, 3300, 3303, 3203, 3051, 2988 }, { 3053, 3034, 3134, 3303, 3403, 3376, 3185 } },
+    { 4, { 3212, 3395, 3495, 3046 }, { 3798, 3924, 4224, 4060 } },
+    { 5, { 3021, 3540, 3440, 3257, 3104 }, { 4542, 4800, 5100, 5100, 4930 } },
+    // The stone wall by the piers.
+    { 4, { -149, -70, -70, -149 }, { -963, -963, -144, -144 } },
+    // The island's cliff, from the beach (y 20) up to its top (y 130), at
+    // its foot; and the pillar beside it, holding up the platform above.
+    { 10, { 300, 214, 96, -14, -103, -125, -34, 116, 270, 325 },
+          { 5350, 5399, 5403, 5352, 5254, 5125, 4987, 4957, 5014, 5169 } },
+    { 4, { -172, -90, -90, -172 }, { 5106, 5106, 5295, 5295 } },
+};
+constexpr float kPillar = 45.0f;
+// The island's cliff (in kSolid), and the beach drawn round it: sand going
+// on down from the cliff's foot, 20 units up, as far as 60 units under the
+// water some 620 units out -- well past where the course's collision ends.
+constexpr int kCliff = 6;
+constexpr float kCliffFoot = 20.0f, kBeachSlope = 80.0f / 620.0f;
+
+// How far (x, z) is outside `o`'s outline: negative inside.
+float outside(const Outline& o, float x, float z) {
+    float edge = 1e9f;
+    bool left = true, right = true;
+    for (int i = 0; i < o.count; ++i) {
+        const int j = (i + 1) % o.count;
+        const float ex = o.x[j] - o.x[i], ez = o.z[j] - o.z[i];
+        const float side = ex * (z - o.z[i]) - ez * (x - o.x[i]);
+        left = left && side >= 0.0f;
+        right = right && side <= 0.0f;
+        const float t = std::clamp(((x - o.x[i]) * ex + (z - o.z[i]) * ez) / std::max(ex * ex + ez * ez, 1e-3f), 0.0f, 1.0f);
+        edge = std::min(edge, std::hypot(x - o.x[i] - t * ex, z - o.z[i] - t * ez));
+    }
+    // Inside: on the same side of every edge, whichever way round it runs.
+    return left || right ? -edge : edge;
 }
 
 void put_half(uint8_t* rdram, uint32_t address, float value) {
@@ -207,6 +258,33 @@ bool build(uint8_t* rdram, uint32_t course_data) {
 }
 
 }  // namespace
+
+// The seafloor's height at (x, z) on course `course`, in *height -- or the
+// island's beach, where that is higher; false for a course without one (or
+// with WR64_SEAFLOOR=0).
+bool seafloor_height_at(uint32_t course, float x, float z, float* height) {
+    static const bool off = [] {
+        const char* value = std::getenv("WR64_SEAFLOOR");
+        return value != nullptr && value[0] == '0';
+    }();
+    if (off || course != 0) return false;
+    const float beach = kCliffFoot - kBeachSlope * std::max(0.0f, outside(kSolid[kCliff], x, z));
+    *height = std::max(-depth_at(x, z), beach);
+    return true;
+}
+
+// How far (x, z) is from anything solid standing out of the water on course
+// `course` (negative inside it), at the waterline: for the swim back to go
+// round. Very far on a course without any.
+float course_clearance(uint32_t course, float x, float z) {
+    float nearest = 1e9f;
+    if (course != 0) return nearest;
+    for (const Outline& o : kSolid) nearest = std::min(nearest, outside(o, x, z));
+    for (size_t i = 1; i < sizeof(kShore) / sizeof(kShore[0]); ++i) {
+        nearest = std::min(nearest, std::hypot(x - kShore[i].x, z - kShore[i].z) - kPillar);
+    }
+    return nearest;
+}
 
 // The list drawing the seafloor for the course loaded, as an address to
 // call, or 0 for a course without one; `identity` is given an identity

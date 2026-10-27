@@ -113,6 +113,11 @@ int16_t half(const uint8_t *rdram, uint32_t address) {
     int16_t result; std::memcpy(&result, rdram + ((address & 0x7fffff) ^ 2), 2); return result;
 }
 
+// The course's collision shapes that can be stood on, for the swim back
+// (src/first_person.cpp, on the renderer's thread): see ground_height_at.
+std::mutex groundMutex;
+std::vector<std::array<float,16>> groundShapes;
+
 void capture_shoreline(const uint8_t *rdram, interop::WaterMaterial &m, bool reset) {
     static uint32_t savedPlanes=0, savedList=0, savedGrid=0, savedCourse=~0u;
     static float savedHeight=0;
@@ -121,6 +126,7 @@ void capture_shoreline(const uint8_t *rdram, interop::WaterMaterial &m, bool res
     const uint32_t planes=word(rdram,0x801C3B84), list=word(rdram,0x801C3B80), grid=word(rdram,0x801C3B7C);
     if (reset || course!=savedCourse || planes!=savedPlanes || list!=savedList || grid!=savedGrid || m.surface.x!=savedHeight) {
         segments.clear();
+        { std::lock_guard<std::mutex> lock(groundMutex); groundShapes.clear(); }
         savedPlanes=planes; savedList=list; savedGrid=grid; savedCourse=course; savedHeight=m.surface.x;
         // Course 9 is rider selection. Only accept the original per-course
         // pointer tables, after the original loader has installed the data.
@@ -165,6 +171,17 @@ void capture_shoreline(const uint8_t *rdram, interop::WaterMaterial &m, bool res
                 if (shoreline_segment(plane,m.surface.x,segment)) segments.push_back(segment);
             }
             if (dump) std::fclose(dump);
+            std::vector<std::array<float,16>> ground;
+            for (uint16_t id:shapes) {
+                std::array<float,16> plane;
+                for (uint32_t i=0;i<16;i++) plane[i]=real(rdram,planes+id*64+i*4);
+                bool finite=true;
+                for (float v:plane) finite=finite && std::isfinite(v);
+                // Faces turned up enough to stand on, with a real third edge.
+                if (finite && plane[4]>0.3f && plane[15]<0) ground.push_back(plane);
+            }
+            std::lock_guard<std::mutex> lock(groundMutex);
+            groundShapes=std::move(ground);
         }
         std::fprintf(stderr,"[water] course %u shoreline: %zu static segments at height %.1f\n",course,segments.size(),m.surface.x);
     }
@@ -201,6 +218,37 @@ void set_aqua_tint(float percent) { aquaTint.store(std::isfinite(percent) ? std:
 void set_aqua_clarity(float percent) { aquaClarity.store(std::isfinite(percent) ? std::clamp(percent / 100.0f, 0.0f, 1.0f) : 0.5f); }
 void set_ripple_detail(RippleDetail value) { selectedRipples.store(std::min(uint32_t(value), 2u)); }
 void set_spray_enabled(bool enabled) { selectedSpray.store(enabled); }
+
+namespace {
+std::mutex bodyMutex;
+bool bodyActive=false;
+interop::float4 bodyCraft{0,0,0,-1};
+}
+void set_body_spray(bool active,float x,float y,float z,float wet) {
+    std::lock_guard<std::mutex> lock(bodyMutex);
+    bodyActive=active;
+    bodyCraft={x,y,z,wet};
+}
+
+// The highest standing surface of the course's collision at (x, z) no higher
+// than `below`, in *height; false where there is none. A shape is a plane
+// through its first point bounded by three edges (as func_8007F448 tests
+// them; see water_shore.h).
+bool ground_height_at(float x,float z,float below,float *height) {
+    std::lock_guard<std::mutex> lock(groundMutex);
+    bool found=false;
+    float best=-1e9f;
+    for (const auto &p:groundShapes) {
+        const float y=p[1]-(p[3]*(x-p[0])+p[5]*(z-p[2]))/p[4];
+        if (y>below || y<=best) continue;
+        const float dx=x-p[0],dy=y-p[1],dz=z-p[2];
+        const float e1=p[6]*dx+p[7]*dy+p[8]*dz, e2=p[9]*dx+p[10]*dy+p[11]*dz, e3=p[12]*dx+p[13]*dy+p[14]*dz;
+        if (e1<-1 || e2<-1 || e3>1 || e3<p[15]-1) continue;
+        best=y; found=true;
+    }
+    if (found) *height=best;
+    return found;
+}
 void toggle() {
     comparisonFlip.store(!comparisonFlip.load());
     const char *names[]={"Original","Modern","High","Ultra"};
@@ -292,6 +340,15 @@ void publish_frame(const uint8_t *rdram, uint32_t display_list) {
                 craft.w=float(wet)/float(last+1);
             }
             if (!std::isfinite(craft.x) || !std::isfinite(craft.y) || !std::isfinite(craft.z) || std::abs(craft.x)>1000000 || std::abs(craft.z)>1000000) craft={0,0,0,-1};
+        }
+        // The thrown rider's body skidding on the water (set_body_spray)
+        // throws up spray as a jet ski does: given the first slot no rider
+        // has, or with four riders the human's own, the jet ski meanwhile
+        // drifting, riderless.
+        {
+            std::lock_guard<std::mutex> lock(bodyMutex);
+            const uint32_t human=std::min(word(rdram,0x800D48DC),3u);
+            if (bodyActive && i==(count<4 ? count : human)) craft=bodyCraft;
         }
         const auto &old=previousCraft[i];
         const float dx=craft.x-old.x,dz=craft.z-old.z;

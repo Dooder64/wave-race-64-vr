@@ -21,6 +21,13 @@ void set_aqua_tint(float percent);
 void set_aqua_clarity(float percent);
 void set_ripple_detail(RippleDetail value);
 void set_spray_enabled(bool enabled);
+// The highest standing surface of the course's collision at (x, z) no higher
+// than `below`; false where there is none.
+bool ground_height_at(float x, float z, float below, float* height);
+// The thrown rider's body skidding on the water, for the spray: where it is,
+// and whether it touches the water (wet 1) or is in the air (0). Set from the
+// renderer's thread, read when the frame is published.
+void set_body_spray(bool active, float x, float y, float z, float wet);
 // The game states whose menus are drawn over a camera looking straight down
 // on the "full grid" of waves: course select, the time trial and race
 // results, the initials entry for a new record (0x64), and the menu after a
