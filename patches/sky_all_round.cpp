@@ -289,6 +289,34 @@ std::vector<ProfilePoint> tent_profile(const std::array<Vertex, 7>& tent, const 
     return profile;
 }
 
+// Whether the eye is over the tent's base, a hexagon on the water.
+bool inside_base(const std::array<Vertex, 7>& tent, const float eye[3]) {
+    float sign = 0.0f;
+    for (int i = 0; i < 6; ++i) {
+        const Vertex &p = tent[i], &q = tent[(i + 1) % 6];
+        const float side = (q.x - p.x) * (eye[2] - p.z) - (q.z - p.z) * (eye[0] - p.x);
+        if (side == 0.0f) continue;
+        if (sign == 0.0f) sign = side;
+        else if ((side > 0.0f) != (sign > 0.0f)) return false;
+    }
+    return true;
+}
+
+// A plain gradient round the eye: the tent's horizon at the water and its
+// peak overhead, as the sine of the elevation, 3000 units away.
+std::vector<ProfilePoint> plain_profile(const std::array<Vertex, 7>& tent, const float eye[3]) {
+    constexpr float kDistance = 3000.0f;
+    std::vector<ProfilePoint> profile;
+    profile.push_back({ kDistance, 0.0f, tent[0].t });
+    static constexpr float kElevations[] = { 0, 2, 5, 10, 15, 20, 30, 45, 60, 75 };
+    for (const float degrees : kElevations) {
+        const float e = degrees * kPi / 180.0f;
+        profile.push_back({ kDistance * std::cos(e), eye[1] + kDistance * std::sin(e),
+                            tent[0].t + (tent[6].t - tent[0].t) * std::sin(e) });
+    }
+    return profile;
+}
+
 // The clouds' fade straight ahead. The game gives each of its seven vertices
 // an alpha and its triangles spread it between them, so the fade is the
 // fan's own: it is read along the ray from the eye towards the hexagon's
@@ -405,9 +433,14 @@ bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyList
     if (!fit(floor, 0, floor_s) || !fit(floor, 1, floor_t) || !fit(clouds, 0, cloud_s) || !fit(clouds, 1, cloud_t)) {
         return false;
     }
-    const std::vector<ProfilePoint> profile = tent_profile(tent, eye);
+    // The tent read straight ahead -- or, with the eye outside its base, as
+    // where a camera skims the water towards a course (the title's opening,
+    // some of the cameras after a race), where every look through it is near
+    // its horizon, a plain gradient.
+    std::vector<ProfilePoint> profile = inside_base(tent, eye) ? tent_profile(tent, eye) : std::vector<ProfilePoint>{};
+    if (profile.empty()) profile = plain_profile(tent, eye);
     const std::vector<CloudRing> cloud_rings = cloud_profile(clouds, eye);
-    if (profile.empty() || cloud_rings.size() < 2) return false;
+    if (cloud_rings.size() < 2) return false;
 
     const uint32_t base = kSky + uint32_t(b) * kSkyStride;
     Writer writer(rdram, base, eye);

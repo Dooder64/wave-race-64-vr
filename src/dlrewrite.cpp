@@ -691,7 +691,19 @@ struct Walker {
             sky_replaced = results ? ring_full_grid() && wr64::sky_results_dome(rdram, segments[3], segments[6], &sky_lists)
                                    : wr64::sky_all_round(rdram, segments[3], segments[6], &sky_lists);
         }
-        if (!sky_replaced) return false;
+        if (!sky_replaced) {
+            // The game's own gradient, a tent placed over the water ahead,
+            // is drawn from both sides: a camera skimming the water from
+            // outside it -- the title's opening, the cameras after a race --
+            // otherwise sees only faces turned away, and so no sky at all.
+            if (list != kSkyGradientList) return false;
+            const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
+            emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
+            emit(0xB6000000u, 0x00003000u);                 // clear culling of either side
+            emit(uint32_t(kOpDisplayList) << 24, list);
+            emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
+            return true;
+        }
         const uint32_t own = list == kSkyFloorList ? sky_lists.floor
                            : list == kSkyGradientList ? sky_lists.gradient
                            : list == kSkyCloudList ? sky_lists.clouds : 0;
