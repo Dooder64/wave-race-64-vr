@@ -21,4 +21,15 @@ void set_aqua_tint(float percent);
 void set_aqua_clarity(float percent);
 void set_ripple_detail(RippleDetail value);
 void set_spray_enabled(bool enabled);
+// The game states whose menus are drawn over a camera looking straight down
+// on the "full grid" of waves: course select, the time trial and race
+// results, the initials entry for a new record (0x64), and the menu after a
+// time trial. Each comes with its leaving state (the next odd number), which
+// draws the same screen.
+inline bool full_grid_screen(uint32_t state) {
+    switch (state & ~1u) {
+        case 0x14: case 0x32: case 0x34: case 0x50: case 0x64: return true;
+        default: return false;
+    }
+}
 }

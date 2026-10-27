@@ -84,7 +84,7 @@
 // frames diffed against each other say which geometry the game rebuilds
 // rather than moves. WR64_3D_TRACE_FRAMES sets how many frames (two by
 // default) and WR64_3D_TRACE_STATE takes a game state in hexadecimal for the
-// screens that are not races.
+// screens that are not races, or "all" for one frame of every state.
 //
 // WR64_CAMERA_LOG=1 prints the race camera's position, direction and lens
 // about once a second; see log_camera. WR64_CULL_SURVEY=1 reports in which
@@ -690,8 +690,6 @@ struct Walker {
     // ringed out to the distance (patches/water_all_round.cpp), once a frame,
     // first needed by the sky, which is built over it, and then drawn by the
     // water's call; the segment base and list, or 0.
-    static constexpr uint32_t kResultsState = 0x34;
-    static constexpr uint32_t kCourseSelectState = 0x14;   // looks down on the same grid
     static constexpr uint32_t kSkyFirstList = 0x010102D0;
     bool full_grid_tried = false;
     uint32_t full_grid_base = 0, full_grid_list = 0;
@@ -712,7 +710,7 @@ struct Walker {
     // its gradient is replaced, since the floor's and the clouds' textures
     // are not set up for them there.
     bool replace_sky_call(uint32_t list) {
-        const bool results = state == kResultsState || state == kCourseSelectState;
+        const bool results = wr64::water::full_grid_screen(state);
         if (!sky_tried && (list == kSkyFloorList || (results && list == kSkyFirstList))) {
             sky_tried = true;
             sky_replaced = results ? ring_full_grid() && wr64::sky_results_dome(rdram, segments[3], segments[6], &sky_lists)
@@ -1550,6 +1548,31 @@ void trace_3d(uint8_t* rdram, uint32_t list_vaddr, uint32_t state) {
     // Race frames by default; WR64_3D_TRACE_STATE names another game state,
     // in hexadecimal, for the screens that are not races.
     static const char* state_env = std::getenv("WR64_3D_TRACE_STATE");
+    // "all" writes one frame of every game state, 20 frames after it begins,
+    // to the named file with the state added ("trace.txt" -> "trace.txt_36"):
+    // for screens a script cannot reach, played through once by hand.
+    static const bool every_state = state_env != nullptr && std::strcmp(state_env, "all") == 0;
+    if (every_state) {
+        static uint32_t current = ~0u;
+        static int frames = 0;
+        static bool traced[256] = {};
+        if (state != current) { current = state; frames = 0; }
+        if (++frames != 20 || state > 0xFF || traced[state]) return;
+        traced[state] = true;
+        char name[512];
+        std::snprintf(name, sizeof(name), "%s_%02X", path, state);
+        std::FILE* one = std::fopen(name, "w");
+        if (one == nullptr) return;
+        std::fprintf(one, "==== frame 1 (state 0x%02X, list 0x%08X) ====\n", state, list_vaddr);
+        Tracer t{};
+        t.rdram = rdram;
+        t.f = one;
+        t.walk(list_vaddr & 0x00FFFFFFu, 0);
+        std::fclose(one);
+        std::fprintf(stderr, "[wr64] 3D trace: state 0x%02X written to %s\n", state, name);
+        std::fflush(stderr);
+        return;
+    }
     static const long wanted_state = state_env != nullptr ? std::strtol(state_env, nullptr, 16) : -1;
     if (wanted_state >= 0 ? (state != uint32_t(wanted_state)) : !racing(state)) return;
 
@@ -1991,7 +2014,7 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
         const uint32_t w1 = c[1];
         const uint8_t op = static_cast<uint8_t>(w0 >> 24);
         cursor += 8;
-        if (op == kOpDisplayList && w1 == kBackdropSetupList && wr64::vr::enabled() && (state == 0x34 || state == 0x14)) {
+        if (op == kOpDisplayList && w1 == kBackdropSetupList && wr64::vr::enabled() && wr64::water::full_grid_screen(state)) {
             w.backdrop_next = true;
         }
 
