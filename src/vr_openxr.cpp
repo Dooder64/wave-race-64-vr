@@ -199,7 +199,9 @@ bool g_lens_reported = false;
 // head's current ones to become it.
 TaggedViews g_pose_history[kPoseHistory];
 uint64_t g_next_tag = 1;
-std::atomic<bool> g_recenter_requested{ false };
+// For tests through the mirror with the headset lying still,
+// WR64_VR_TEST_RECENTRE=1 asks for it at the first frame.
+std::atomic<bool> g_recenter_requested{ std::getenv("WR64_VR_TEST_RECENTRE") != nullptr };
 XrVector3f g_centre_position{ 0.0f, 0.0f, 0.0f };
 // WR64_VR_TEST_YAW turns straight ahead that many degrees to the left, as if
 // the head were turned right by it -- for checking, with the headset still,

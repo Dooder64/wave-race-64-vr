@@ -42,6 +42,13 @@ void shutdown();
 // F6: straight ahead becomes the way the head faces now, from where it is.
 void recenter();
 
+// First person: a race seen from the player's rider's eyes, facing the way
+// the chest faces, the head left out (src/first_person.cpp). On by default in
+// VR mode; WR64_VR_FIRST_PERSON=0 starts with it off, =1 turns it on without
+// a headset too. F5 switches it.
+bool first_person();
+void toggle_first_person();
+
 // Whether the game draws objects all round its camera rather than only those
 // a flat screen would show: in VR mode, or with WR64_CULL_ALL_ROUND=1.
 bool all_round();

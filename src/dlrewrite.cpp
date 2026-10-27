@@ -149,6 +149,9 @@ struct SkyLists { uint32_t base, floor, gradient, clouds; };
 bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists);
 // The same for the results screen: a gradient dome only.
 bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists);
+// src/first_person.cpp: a view from the player's rider to multiply onto the
+// projection in place of the game's, its head shrunk away; or 0.
+uint32_t first_person_view(uint8_t* rdram, uint32_t segment3);
 }
 
 namespace {
@@ -204,6 +207,10 @@ constexpr uint32_t kCardModelSegment = 8;
 // buffer, reached through segment 3: in VR the scene seen through the lens
 // (see 6. at the top).
 constexpr uint32_t kSceneProjection = 0x0300E008;
+
+// The game's camera, multiplied onto that projection: in first person, a view
+// from the player's rider instead (src/first_person.cpp).
+constexpr uint32_t kSceneView = 0x0300E088;
 
 constexpr uint32_t kMtxProjection = 0x01;
 constexpr uint32_t kMtxLoad = 0x02;
@@ -424,6 +431,10 @@ struct Walker {
     // VR: whether the course card's track model is being drawn, and so left
     // out (see kCardModelProjection).
     bool card_model = false;
+    // First person: the rider's view for this frame, worked out at the
+    // game's first view multiply (which shrinks the head), or 0.
+    bool first_person_tried = false;
+    uint32_t first_person_view = 0;
     Class cls = Class::Auto;
     uint32_t centred_sections = 0;
     uint32_t class_changes = 0;
@@ -2156,7 +2167,19 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
                 w.set_rect_class(Class::Auto);
             }
 
-            w.on_matrix(w0, w1);
+            // First person: the game's camera, multiplied onto its projection
+            // in a race, is replaced by a view from the player's rider.
+            uint32_t matrix = w1;
+            if ((params & kMtxProjection) && !(params & kMtxLoad) && w1 == kSceneView &&
+                (state == 0x07 || (state >= 0x28 && state <= 0x2F))) {
+                if (!w.first_person_tried) {
+                    w.first_person_tried = true;
+                    w.first_person_view = wr64::first_person_view(rdram, w.segments[3]);
+                }
+                if (w.first_person_view != 0) matrix = w.first_person_view;
+            }
+
+            w.on_matrix(w0, matrix);
 
             // VR: 3D that is not the frame's scene is not seen through the
             // headset's lens but drawn on its panel with the frame's flat
@@ -2215,7 +2238,7 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
                 w.seen_ortho = true;
             }
             w.sky_matrix(params);
-            w.emit(w0, w1);
+            w.emit(w0, matrix);
             continue;
         }
 
