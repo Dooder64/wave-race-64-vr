@@ -48,6 +48,9 @@ void recenter();
 // a headset too. F5 switches it.
 bool first_person();
 void toggle_first_person();
+// How much of the rider's lean, pitch and roll first person takes, 0 to 1
+// (the settings' VR tab).
+void set_first_person_intensity(float intensity);
 
 // The headset's Touch controllers as last read, for the game's input
 // (src/callbacks.cpp): live only in VR mode with the session focused. Sticks

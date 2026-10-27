@@ -145,6 +145,7 @@ BuiltFor g_built_for[2] = {};
 // For each frame buffer, the merged mesh's height at each lattice point, for
 // the swim back after a fall (src/first_person.cpp).
 std::unordered_map<int64_t, int16_t> g_heights[2];
+float g_levels[2] = { 0.0f, 0.0f };
 
 uint32_t physical(uint32_t address) { return address & 0x00FFFFFFu; }
 
@@ -302,19 +303,33 @@ bool merge(uint8_t* rdram, int b, const std::vector<uint8_t> (&meshes)[1 + kTurn
     int X0 = int(std::lround(eye_x / kHalfStep));
     if (((X0 ^ K0) & 1) != 0) ++X0;
     int radius = 4;
+    // The water's level -- where the game flattens its meshes' borders, which
+    // the tide moves on some courses -- and the waves' average texture
+    // coordinates, for everything flat: the border, the uncovered lattice and
+    // the ring, which so lie at the waves' level and take on their colour.
+    double level_sum = 0.0, flat_s = 0.0, flat_t = 0.0, flat_weight = 0.0;
+    uint32_t level_count = 0;
     for (const auto& mesh : meshes) {
         for (const auto& [key, p] : lattice_of(mesh, lattice_end)) {
             const int dk = std::abs(row_of(key) - K0), dX = std::abs(column_of(key) - X0);
             radius = std::max(radius, std::max(dk, (dX + dk + 1) / 2) + 1);
             if (!have_rgba) { rgba = p.rgba; have_rgba = true; }
-            if (p.depth < 1) continue;
+            if (p.depth < 1) {
+                level_sum += p.y;
+                ++level_count;
+                continue;
+            }
             Sum& sum = sums[key];
             const float w = float(p.depth);
             sum.weight += w; sum.y += w * p.y; sum.s += w * p.s; sum.t += w * p.t;
+            flat_s += w * p.s; flat_t += w * p.t; flat_weight += w;
         }
     }
     if (!have_rgba) return false;
     radius = std::min(radius, kMaxRadius);
+    const int16_t level = int16_t(level_count > 0 ? std::lround(level_sum / level_count) : 0);
+    const int16_t still_s = int16_t(flat_weight > 0.0 ? std::lround(flat_s / flat_weight) : 1024);
+    const int16_t still_t = int16_t(flat_weight > 0.0 ? std::lround(flat_t / flat_weight) : 1024);
 
     // The points: the hexagon's lattice, its border flat, then the ring's six
     // far corners. Rows are numbered from the camera's point, dk, and each is
@@ -328,7 +343,7 @@ bool merge(uint8_t* rdram, int b, const std::vector<uint8_t> (&meshes)[1 + kTurn
         const int k = K0 + dk, half = 2 * radius - std::abs(dk);
         const int16_t z = int16_t(std::lround(float(k) * kRow));
         for (int X = X0 - half; X <= X0 + half; X += 2) {
-            Point p{ int16_t(X * kHalfStep), 0, z, 1024, 1024 };
+            Point p{ int16_t(X * kHalfStep), level, z, still_s, still_t };
             const bool border = std::abs(dk) == radius || X == X0 - half || X == X0 + half;
             const auto it = sums.find(key_of(k, X));
             if (!border && it != sums.end()) {
@@ -375,8 +390,8 @@ bool merge(uint8_t* rdram, int b, const std::vector<uint8_t> (&meshes)[1 + kTurn
         const float scale = kFar / std::sqrt(dx * dx + dz * dz);
         const float fx = float(X0 * kHalfStep) + dx * scale, fz = float(K0) * kRow + dz * scale;
         far_corner[c] = uint32_t(points.size());
-        points.push_back({ int16_t(std::clamp(fx, -32000.0f, 32000.0f)), 0,
-                           int16_t(std::clamp(fz, -32000.0f, 32000.0f)), 1024, 1024 });
+        points.push_back({ int16_t(std::clamp(fx, -32000.0f, 32000.0f)), level,
+                           int16_t(std::clamp(fz, -32000.0f, 32000.0f)), still_s, still_t });
     }
     for (int c = 0; c < 6; ++c) {
         const int n = (c + 1) % 6;
@@ -467,6 +482,7 @@ bool merge(uint8_t* rdram, int b, const std::vector<uint8_t> (&meshes)[1 + kTurn
 
     g_heights[b].clear();
     for (const auto& [key, i] : index) g_heights[b][key] = points[i].y;
+    g_levels[b] = float(level);
 
     stats.points = lattice_points;
     stats.waves = waves;
@@ -715,7 +731,8 @@ bool water_full_grid_ringed(uint8_t* rdram, uint32_t segment3, uint32_t* base, u
 
 // The water's height at (x, z) in the merged mesh for the frame buffer that
 // segment 3 points at: the lattice points nearest it, weighted by how near
-// they are; 0, the water's level, outside the mesh or without one.
+// they are; outside the mesh, the water's level (which the tide moves on some
+// courses), and 0 without one.
 float water_height_at(uint32_t segment3, float x, float z) {
     int b = -1;
     for (int i = 0; i < 2; ++i) {
@@ -736,7 +753,7 @@ float water_height_at(uint32_t segment3, float x, float z) {
             sum += w * float(it->second);
         }
     }
-    return weight > 0.0f ? sum / weight : 0.0f;
+    return weight > 0.0f ? sum / weight : g_levels[b];
 }
 
 // For the sky: the camera the merged mesh for the frame buffer that segment 3

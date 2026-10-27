@@ -15,7 +15,8 @@
 // Outside a race nothing is held. WR64_SWIM_LOG=1 reports each start of a
 // throw or a climb, and each refusal now and then; WR64_TEST_THROW=<seconds>
 // throws the human's rider every so many seconds of riding, by setting that
-// countdown to 1, for testing.
+// countdown to 1 -- in scripted test runs only (WR64_INPUT_SCRIPT), as is
+// WR64_TEST_FINISH=<seconds>, which marks the rider finished.
 
 #include "recomp.h"
 
@@ -87,9 +88,39 @@ void swim_animation_hook(uint8_t* rdram, recomp_context* ctx) {
 void swim_frame(uint8_t* rdram) {
     if (!racing(rdram)) g_holding.store(false, std::memory_order_relaxed);
 
-    static const char* every_env = std::getenv("WR64_TEST_THROW");
-    if (every_env == nullptr || !racing(rdram)) return;
-    static const int every = int(std::atof(every_env) * 30.0);
+    // WR64_TEST_FINISH=<seconds>, in a scripted test run only: the human's
+    // rider marked finished (its race record's +0x2F4, as
+    // src/haptics_observation.cpp reads it) after so many seconds of racing,
+    // to see the game's finish without finishing.
+    static const int finish_at = [] {
+        const char* env = std::getenv("WR64_TEST_FINISH");
+        return env != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr ? int(std::atof(env) * 30.0) : 0;
+    }();
+    if (finish_at > 0 && racing(rdram)) {
+        static int raced = 0;
+        if (++raced == finish_at) {
+            word(rdram, 0x1C2938 + uint32_t(human_slot(rdram)) * 0x378 + 0x2F4) = 1;
+            std::fprintf(stderr, "[wr64-swim] TEST: the human's rider is marked finished\n");
+            std::fflush(stderr);
+        }
+    }
+
+    // Only in a scripted test run (WR64_INPUT_SCRIPT), so a setting left over
+    // in a shell can never throw a player, and said so plainly when on.
+    static const int every = [] {
+        const char* every_env = std::getenv("WR64_TEST_THROW");
+        if (every_env == nullptr) return 0;
+        if (std::getenv("WR64_INPUT_SCRIPT") == nullptr) {
+            std::fprintf(stderr, "[wr64-swim] WR64_TEST_THROW is set but ignored: it only works with WR64_INPUT_SCRIPT\n");
+            std::fflush(stderr);
+            return 0;
+        }
+        const int frames = int(std::atof(every_env) * 30.0);
+        std::fprintf(stderr, "[wr64-swim] TEST: the rider is thrown every %s seconds of riding\n", every_env);
+        std::fflush(stderr);
+        return frames;
+    }();
+    if (every <= 0 || !racing(rdram)) return;
     static int frames = 0;
     static int next = every;
     const uint32_t state = kRiderState + uint32_t(human_slot(rdram)) * kRiderStateStride;

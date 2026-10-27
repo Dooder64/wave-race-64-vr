@@ -2673,7 +2673,7 @@ new file mode 100644
 +}
 +
 +float4 screenReflection(float3 world, float3 N, float3 V, float roughness, WaterDrawParams p) {
-+    if (p.material.identity.x < 2) return 0;
++    if (p.material.identity.x < 2 || p.material.effects.y > 0.5) return 0;
 +    uint depthWidth,depthHeight,depthLevels; sceneDepth.GetDimensions(0,depthWidth,depthHeight,depthLevels);
 +    float3 ray = reflect(-V,N);
 +    float start = 5, distance = 16;
@@ -3135,7 +3135,7 @@ new file mode 100644
 +    float4 craftCurrent[4];
 +    float4 shoreCounts;     // bounded static shoreline segments in each craft's world tile
 +    float4 shoreSegments[4 * WATER_SHORE_SEGMENTS_PER_TILE]; // immutable mean-water intersections, XZ endpoints
-+    float4 effects;         // payload v2: added spray enabled, reserved YZW
++    float4 effects;         // payload v2: added spray enabled, no scenery reflections (VR), reserved ZW
 +};
 +
 +struct WaterDrawParams {

@@ -490,6 +490,33 @@ struct Walker {
         return p.m[3][3] == 0.0f && (p.m[1][1] > 1e-6f || p.m[1][1] < -1e-6f);
     }
 
+    // VR: the first perspective projection a called list loads, or any it
+    // calls in turn, other than the game's camera's (kSceneProjection,
+    // declared below the walker); 0 if none. The walker writes called lists
+    // out as they are, so a projection loaded inside one would otherwise be
+    // seen through the lens like the scene (see 6. at the top).
+    uint32_t nested_projection(uint32_t physical_addr, uint32_t scene, int depth = 0) const {
+        for (uint32_t steps = 0; steps < 4096; ++steps, physical_addr += 8) {
+            const uint32_t* c = words(physical_addr);
+            const uint8_t op = static_cast<uint8_t>(c[0] >> 24);
+            if (op == 0xB8) return 0;
+            if (op == 0x01) {                               // a matrix
+                const uint32_t params = (c[0] >> 16) & 0xFF;
+                if ((params & 0x01) && (params & 0x02) && c[1] != scene && perspective(read_matrix(physical(c[1])))) {
+                    return c[1];
+                }
+            }
+            else if (op == 0x06 && depth < 4) {             // a call, or a branch
+                if (((c[0] >> 16) & 0xFF) != 0) {
+                    physical_addr = physical(c[1]) - 8;
+                    continue;
+                }
+                if (const uint32_t found = nested_projection(physical(c[1]), scene, depth + 1)) return found;
+            }
+        }
+        return 0;
+    }
+
     Extent extent(uint32_t vtx_physical, uint32_t count, const Mat4& mv) const {
         const Mat4 mvp = mv * projection;
         Extent e;
@@ -2014,6 +2041,25 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             }
             if (w.card_model && (w1 >> 24) == kCardModelSegment) {
                 continue;
+            }
+            // VR, in a race and its finish: a call that loads a perspective
+            // projection of its own -- not the game's camera's -- is given the
+            // group a top-level one would get, before it, so that projection
+            // stays off the lens too; the next top-level load puts RT64's
+            // own back. Reported once per game state and address.
+            if (wr64::vr::enabled() && (state == 0x07 || (state >= 0x28 && state <= 0x2F)) && !w.own_group) {
+                if (const uint32_t nested = w.nested_projection(w.physical(w1), kSceneProjection)) {
+                    w.projection_group(G_EX_ASPECT_STRETCH);
+                    w.own_group = true;
+                    static std::vector<uint64_t> reported;
+                    const uint64_t key = (uint64_t(state) << 32) | nested;
+                    if (std::find(reported.begin(), reported.end(), key) == reported.end()) {
+                        reported.push_back(key);
+                        std::fprintf(stderr, "[wr64-vr] state 0x%02X calls 0x%08X, which loads a perspective projection"
+                                             " from 0x%08X (on the panel)\n", state, w1, nested);
+                        std::fflush(stderr);
+                    }
+                }
             }
             // A call under an orthographic projection is a 2D element drawn
             // from a static list: classify it by what the list draws.

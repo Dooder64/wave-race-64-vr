@@ -96,6 +96,7 @@ extern "C" void RT64_SetXrHead(int active, const float* eyes, uint64_t tag);
 extern "C" void RT64_SetStereo(int mode, float separation);
 extern "C" void RT64_SetXrPanel(float distance, float width, float separation, int followHead);
 extern "C" void RT64_SetXrFramed(float scale, float x, float y);
+extern "C" void RT64_SetXrPanelPose(const float* centre, const float* right, const float* up);
 
 namespace wr64::vr {
 
@@ -338,11 +339,35 @@ void update_controllers() {
     sync.activeActionSets = &active;
     // Anything but XR_SUCCESS -- XR_SESSION_NOT_FOCUSED, with the headset's
     // own menu up, say -- leaves the game with no input from them.
-    const bool live = xrSyncActions(g_session, &sync) == XR_SUCCESS;
+    const XrResult synced = xrSyncActions(g_session, &sync);
+    const bool live = synced == XR_SUCCESS;
     g_pads_live.store(live, std::memory_order_relaxed);
+    // Each change reported, so a log says when the controllers' input stopped
+    // reaching the game, and why.
+    static XrResult reported_sync = XR_RESULT_MAX_ENUM;
+    if (synced != reported_sync) {
+        reported_sync = synced;
+        char name[XR_MAX_RESULT_STRING_SIZE] = "unknown";
+        xrResultToString(g_instance, synced, name);
+        std::fprintf(stderr, "[wr64-vr] the Touch controllers' input: %s\n", live ? "reaching the game" : name);
+        std::fflush(stderr);
+    }
     if (!live) {
         g_stick_click_was = false;
         return;
+    }
+    {
+        XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
+        info.action = g_trigger_action[1];
+        XrActionStateFloat state{ XR_TYPE_ACTION_STATE_FLOAT };
+        const bool bound = XR_SUCCEEDED(xrGetActionStateFloat(g_session, &info, &state)) && state.isActive;
+        static int reported_bound = -1;
+        if (int(bound) != reported_bound) {
+            reported_bound = int(bound);
+            std::fprintf(stderr, "[wr64-vr] the right trigger is %s\n",
+                         bound ? "bound to the throttle" : "not bound to anything (controller off, or another profile)");
+            std::fflush(stderr);
+        }
     }
 
     auto get_float = [](XrAction action) {
@@ -448,6 +473,20 @@ bool poll_events() {
         else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
             alive = false;
         }
+        else if (event.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED && g_action_set != XR_NULL_HANDLE) {
+            // Which controllers the runtime says are in each hand.
+            for (int hand = 0; hand < 2; ++hand) {
+                XrInteractionProfileState profile{ XR_TYPE_INTERACTION_PROFILE_STATE };
+                char path[XR_MAX_PATH_LENGTH] = "none";
+                uint32_t length = 0;
+                if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(g_session, g_hand_paths[hand], &profile)) &&
+                    profile.interactionProfile != XR_NULL_PATH) {
+                    xrPathToString(g_instance, profile.interactionProfile, sizeof(path), &length, path);
+                }
+                std::fprintf(stderr, "[wr64-vr] %s hand: %s\n", hand == 0 ? "left" : "right", path);
+            }
+            std::fflush(stderr);
+        }
         event = { XR_TYPE_EVENT_DATA_BUFFER };
     }
     return alive;
@@ -514,6 +553,89 @@ void eye_transform(const XrPosef& pose, float out[16]) {
         out[12 + column] = -(px * r[0][column] + py * r[1][column] + pz * r[2][column]);
     }
     out[15] = 1.0f;
+}
+
+// ---- the panel ---------------------------------------------------------------
+//
+// The panel the flat elements of a frame with a 3D scene are drawn on. Drawn
+// into the eyes' pictures, something held still in front of the eyes judders
+// as the head turns: the runtime shifts each picture at the last moment to
+// where the head has got to since it was drawn, which is right for the world
+// but drags what should stay with the eyes, and by an amount that changes
+// with each picture's age. So by default (WR64_VR_HUD_MODE=soft) the panel
+// hangs in the seated space and follows the head there softly -- straight
+// ahead of it again within about WR64_VR_HUD_LAG seconds (0.03) -- which the
+// runtime's shift keeps steady like the rest of the world. =locked holds it
+// in front of the eyes as before; =fixed hangs it straight ahead of the
+// seated position for good (or WR64_VR_HUD_FIXED=1, as before).
+enum class HudMode { Soft, Locked, Fixed };
+
+HudMode hud_mode() {
+    static const HudMode mode = [] {
+        if (std::getenv("WR64_VR_HUD_FIXED") != nullptr) return HudMode::Fixed;
+        const char* value = std::getenv("WR64_VR_HUD_MODE");
+        if (value != nullptr && std::strcmp(value, "locked") == 0) return HudMode::Locked;
+        if (value != nullptr && std::strcmp(value, "fixed") == 0) return HudMode::Fixed;
+        return HudMode::Soft;
+    }();
+    return mode;
+}
+
+// Where the soft panel's middle is aimed from, and which way, in the seated
+// space (game units, the heading left positive, up positive).
+bool g_panel_placed = false;
+float g_panel_at[3] = { 0.0f, 0.0f, 0.0f };
+float g_panel_yaw = 0.0f, g_panel_pitch = 0.0f;
+
+// Under g_mutex, each headset frame: the soft panel moved a step towards
+// straight ahead of the head as this frame's views have it, and handed to
+// RT64 as its middle and its right and up directions.
+void place_panel(float distance, float frame_time) {
+    static const float lag = setting("WR64_VR_HUD_LAG", 0.03f);
+    const float scale = world_scale();
+    const float c = std::cos(-g_centre_yaw), s = std::sin(-g_centre_yaw);
+
+    // The head: between the eyes, and the way the first eye faces.
+    float at[3];
+    {
+        const float dx = 0.5f * (g_views[0].pose.position.x + g_views[1].pose.position.x) - g_centre_position.x;
+        const float dy = 0.5f * (g_views[0].pose.position.y + g_views[1].pose.position.y) - g_centre_position.y;
+        const float dz = 0.5f * (g_views[0].pose.position.z + g_views[1].pose.position.z) - g_centre_position.z;
+        at[0] = (c * dx + s * dz) * scale;
+        at[1] = dy * scale;
+        at[2] = (-s * dx + c * dz) * scale;
+    }
+    const XrQuaternionf unturn{ 0.0f, std::sin(-g_centre_yaw * 0.5f), 0.0f, std::cos(-g_centre_yaw * 0.5f) };
+    const XrQuaternionf q = multiply(unturn, g_views[0].pose.orientation);
+    // -z turned by q: the way the head faces.
+    const float fx = -2.0f * (q.x * q.z + q.w * q.y);
+    const float fy = -2.0f * (q.y * q.z - q.w * q.x);
+    const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+    const float yaw = std::atan2(-fx, -fz);
+    const float pitch = std::asin(std::clamp(fy, -1.0f, 1.0f));
+
+    if (!g_panel_placed) {
+        g_panel_placed = true;
+        g_panel_yaw = yaw;
+        g_panel_pitch = pitch;
+        std::memcpy(g_panel_at, at, sizeof(at));
+    }
+    const float step = lag > 0.0f ? 1.0f - std::exp(-frame_time / lag) : 1.0f;
+    float turn = yaw - g_panel_yaw;
+    turn -= 6.2831853f * std::round(turn / 6.2831853f);
+    g_panel_yaw += turn * step;
+    g_panel_pitch += (pitch - g_panel_pitch) * step;
+    for (int i = 0; i < 3; ++i) g_panel_at[i] += (at[i] - g_panel_at[i]) * step;
+
+    const float cy = std::cos(g_panel_yaw), sy = std::sin(g_panel_yaw);
+    const float cp = std::cos(g_panel_pitch), sp = std::sin(g_panel_pitch);
+    const float ahead[3] = { -sy * cp, sp, -cy * cp };
+    const float right[3] = { cy, 0.0f, -sy };
+    const float up[3] = { right[1] * ahead[2] - right[2] * ahead[1], right[2] * ahead[0] - right[0] * ahead[2],
+                          right[0] * ahead[1] - right[1] * ahead[0] };
+    const float centre[3] = { g_panel_at[0] + ahead[0] * distance, g_panel_at[1] + ahead[1] * distance,
+                              g_panel_at[2] + ahead[2] * distance };
+    RT64_SetXrPanelPose(centre, right, up);
 }
 
 // RT64's present thread, before each displayed frame. The lock taken here is
@@ -595,10 +717,13 @@ int begin_frame(void*, RT64::RT64_XrFrame* frame) {
     const float sx = g_views[1].pose.position.x - g_views[0].pose.position.x;
     const float sy = g_views[1].pose.position.y - g_views[0].pose.position.y;
     const float sz = g_views[1].pose.position.z - g_views[0].pose.position.z;
-    static const bool hud_follows = std::getenv("WR64_VR_HUD_FIXED") == nullptr;
     const float scale = world_scale();
     RT64_SetXrPanel(hud_distance() * scale, hud_width() * scale, std::sqrt(sx * sx + sy * sy + sz * sz) * scale,
-                    hud_follows ? 1 : 0);
+                    hud_mode() == HudMode::Locked ? 1 : 0);
+    if (hud_mode() == HudMode::Soft) {
+        place_panel(hud_distance() * scale,
+                    float(std::max<XrDuration>(g_frame_state.predictedDisplayPeriod, 1)) / 1e9f);
+    }
     static const float framed_scale = setting("WR64_VR_FRAMED_SCALE", 1.0f);
     static const float framed_x = signed_setting("WR64_VR_FRAMED_X", 0.0f);
     static const float framed_y = signed_setting("WR64_VR_FRAMED_Y", 0.0f);

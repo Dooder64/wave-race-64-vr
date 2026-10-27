@@ -264,6 +264,12 @@ void init(bool auto_start) {
         if (context != recomp::config::OptionChangeContext::Temporary)
             wr64::haptics::set_triggers(std::get<bool>(value));
     });
+    auto &vr = recompui::config::create_config_tab("VR", "vr", true);
+    vr.add_percent_number_option("vr_first_person_intensity", "First-person intensity", "How much the rider's leaning, pitching and rolling turns your view in first person. 100% follows the rider's body exactly; lower values keep the horizon steadier; 0% keeps it level and only turns with the rider.", 100.0);
+    vr.add_option_change_callback("vr_first_person_intensity", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::vr::set_first_person_intensity(float(std::get<double>(value)) / 100.0f);
+    });
     auto &graphics = recompui::config::create_graphics_tab();
     graphics.add_enum_option("texture_quality", "Textures", "Use the bundled HD texture pack or your installed replacement pack. Textures without a replacement keep their original appearance.",
         {{0, "original", "Original"}, {1, "hd", "HD"}}, 1u);

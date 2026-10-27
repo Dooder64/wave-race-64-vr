@@ -1,5 +1,6 @@
 #include "wr64/water.h"
 #include "wr64/water_shore.h"
+#include "wr64/vr.h"
 #include <atomic>
 #include <cstdlib>
 #include <cstdio>
@@ -327,6 +328,11 @@ void begin_frame(uint32_t display_list) {
     frame.optics.w = frameStyle == Style::Classic ? 1.0f : 0.0f;
     frameRipples = selectedRipples.load();
     frame.effects.x = selectedSpray.load() ? 1.0f : 0.0f;
+    // VR: High's reflections of the scenery, looked up in the rendered
+    // picture, come out misplaced in one eye (a second rider in a finish, at
+    // the edge of one eye's view), so they are left out there; reflections of
+    // the sky and everything else High adds stay.
+    frame.effects.y = wr64::vr::enabled() ? 1.0f : 0.0f;
 }
 
 interop::WaterMaterial material(uint32_t view) {

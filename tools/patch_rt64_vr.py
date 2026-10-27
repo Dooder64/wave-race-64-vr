@@ -273,6 +273,23 @@ LENS_REPLACEMENT = """    // wr64: a headset's lens for each eye, as the tangent
         wr64PanelFollowsHead.store(followHead != 0, std::memory_order_relaxed);
     }
 
+    // wr64: where the panel hangs in the seated space when it does not follow
+    // the head -- its middle, and its right and up directions -- set by the
+    // port each headset frame, which lets it follow the head softly there;
+    // straight ahead of the seated position until it is set.
+    static std::atomic<float> wr64PanelPose[9];
+    static std::atomic<bool> wr64PanelPosed{ false };
+
+    extern "C" void RT64_SetXrPanelPose(const float *centre, const float *right, const float *up) {
+        for (int i = 0; i < 3; i++) {
+            wr64PanelPose[i].store(centre[i], std::memory_order_relaxed);
+            wr64PanelPose[3 + i].store(right[i], std::memory_order_relaxed);
+            wr64PanelPose[6 + i].store(up[i], std::memory_order_relaxed);
+        }
+
+        wr64PanelPosed.store(true, std::memory_order_relaxed);
+    }
+
     // wr64: the head's transform for an eye, from the seated space into the
     // eye's, as the frame being drawn took it (below, with the head).
     bool wr64HeadForEye(int eye, float out[16]);
@@ -351,13 +368,22 @@ LENS_REPLACEMENT = """    // wr64: a headset's lens for each eye, as the tangent
         if (!wr64PanelFollowsHead.load(std::memory_order_relaxed) && wr64HeadForEye(wr64EyeIndex, head)) {
             // Row vectors: a point p of the seated space is p * head in the
             // eye's. The panel's middle, and its half-width and half-height
-            // as directions.
-            const float c[3] = {
-                -distance * head[8] + head[12],
-                -distance * head[9] + head[13],
-                -distance * head[10] + head[14] };
-            const float u[3] = { 0.5f * width * head[0], 0.5f * width * head[1], 0.5f * width * head[2] };
-            const float v[3] = { 0.5f * height * head[4], 0.5f * height * head[5], 0.5f * height * head[6] };
+            // as directions -- where the port hangs it, or straight ahead.
+            float pc[3] = { 0.0f, 0.0f, -distance }, pr[3] = { 1.0f, 0.0f, 0.0f }, pu[3] = { 0.0f, 1.0f, 0.0f };
+            if (wr64PanelPosed.load(std::memory_order_relaxed)) {
+                for (int i = 0; i < 3; i++) {
+                    pc[i] = wr64PanelPose[i].load(std::memory_order_relaxed);
+                    pr[i] = wr64PanelPose[3 + i].load(std::memory_order_relaxed);
+                    pu[i] = wr64PanelPose[6 + i].load(std::memory_order_relaxed);
+                }
+            }
+
+            float c[3], u[3], v[3];
+            for (int j = 0; j < 3; j++) {
+                c[j] = pc[0] * head[j] + pc[1] * head[4 + j] + pc[2] * head[8 + j] + head[12 + j];
+                u[j] = 0.5f * width * (pr[0] * head[j] + pr[1] * head[4 + j] + pr[2] * head[8 + j]);
+                v[j] = 0.5f * height * (pu[0] * head[j] + pu[1] * head[4 + j] + pu[2] * head[8 + j]);
+            }
             const float depth = -c[2];
             if (depth < 0.1f * distance) {
                 out[0] = 0.0f; out[1] = 4.0f; out[2] = 0.0f; out[3] = 4.0f;

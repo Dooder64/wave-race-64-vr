@@ -230,6 +230,10 @@ void trace_frame(const uint8_t* rdram, uint32_t parts, uint32_t slot) {
 // and with WR64_VR_FIRST_PERSON=1 without a headset too.
 std::atomic<int> g_on{ -1 };
 
+// How much of the chest's lean, pitch and roll the view takes, 0 to 1, from
+// the settings (WR64_FP_INTENSITY in percent before they are read).
+std::atomic<float> g_intensity{ std::clamp(float(std::atof(std::getenv("WR64_FP_INTENSITY") ? std::getenv("WR64_FP_INTENSITY") : "100")) / 100.0f, 0.0f, 1.0f) };
+
 }  // namespace
 
 namespace vr {
@@ -250,6 +254,10 @@ void toggle_first_person() {
     g_on.store(on ? 1 : 0, std::memory_order_relaxed);
     std::fprintf(stderr, "[wr64-vr] first person %s\n", on ? "on" : "off");
     std::fflush(stderr);
+}
+
+void set_first_person_intensity(float intensity) {
+    g_intensity.store(std::clamp(intensity, 0.0f, 1.0f), std::memory_order_relaxed);
 }
 
 }  // namespace vr
@@ -528,7 +536,13 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
     const int32_t animation = *reinterpret_cast<const int32_t*>(
         rdram + kRiderState + slot * kRiderStateStride + kAnimation);
     const Matrix hull = read_matrix(rdram, parts + kHull * kPartStride);
-    const Camera camera = swim_step(segment3, animation, Camera{ chest_eye, right, up, ahead }, hull);
+    // The settings' first-person intensity: how much of the chest's lean,
+    // pitch and roll the view takes, the rest of it level, facing the same
+    // way.
+    const Camera body{ chest_eye, right, up, ahead };
+    const float intensity = g_intensity.load(std::memory_order_relaxed);
+    const Camera ridden = intensity >= 1.0f ? body : blend(level_camera(chest_eye, ahead), body, intensity);
+    const Camera camera = swim_step(segment3, animation, ridden, hull);
     const Vec eye = camera.eye;
     if (eye.y < water_height_at(segment3, eye.x, eye.z)) {
         *haze = 0x80000000u | build_haze(rdram, b, eye);
