@@ -2168,10 +2168,12 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             }
 
             // First person: the game's camera, multiplied onto its projection
-            // in a race, is replaced by a view from the player's rider.
+            // while a race is run, is replaced by a view from the player's
+            // rider. Once it is over -- finished or retired, state 0x29 on --
+            // the game's own camera shows its ending, which looks right only
+            // from outside.
             uint32_t matrix = w1;
-            if ((params & kMtxProjection) && !(params & kMtxLoad) && w1 == kSceneView &&
-                (state == 0x07 || (state >= 0x28 && state <= 0x2F))) {
+            if ((params & kMtxProjection) && !(params & kMtxLoad) && w1 == kSceneView && racing(state)) {
                 if (!w.first_person_tried) {
                     w.first_person_tried = true;
                     w.first_person_view = wr64::first_person_view(rdram, w.segments[3]);
