@@ -149,12 +149,22 @@ void capture_shoreline(const uint8_t *rdram, interop::WaterMaterial &m, bool res
                     if (id<=1024 && valid(planes+(id-1)*64,64)) shapes.insert(id-1);
                 }
             }
+            // WR64_SHORE_DUMP=<file> writes every collision shape of the course
+            // (its id, then its 16 floats), for mapping a course.
+            static const char *dumpPath=std::getenv("WR64_SHORE_DUMP");
+            std::FILE *dump=dumpPath && !shapes.empty() ? std::fopen(dumpPath,"w") : nullptr;
             for (uint16_t id:shapes) {
                 std::array<float,16> plane;
                 for (uint32_t i=0;i<16;i++) plane[i]=real(rdram,planes+id*64+i*4);
+                if (dump) {
+                    std::fprintf(dump,"%u",id);
+                    for (float v:plane) std::fprintf(dump," %.3f",v);
+                    std::fprintf(dump,"\n");
+                }
                 std::array<float,4> segment;
                 if (shoreline_segment(plane,m.surface.x,segment)) segments.push_back(segment);
             }
+            if (dump) std::fclose(dump);
         }
         std::fprintf(stderr,"[water] course %u shoreline: %zu static segments at height %.1f\n",course,segments.size(),m.surface.x);
     }

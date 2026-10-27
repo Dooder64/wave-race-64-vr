@@ -153,9 +153,12 @@ bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyList
 bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists);
 // src/first_person.cpp: a view from the player's rider to multiply onto the
 // projection in place of the game's, its head shrunk away; or 0.
-uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity);
+uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity, uint32_t* underside);
 // patches/swim_back.cpp: once a frame.
 void swim_frame(uint8_t* rdram);
+// src/seafloor.cpp: the list drawing the course's seafloor, and an identity
+// matrix to draw it under; or 0.
+uint32_t seafloor_list(uint8_t* rdram, uint32_t course, uint32_t segment13, uint32_t* identity);
 }
 
 namespace {
@@ -216,6 +219,9 @@ constexpr uint32_t kSceneView = 0x0300E088;
 constexpr uint32_t kMtxProjection = 0x01;
 constexpr uint32_t kMtxLoad = 0x02;
 constexpr uint32_t kMtxPush = 0x04;
+
+// The course being raced (gCourseID).
+constexpr uint32_t kCourseId = 0x800D8170;
 constexpr uint8_t kMoveWordSegment = 0x06;
 constexpr uint8_t kMoveMemViewport = 0x80;
 
@@ -438,7 +444,7 @@ struct Walker {
     uint32_t first_person_view = 0;
     // The haze to draw round a first-person eye below the waves, its matrix,
     // and whether it has been drawn this frame.
-    uint32_t haze_list = 0, haze_identity = 0;
+    uint32_t haze_list = 0, haze_identity = 0, underside_list = 0;
     bool haze_drawn = false;
     Class cls = Class::Auto;
     uint32_t centred_sections = 0;
@@ -715,6 +721,27 @@ struct Walker {
             sky_tried = true;
             sky_replaced = results ? ring_full_grid() && wr64::sky_results_dome(rdram, segments[3], segments[6], &sky_lists)
                                    : wr64::sky_all_round(rdram, segments[3], segments[6], &sky_lists);
+        }
+        // A course with a seafloor of its own (src/seafloor.cpp) draws it in
+        // place of the game's flat floor at the water's level, which would
+        // otherwise hide it, in a state of its own that RT64 puts back after.
+        if (list == kSkyFloorList && racing(state)) {
+            uint32_t identity = 0;
+            const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));
+            const uint32_t floor = wr64::seafloor_list(rdram, course, segments[13], &identity);
+            if (floor != 0) {
+                const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
+                emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
+                emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
+                emit(ex | G_EX_PUSHCOMBINE_V1, 0);
+                emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, identity);
+                emit(uint32_t(kOpDisplayList) << 24, floor);
+                emit(0xBD000000u, 0);                           // pop the modelview
+                emit(ex | G_EX_POPCOMBINE_V1, 0);
+                emit(ex | G_EX_POPOTHERMODE_V1, 0);
+                emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
+                return true;
+            }
         }
         if (!sky_replaced) {
             // The game's own gradient, a tent placed over the water ahead,
@@ -1529,6 +1556,20 @@ struct Tracer {
                                  signed_half(addr + 4),
                                  max_x < min_x ? 0.0f : min_x, max_x < min_x ? 0.0f : max_x,
                                  min_y > max_y ? 0.0f : min_y, min_y > max_y ? 0.0f : max_y);
+                    // WR64_3D_TRACE_VERTS=1 also lists each vertex through the
+                    // model matrix (world space), for mapping a course.
+                    static const bool verts = std::getenv("WR64_3D_TRACE_VERTS") != nullptr;
+                    if (verts) {
+                        const Mat4& m = modelview[modelview_depth];
+                        for (uint32_t i = 0; i < count && i < 64; ++i) {
+                            const uint32_t v = addr + i * 16;
+                            const float x = signed_half(v + 0), y = signed_half(v + 2), z = signed_half(v + 4);
+                            std::fprintf(f, "%*s  v %.0f %.0f %.0f\n", depth * 2, "",
+                                         x * m.m[0][0] + y * m.m[1][0] + z * m.m[2][0] + m.m[3][0],
+                                         x * m.m[0][1] + y * m.m[1][1] + z * m.m[2][1] + m.m[3][1],
+                                         x * m.m[0][2] + y * m.m[1][2] + z * m.m[2][2] + m.m[3][2]);
+                        }
+                    }
                     continue;
                 }
                 default:
@@ -1578,6 +1619,10 @@ void trace_3d(uint8_t* rdram, uint32_t list_vaddr, uint32_t state) {
 
     static const char* frames_env = std::getenv("WR64_3D_TRACE_FRAMES");
     static const int wanted = frames_env != nullptr ? std::atoi(frames_env) : 2;
+    // WR64_3D_TRACE_SKIP passes over that many matching frames first.
+    static const char* skip_env = std::getenv("WR64_3D_TRACE_SKIP");
+    static int skip = skip_env != nullptr ? std::atoi(skip_env) : 0;
+    if (skip > 0) { --skip; return; }
     static int written = 0;
     static std::FILE* f = nullptr;
     if (written >= wanted) return;
@@ -1942,6 +1987,34 @@ void log_camera(uint32_t state, const Mat4& v, const Mat4& p) {
 
 namespace wr64::dlrewrite {
 
+// With the first-person eye below the waves, the water's fog round it goes
+// in once the scene is drawn -- before the frame's first flat projection or
+// its first 2D rectangle, whichever comes first (Warm Up's HUD has no flat
+// projection) -- in a state of its own that RT64 puts back after:
+// untextured, unlit, unfogged, not culled, shaded by its vertices' colours
+// and their opacity, tested against depth but not writing it.
+void draw_water_fog(Walker& w, uint32_t state) {
+    if (w.haze_list == 0 || w.haze_drawn || !racing(state)) return;
+    w.haze_drawn = true;
+    const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
+    w.emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
+    w.emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
+    w.emit(ex | G_EX_PUSHCOMBINE_V1, 0);
+    w.emit(0xB6000000u, 0x000F3000u);                   // clear cull, fog, lighting, texgen
+    w.emit(0xB7000000u, 0x00000205u);                   // set z-buffer, shade, smooth shading
+    w.emit(0xBA001402u, 0x00000000u);                   // one cycle
+    w.emit(0xB9000002u, 0x00000000u);                   // no alpha compare
+    w.emit(0xB9000201u, 0x00000000u);                   // depth from the pixel
+    w.emit(0xB900031Du, 0x00504A50u);                   // translucent surface, depth tested, not written
+    w.emit(0xFCFFFFFFu, 0xFFFE793Cu);                   // shade colour and opacity, both cycles
+    w.emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, w.haze_identity);
+    w.emit(uint32_t(kOpDisplayList) << 24, w.haze_list);
+    w.emit(0xBD000000u, 0);                             // pop the modelview
+    w.emit(ex | G_EX_POPCOMBINE_V1, 0);
+    w.emit(ex | G_EX_POPOTHERMODE_V1, 0);
+    w.emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
+}
+
 uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
     static const bool disabled = std::getenv("WR64_NO_REWRITE") != nullptr;
     static const bool hud_off = std::getenv("WR64_HUD_OFF") != nullptr;
@@ -2017,6 +2090,7 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
         if (op == kOpDisplayList && w1 == kBackdropSetupList && wr64::vr::enabled() && wr64::water::full_grid_screen(state)) {
             w.backdrop_next = true;
         }
+        if (op == kOpTexRect || op == kOpFillRect) draw_water_fog(w, state);
 
         // VR: the sun's lens flare, glints and glare are left out (see 6. at
         // the top).
@@ -2114,7 +2188,7 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             // the group goes around the call, since the transform inside it is
             // created at its first vertex rather than at its matrix load.
             const bool water = w.draws_water(w1);
-            const bool modern_water = water && w.known_water_material(w1);
+            const bool modern_water = water && w.known_water_material(w1) && w.underside_list == 0;
             if (water && w.water_interp) w.vertex_interp_group(Walker::kWaterId);
             if (modern_water) w.water_material(true);
             // VR: the wave mesh merged from builds all round the camera
@@ -2123,7 +2197,29 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             // 3, which is moved to it for the call and then put back. The
             // full grid the results screen draws is ringed the same way.
             uint32_t merged_base = 0, merged_list = 0;
-            if (water && w1 == 0x010082F0 && w.ring_full_grid()) {
+            // With the first-person eye below the waves, their underside
+            // (src/first_person.cpp) in place of them, opaque and shaded by
+            // its vertices, in a state of its own that RT64 puts back after.
+            if (water && w.underside_list != 0) {
+                const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
+                w.emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
+                w.emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
+                w.emit(ex | G_EX_PUSHCOMBINE_V1, 0);
+                w.emit(0xB6000000u, 0x000F3000u);                   // clear cull, fog, lighting, texgen
+                w.emit(0xB7000000u, 0x00000205u);                   // set z-buffer, shade, smooth shading
+                w.emit(0xBA001402u, 0x00000000u);                   // one cycle
+                w.emit(0xB9000002u, 0x00000000u);                   // no alpha compare
+                w.emit(0xB9000201u, 0x00000000u);                   // depth from the pixel
+                w.emit(0xB900031Du, 0x00552078u);                   // opaque surface, depth tested and written
+                w.emit(0xFCFFFFFFu, 0xFFFE793Cu);                   // shade colour
+                w.emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, w.haze_identity);
+                w.emit(uint32_t(kOpDisplayList) << 24, w.underside_list);
+                w.emit(0xBD000000u, 0);                             // pop the modelview
+                w.emit(ex | G_EX_POPCOMBINE_V1, 0);
+                w.emit(ex | G_EX_POPOTHERMODE_V1, 0);
+                w.emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
+            }
+            else if (water && w1 == 0x010082F0 && w.ring_full_grid()) {
                 w.emit((uint32_t(kOpMoveWord) << 24) | ((3u * 4u) << 8) | kMoveWordSegment, w.full_grid_base);
                 w.emit(uint32_t(kOpDisplayList) << 24, w.full_grid_list);
                 w.emit((uint32_t(kOpMoveWord) << 24) | ((3u * 4u) << 8) | kMoveWordSegment, w.segments[3]);
@@ -2279,36 +2375,14 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             if ((params & kMtxProjection) && !(params & kMtxLoad) && w1 == kSceneView && racing(state)) {
                 if (!w.first_person_tried) {
                     w.first_person_tried = true;
-                    w.first_person_view = wr64::first_person_view(rdram, w.segments[3], &w.haze_list, &w.haze_identity);
+                    w.first_person_view = wr64::first_person_view(rdram, w.segments[3], &w.haze_list, &w.haze_identity, &w.underside_list);
                 }
                 if (w.first_person_view != 0) matrix = w.first_person_view;
             }
 
-            // With the first-person eye below the waves, the haze round it
-            // goes in once the scene is drawn, before the HUD's first flat
-            // projection, in a state of its own that RT64 puts back after:
-            // untextured, unlit, unfogged, not culled, shaded by its
-            // vertices' colours, opaque, neither tested against depth nor
-            // writing it.
-            if (projection_load && w.haze_list != 0 && !w.haze_drawn && racing(state) &&
-                !Walker::perspective(w.read_matrix(w.physical(w1)))) {
-                w.haze_drawn = true;
-                const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
-                w.emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
-                w.emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
-                w.emit(ex | G_EX_PUSHCOMBINE_V1, 0);
-                w.emit(0xB6000000u, 0x000F3001u);                   // clear z-buffer, cull, fog, lighting, texgen
-                w.emit(0xB7000000u, 0x00000204u);                   // set shade, smooth shading
-                w.emit(0xBA001402u, 0x00000000u);                   // one cycle
-                w.emit(0xB900031Du, 0x0F0A4000u);                   // opaque surface, no depth
-                w.emit(0xFCFFFFFFu, 0xFFFE793Cu);                   // shade colour, both cycles
-                w.emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, w.haze_identity);
-                w.emit(uint32_t(kOpDisplayList) << 24, w.haze_list);
-                w.emit(0xBD000000u, 0);                             // pop the modelview
-                w.emit(ex | G_EX_POPCOMBINE_V1, 0);
-                w.emit(ex | G_EX_POPOTHERMODE_V1, 0);
-                w.emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
-            }
+            // A projection that is not the scene's ends it: the water's fog
+            // goes in first (see draw_water_fog).
+            if (projection_load && !Walker::perspective(w.read_matrix(w.physical(w1)))) draw_water_fog(w, state);
 
             w.on_matrix(w0, matrix);
 

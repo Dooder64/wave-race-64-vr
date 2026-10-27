@@ -43,9 +43,9 @@
 // turns to look out over the bow; seated, the chest's view takes over. A swim
 // of more than 20 seconds gives up and lets the climb start where the view is.
 //
-// Wherever the eye is below the waves -- going in, or swimming low -- an
-// opaque haze close to the sky's colour, lighter above, is drawn round it
-// after the scene and before the HUD.
+// Wherever the eye is below the waves -- going in, or swimming low -- the
+// water's fog is drawn round it after the scene and before the HUD: thicker
+// with distance, lighter towards the surface, darker the deeper one looks.
 
 #include "wr64/vr.h"
 
@@ -91,12 +91,16 @@ constexpr uint32_t kHead = 3, kChest = 4, kHull = 0;
 constexpr uint32_t kView = 0x7D0000;
 constexpr uint32_t kViewStride = 0x40;
 
-// The haze for each frame buffer, after the views: an identity matrix, then
-// the sphere's vertices, then the list that draws them.
-constexpr uint32_t kHaze = 0x7D1000;
-constexpr uint32_t kHazeStride = 0x2000;
+// The water's fog for each frame buffer, above the game's 4 MB beside the
+// seafloor (src/seafloor.cpp): an identity matrix, then the spheres'
+// vertices, then the list that draws them.
+constexpr uint32_t kHaze = 0x5C0000;
+constexpr uint32_t kHazeStride = 0x40000;
 constexpr uint32_t kHazeVertices = 0x40;
-constexpr uint32_t kHazeList = 0x1800;
+constexpr uint32_t kHazeList = 0x18000;
+// And after them the waves' underside: its vertices, then its list.
+constexpr uint32_t kUnderVertices = 0x2D000;
+constexpr uint32_t kUnderList = 0x2E000;
 
 // The rider's animations: riding, thrown off, and climbing back on.
 constexpr int32_t kRiding = 22, kThrown = 23, kClimbing = 7;
@@ -264,56 +268,122 @@ void set_first_person_intensity(float intensity) {
 
 namespace {
 
-// The haze round `eye` for frame buffer `b`: a sphere of seven rings,
-// opaque, its colour from WR64_HAZE_COLOR's red, green and blue (a pale sky
-// blue) at the horizon, lighter above and darker below, drawn untextured.
-// Returns its list's address.
-uint32_t build_haze(uint8_t* rdram, int b, Vec eye) {
-    static const Vec colour = [] {
-        Vec c{ 150.0f, 190.0f, 225.0f };
-        if (const char* value = std::getenv("WR64_HAZE_COLOR")) {
-            std::sscanf(value, "%f %f %f", &c.x, &c.y, &c.z);
-        }
-        return c;
-    }();
+// The water round `eye` for frame buffer `b`, `surface` the water's height
+// above it: nested spheres about the eye, drawn farthest first, tested
+// against depth but not writing it, each translucent, so that whatever lies
+// beyond a sphere is veiled by it and everything nearer is not. Together they
+// thicken with distance as fog does -- each one's opacity is the water's
+// between it and the next one in, for a visibility of WR64_UNDERWATER_VIS
+// units (450, about 13 m) -- and the outermost is opaque. Their colour is the
+// light coming through the water from that direction: brightest looking up
+// at the surface, a blue-green out to the sides, near black straight down,
+// and all of it dimmer the deeper the eye. Returns its list's address.
+uint32_t build_haze(uint8_t* rdram, int b, Vec eye, float surface) {
+    static const float visibility = std::max(50.0f, setting("WR64_UNDERWATER_VIS", 450.0f));
     const uint32_t base = kHaze + uint32_t(b) * kHazeStride;
 
     Matrix identity{};
     for (int i = 0; i < 4; ++i) identity.m[i][i] = 1.0f;
     write_matrix(rdram, base, identity);
 
-    constexpr int kRings = 7, kAround = 12;
-    constexpr float kRadius = 25.0f;
+    constexpr int kShells = 40, kRings = 9, kAround = 16;
+    constexpr float kInner = 25.0f, kOuter = 2400.0f;
+    const Vec up_colour{ 70.0f, 150.0f, 170.0f }, side_colour{ 22.0f, 80.0f, 100.0f }, down_colour{ 2.0f, 9.0f, 16.0f };
+    const float dim = std::exp(-std::max(0.0f, surface - eye.y) / 2000.0f);
     auto put_half = [&](uint32_t address, float value) {
         *reinterpret_cast<int16_t*>(rdram + (address ^ 2)) = int16_t(std::lround(std::clamp(value, -32768.0f, 32767.0f)));
     };
-    uint32_t vertex = 0;
-    for (int r = 0; r < kRings; ++r) {
-        const float elevation = -1.5707963f + 3.14159265f * float(r) / float(kRings - 1);
-        const float light = std::sin(elevation);          // -1 below to 1 above
-        const float scale = light >= 0.0f ? 1.0f + 0.25f * light : 1.0f + 0.45f * light;
-        const uint32_t rgba = (uint32_t(std::clamp(colour.x * scale, 0.0f, 255.0f)) << 24) |
-                              (uint32_t(std::clamp(colour.y * scale, 0.0f, 255.0f)) << 16) |
-                              (uint32_t(std::clamp(colour.z * scale, 0.0f, 255.0f)) << 8) | 0xFFu;
-        for (int i = 0; i < kAround; ++i) {
-            const float around = 6.2831853f * float(i) / float(kAround);
-            const uint32_t v = base + kHazeVertices + vertex++ * 16;
-            put_half(v + 0, eye.x + kRadius * std::cos(elevation) * std::cos(around));
-            put_half(v + 2, eye.y + kRadius * std::sin(elevation));
-            put_half(v + 4, eye.z + kRadius * std::cos(elevation) * std::sin(around));
-            put_half(v + 6, 0.0f); put_half(v + 8, 0.0f); put_half(v + 10, 0.0f);
-            *reinterpret_cast<uint32_t*>(rdram + v + 12) = rgba;
-        }
-    }
-
-    // Band by band: its two rings loaded together (24 vertices), then its
-    // triangles, the cache entries named five times their number.
     uint32_t* out = reinterpret_cast<uint32_t*>(rdram + base + kHazeList);
     uint32_t commands = 0;
     auto command = [&](uint32_t w0, uint32_t w1) { out[commands * 2] = w0; out[commands * 2 + 1] = w1; ++commands; };
-    for (int r = 0; r + 1 < kRings; ++r) {
+    uint32_t vertex = 0;
+    for (int shell = kShells - 1; shell >= 0; --shell) {
+        auto radius = [&](int k) { return kInner + (kOuter - kInner) * std::pow(float(k) / float(kShells - 1), 1.6f); };
+        const float r = radius(shell);
+        const float inside = shell > 0 ? radius(shell - 1) : 0.0f;
+        const float opacity = shell == kShells - 1 ? 1.0f : 1.0f - std::exp(-(r - inside) / visibility);
+        const uint32_t alpha = uint32_t(std::lround(std::clamp(opacity, 0.0f, 1.0f) * 255.0f));
+        const uint32_t first = vertex;
+        for (int ring = 0; ring < kRings; ++ring) {
+            const float elevation = -1.5707963f + 3.14159265f * float(ring) / float(kRings - 1);
+            const float t = std::sin(elevation);
+            const Vec c = (t >= 0.0f ? mix(side_colour, up_colour, t) : mix(side_colour, down_colour, std::sqrt(-t))) * dim;
+            const uint32_t rgba = (uint32_t(std::clamp(c.x, 0.0f, 255.0f)) << 24) |
+                                  (uint32_t(std::clamp(c.y, 0.0f, 255.0f)) << 16) |
+                                  (uint32_t(std::clamp(c.z, 0.0f, 255.0f)) << 8) | alpha;
+            for (int i = 0; i < kAround; ++i) {
+                // Each sphere turned a little from the last, so that their flat
+                // facets do not line up into wedges on what lies behind.
+                const float around = 6.2831853f * (float(i) + 0.618f * float(shell)) / float(kAround);
+                const uint32_t v = base + kHazeVertices + vertex++ * 16;
+                put_half(v + 0, eye.x + r * std::cos(elevation) * std::cos(around));
+                put_half(v + 2, eye.y + r * std::sin(elevation));
+                put_half(v + 4, eye.z + r * std::cos(elevation) * std::sin(around));
+                put_half(v + 6, 0.0f); put_half(v + 8, 0.0f); put_half(v + 10, 0.0f);
+                *reinterpret_cast<uint32_t*>(rdram + v + 12) = rgba;
+            }
+        }
+        // Band by band: its two rings loaded together (32 vertices), then
+        // its triangles, the cache entries named five times their number.
+        for (int ring = 0; ring + 1 < kRings; ++ring) {
+            const uint32_t n = 2 * kAround;
+            command((0x04u << 24) | (n << 9) | (n * 16 - 1), base + kHazeVertices + (first + uint32_t(ring * kAround)) * 16);
+            for (uint32_t i = 0; i < uint32_t(kAround); ++i) {
+                const uint32_t j = (i + 1) % kAround;
+                const uint32_t a = i, bb = j, c = kAround + i, d = kAround + j;
+                command(0xBFu << 24, ((a * 5) << 16) | ((bb * 5) << 8) | (d * 5));
+                command(0xBFu << 24, ((a * 5) << 16) | ((d * 5) << 8) | (c * 5));
+            }
+        }
+    }
+    command(0xB8u << 24, 0);
+    return base + kHazeList;
+}
+
+// The underside of the waves round `eye` for frame buffer `b`, drawn in
+// place of the water while the eye is below it: the game's water is lit and
+// reflected as seen from above. A disc of the waves' own heights about the
+// eye, opaque, its colour by the angle it is seen at: straight up, inside
+// the cone light leaves the water by (about 49 degrees from overhead), the
+// bright sky through the surface; outside it, the surface mirrors the water
+// below, a dark blue-green; dimmer the deeper the eye. Returns its list's
+// address.
+uint32_t build_underside(uint8_t* rdram, int b, Vec eye, uint32_t segment3) {
+    const uint32_t base = kHaze + uint32_t(b) * kHazeStride;
+    constexpr int kAround = 16;
+    constexpr float kRadii[] = { 0, 15, 35, 60, 95, 140, 200, 280, 400, 600, 900, 1400, 2400 };
+    constexpr int kRings = int(sizeof(kRadii) / sizeof(kRadii[0]));
+    const Vec sky{ 150.0f, 205.0f, 220.0f }, mirror{ 16.0f, 58.0f, 76.0f };
+    auto put_half = [&](uint32_t address, float value) {
+        *reinterpret_cast<int16_t*>(rdram + (address ^ 2)) = int16_t(std::lround(std::clamp(value, -32768.0f, 32767.0f)));
+    };
+    const float surface = water_height_at(segment3, eye.x, eye.z);
+    const float dim = std::exp(-std::max(0.0f, surface - eye.y) / 2000.0f);
+    uint32_t vertex = 0;
+    for (int ring = 0; ring < kRings; ++ring) {
+        for (int i = 0; i < kAround; ++i) {
+            const float around = 6.2831853f * float(i) / float(kAround);
+            const float x = eye.x + kRadii[ring] * std::cos(around);
+            const float z = eye.z + kRadii[ring] * std::sin(around);
+            const float y = water_height_at(segment3, x, z);
+            const Vec to{ x - eye.x, y - eye.y, z - eye.z };
+            const float up = to.y / std::max(length(to), 1e-3f);
+            const float window = clamp01((up - 0.58f) / (0.72f - 0.58f));
+            const Vec c = mix(mirror, sky, window * window * (3.0f - 2.0f * window)) * dim;
+            const uint32_t v = base + kUnderVertices + vertex++ * 16;
+            put_half(v + 0, x); put_half(v + 2, y); put_half(v + 4, z);
+            put_half(v + 6, 0.0f); put_half(v + 8, 0.0f); put_half(v + 10, 0.0f);
+            *reinterpret_cast<uint32_t*>(rdram + v + 12) =
+                (uint32_t(std::clamp(c.x, 0.0f, 255.0f)) << 24) | (uint32_t(std::clamp(c.y, 0.0f, 255.0f)) << 16) |
+                (uint32_t(std::clamp(c.z, 0.0f, 255.0f)) << 8) | 0xFFu;
+        }
+    }
+    uint32_t* out = reinterpret_cast<uint32_t*>(rdram + base + kUnderList);
+    uint32_t commands = 0;
+    auto command = [&](uint32_t w0, uint32_t w1) { out[commands * 2] = w0; out[commands * 2 + 1] = w1; ++commands; };
+    for (int ring = 0; ring + 1 < kRings; ++ring) {
         const uint32_t n = 2 * kAround;
-        command((0x04u << 24) | (n << 9) | (n * 16 - 1), base + kHazeVertices + uint32_t(r * kAround) * 16);
+        command((0x04u << 24) | (n << 9) | (n * 16 - 1), base + kUnderVertices + uint32_t(ring * kAround) * 16);
         for (uint32_t i = 0; i < uint32_t(kAround); ++i) {
             const uint32_t j = (i + 1) % kAround;
             const uint32_t a = i, bb = j, c = kAround + i, d = kAround + j;
@@ -322,7 +392,7 @@ uint32_t build_haze(uint8_t* rdram, int b, Vec eye) {
         }
     }
     command(0xB8u << 24, 0);
-    return base + kHazeList;
+    return base + kUnderList;
 }
 
 // One frame of the swim back (see the top): from the rider's animation, the
@@ -491,10 +561,12 @@ Camera swim_step(uint32_t segment3, int32_t animation, const Camera& chest, cons
 // player's rider's eyes -- or swimming back to the jet ski -- to multiply
 // onto the projection in place of the game's, with the rider's head shrunk
 // away; or 0, leaving the frame as it is. With the eye below the waves,
-// `haze` is given the list drawing the haze round it and `identity` an
-// identity matrix to draw it with; otherwise `haze` is 0.
-uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity) {
+// `haze` is given the list drawing the water's fog round it, `identity` an
+// identity matrix to draw it with and `underside` the list drawing the
+// waves' underside in place of the water; otherwise both lists are 0.
+uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity, uint32_t* underside) {
     *haze = 0;
+    *underside = 0;
     int b = -1;
     for (int i = 0; i < 2; ++i) {
         if (segment3 == kFrameBuffers[i]) b = i;
@@ -544,9 +616,16 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
     const Camera ridden = intensity >= 1.0f ? body : blend(level_camera(chest_eye, ahead), body, intensity);
     const Camera camera = swim_step(segment3, animation, ridden, hull);
     const Vec eye = camera.eye;
+    static const bool fog_trace = std::getenv("WR64_FOG_TRACE") != nullptr;
+    if (fog_trace) {
+        static int n = 0;
+        if (n++ % 15 == 0) std::fprintf(stderr, "[wr64-fog] eye %.0f %.0f %.0f surface %.1f\n",
+                                        eye.x, eye.y, eye.z, water_height_at(segment3, eye.x, eye.z));
+    }
     if (eye.y < water_height_at(segment3, eye.x, eye.z)) {
-        *haze = 0x80000000u | build_haze(rdram, b, eye);
+        *haze = 0x80000000u | build_haze(rdram, b, eye, water_height_at(segment3, eye.x, eye.z));
         *identity = 0x80000000u | (kHaze + uint32_t(b) * kHazeStride);
+        *underside = 0x80000000u | build_underside(rdram, b, eye, segment3);
     }
 
     // The view: the world turned into the eye's space, looking down -z with y

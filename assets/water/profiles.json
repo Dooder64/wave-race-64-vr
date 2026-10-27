@@ -6,9 +6,9 @@
       "id": 0,
       "name": "Dolphin Park",
       "deep_color": [
-        0.008,
-        0.1,
-        0.15,
+        0.004,
+        0.05,
+        0.08,
         0.003
       ],
       "shallow_color": [
@@ -41,7 +41,7 @@
         0.9,
         0.3
       ],
-      "visibility_range": 66.67,
+      "visibility_range": 260.0,
       "authored_reflection": 0,
       "caustics": 0.12
     },
