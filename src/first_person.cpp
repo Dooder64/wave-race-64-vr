@@ -104,6 +104,7 @@ void body_splash_note(bool riding, float hull_x, float hull_z, float hull_water,
 // point is from anything solid standing out of the water.
 bool seafloor_height_at(uint32_t course, float x, float z, float* height);
 float course_clearance(uint32_t course, float x, float z);
+bool course_has_walls(uint32_t course);
 namespace water {
 // src/water.cpp: the course's solid ground, and the skidding body's spray.
 bool ground_height_at(float x, float z, float below, float* height);
@@ -236,6 +237,10 @@ struct SwimState {
     // has been.
     Vec thrown_from{}, last{};
     float peak = 0.0f;
+    // Thrown at a wall, on a course of walls: whether the body has reached
+    // one, and where the view stopped short of it.
+    bool walled = false;
+    Vec wall_stop{};
     // Sinking: how many frames more to go down, and the way the throw still
     // carries the body. Swimming: whether it comes up at a slant
     // (after sinking) rather than straight up.
@@ -318,6 +323,9 @@ std::atomic<int> g_on{ -1 };
 // the settings (WR64_FP_INTENSITY in percent before they are read).
 std::atomic<float> g_intensity{ std::clamp(float(std::atof(std::getenv("WR64_FP_INTENSITY") ? std::getenv("WR64_FP_INTENSITY") : "100")) / 100.0f, 0.0f, 1.0f) };
 
+// Asked to recover from a fall (Y, F4), not yet acted on.
+std::atomic<bool> g_recover{ false };
+
 }  // namespace
 
 namespace vr {
@@ -342,6 +350,10 @@ void toggle_first_person() {
 
 void set_first_person_intensity(float intensity) {
     g_intensity.store(std::clamp(intensity, 0.0f, 1.0f), std::memory_order_relaxed);
+}
+
+void recover() {
+    g_recover.store(true, std::memory_order_relaxed);
 }
 
 }  // namespace vr
@@ -794,6 +806,30 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
     auto in_solid = [&](Vec p) { return course_clearance(course, p.x, p.z) < 0.5f * kClearance; };
     const Obstacles obstacles{ course, row(hull, 3), bow };
 
+    // Asked to recover (vr::recover): from anywhere in a fall, straight to
+    // the stern, as if swum there; the climb starts when the game next asks.
+    // WR64_TEST_RECOVER=<seconds>, in a scripted run only: asked that long
+    // into each fall.
+    static const int test_recover = std::getenv("WR64_INPUT_SCRIPT") != nullptr
+                                        ? int(setting("WR64_TEST_RECOVER", 0.0f) / kFrameTime) : 0;
+    static int falling = 0;
+    falling = s.phase == Swim::Riding || s.phase == Swim::Arrived || s.phase == Swim::Climbing || s.phase == Swim::Mounted
+                  ? 0 : falling + 1;
+    if (test_recover > 0 && falling == test_recover) g_recover.store(true, std::memory_order_relaxed);
+    if (g_recover.exchange(false, std::memory_order_relaxed) &&
+        (s.phase == Swim::Thrown || s.phase == Swim::Skidding || s.phase == Swim::Bouncing ||
+         s.phase == Swim::Sinking || s.phase == Swim::Settling || s.phase == Swim::Swimming)) {
+        s.eye = Vec{ stern.x, surface(stern) + eye_height, stern.z };
+        s.facing = bow;
+        s.spin = 0.0f;
+        s.walled = false;
+        s.phase = Swim::Arrived;
+        if (log) {
+            std::fprintf(stderr, "[wr64-swim] recovered: straight to the stern\n");
+            std::fflush(stderr);
+        }
+    }
+
     Camera shown = chest;
     bool spraying = false;
     float spray_wet = 0.0f;
@@ -836,6 +872,7 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
             s.frames = 0;
             s.thrown_from = s.last = chest.eye;
             s.peak = chest.eye.y;
+            s.walled = false;
         }
         break;
     case Swim::Thrown: {
@@ -843,13 +880,36 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
             s.phase = Swim::Riding;
             break;
         }
-        const float water = surface(chest.eye);
-        const float land = ground(chest.eye);
-        const Vec moving = (chest.eye - s.last) * (1.0f / kFrameTime);
-        if (land > water - 2.0f && chest.eye.y < land + 25.0f) {
+        // The game flies a thrown body on through a wall. On a course of
+        // walls (Marine Fortress's, Port Blue's) the view stops short of
+        // one instead, as far across as the body got before meeting it, and
+        // the fall plays out there: come down beyond a wall, or inside one,
+        // the swim back had no way out. (Elsewhere what stands out of the
+        // water is low enough -- a ramp, a rock -- to be flown over.)
+        constexpr float kWallStop = 20.0f;
+        if (!s.walled && course_has_walls(course)) {
+            for (int k = 1; k <= 8; ++k) {
+                const Vec q = s.last + (chest.eye - s.last) * (float(k) / 8.0f);
+                if (course_clearance(course, q.x, q.z) < kWallStop) {
+                    s.walled = true;
+                    s.wall_stop = s.last + (chest.eye - s.last) * (float(k - 1) / 8.0f);
+                    break;
+                }
+            }
+        }
+        Camera flung = chest;
+        if (s.walled) {
+            flung.eye.x = s.wall_stop.x;
+            flung.eye.z = s.wall_stop.z;
+        }
+        shown = flung;
+        const float water = surface(flung.eye);
+        const float land = ground(flung.eye);
+        const Vec moving = (flung.eye - s.last) * (1.0f / kFrameTime);
+        if (land > water - 2.0f && flung.eye.y < land + 25.0f) {
             // Thrown onto solid ground: no sinking into it. The view comes to
             // rest where the body landed and stands up from there.
-            s.eye = chest.eye;
+            s.eye = flung.eye;
             s.facing = length(Vec{ moving.x, 0.0f, moving.z }) > 1.0f ? normalised(Vec{ moving.x, 0.0f, moving.z }) : bow;
             if (log) {
                 std::fprintf(stderr, "[wr64-swim] onto the ground at %.0f\n", land);
@@ -859,14 +919,14 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
             shown = swimmer();
             break;
         }
-        if (chest.eye.y >= water) {
-            s.peak = std::max(s.peak, chest.eye.y);
-            s.last = chest.eye;
+        if (flung.eye.y >= water) {
+            s.peak = std::max(s.peak, flung.eye.y);
+            s.last = flung.eye;
             break;
         }
         // In the water. How hard the throw was: how fast across the water
         // the body flew, and how high; and how it meets the water.
-        const Vec flown{ chest.eye.x - s.thrown_from.x, 0.0f, chest.eye.z - s.thrown_from.z };
+        const Vec flown{ flung.eye.x - s.thrown_from.x, 0.0f, flung.eye.z - s.thrown_from.z };
         const float across_mean = length(flown) / (float(s.frames) * kFrameTime);
         const float climbed = s.peak - s.thrown_from.y;
         const float hard = std::max(clamp01((across_mean - kHardAcross) / kHardAcross),
@@ -888,7 +948,7 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
         else if (forced == 2 && can_sink) {}
         else if (s.sharp && can_skid) skid = true;
         else if (can_bounce) bounce = (chance() & 1) != 0;
-        s.entry = chest;
+        s.entry = flung;
         s.facing = across > 1.0f ? normalised(Vec{ moving.x, 0.0f, moving.z }) : bow;
         s.spin = 0.0f;
         s.spin_axis = axis_for(s.facing);
@@ -896,7 +956,7 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
         if (bounce) {
             // End over end, forwards.
             s.phase = Swim::Bouncing;
-            s.body = Vec{ chest.eye.x, water, chest.eye.z };
+            s.body = Vec{ flung.eye.x, water, flung.eye.z };
             s.velocity = Vec{ moving.x, 0.0f, moving.z } * 0.7f;
             s.spin_axis = normalised(cross(Vec{ 0.0f, 1.0f, 0.0f }, s.facing));
             s.hop = 0.0f;
@@ -906,7 +966,7 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
         }
         else if (skid) {
             s.phase = Swim::Skidding;
-            s.body = Vec{ chest.eye.x, water, chest.eye.z };
+            s.body = Vec{ flung.eye.x, water, flung.eye.z };
             s.velocity = Vec{ moving.x, 0.0f, moving.z } * 0.85f;
             s.hop = 0.0f;
             s.rise = std::min(0.22f * across, 220.0f);
@@ -916,13 +976,13 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
             // How long by how fierce the fall: how fast the body met the
             // water, or how high above it the throw took it, whichever is more.
             s.phase = Swim::Sinking;
-            s.eye = chest.eye;
+            s.eye = flung.eye;
             s.under = int((kSinkShort + (kSinkLong - kSinkShort) * fierce) * sink / kFrameTime);
             s.drift = Vec{ moving.x, 0.0f, moving.z } * 0.5f;
         }
         else {
             // A gentle fall: straight back up, no tumble.
-            s.eye = chest.eye;
+            s.eye = flung.eye;
             start_swim(false);
         }
         if (log) {

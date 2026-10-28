@@ -870,6 +870,7 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
             if (event->key.keysym.sym == SDLK_F10) wr64::water::cycle_debug();
             if (event->key.keysym.sym == SDLK_F5) wr64::vr::toggle_first_person();
             if (event->key.keysym.sym == SDLK_F6) wr64::vr::recenter();
+            if (event->key.keysym.sym == SDLK_F4) wr64::vr::recover();
             if (event->key.keysym.sym == SDLK_F7) wr64::vr::cycle_debug_offset();
             if (event->key.keysym.sym == SDLK_F8) wr64::vr::cycle_stereo();
         }

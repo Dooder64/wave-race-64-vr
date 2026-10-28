@@ -231,13 +231,14 @@ XrActionSet g_action_set = XR_NULL_HANDLE;
 XrAction g_stick_action[2] = {}, g_trigger_action[2] = {}, g_grip_action[2] = {};
 XrAction g_a_action = XR_NULL_HANDLE, g_b_action = XR_NULL_HANDLE, g_menu_action = XR_NULL_HANDLE;
 XrAction g_stick_click_action = XR_NULL_HANDLE, g_haptic_action = XR_NULL_HANDLE;
+XrAction g_right_click_action = XR_NULL_HANDLE, g_y_action = XR_NULL_HANDLE;
 XrPath g_hand_paths[2] = { XR_NULL_PATH, XR_NULL_PATH };
 std::atomic<bool> g_pads_live{ false };
 std::atomic<float> g_pad_stick[2][2], g_pad_trigger[2], g_pad_grip[2];
 std::atomic<bool> g_pad_a{ false }, g_pad_b{ false }, g_pad_menu{ false };
 std::atomic<float> g_rumble[2];
 bool g_rumbling[2] = { false, false };
-bool g_stick_click_was = false;
+bool g_stick_click_was = false, g_right_click_was = false, g_y_was = false;
 
 uint64_t g_frames = 0;
 uint64_t g_drawn = 0;
@@ -299,6 +300,8 @@ bool create_controllers() {
         !action(&g_b_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "b", "B", false) ||
         !action(&g_menu_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu", false) ||
         !action(&g_stick_click_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "left_stick_click", "Left thumbstick click", false) ||
+        !action(&g_right_click_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "right_stick_click", "Right thumbstick click", false) ||
+        !action(&g_y_action, XR_ACTION_TYPE_BOOLEAN_INPUT, "y", "Y", false) ||
         !action(&g_haptic_action, XR_ACTION_TYPE_VIBRATION_OUTPUT, "rumble", "Rumble", true)) {
         return false;
     }
@@ -314,6 +317,8 @@ bool create_controllers() {
         { g_b_action, "/user/hand/right/input/b/click" },
         { g_menu_action, "/user/hand/left/input/menu/click" },
         { g_stick_click_action, "/user/hand/left/input/thumbstick/click" },
+        { g_right_click_action, "/user/hand/right/input/thumbstick/click" },
+        { g_y_action, "/user/hand/left/input/y/click" },
         { g_haptic_action, "/user/hand/left/output/haptic" },
         { g_haptic_action, "/user/hand/right/output/haptic" },
     };
@@ -361,7 +366,7 @@ void update_controllers() {
         std::fflush(stderr);
     }
     if (!live) {
-        g_stick_click_was = false;
+        g_stick_click_was = g_right_click_was = g_y_was = false;
         return;
     }
     {
@@ -408,6 +413,14 @@ void update_controllers() {
     const bool click = get_bool(g_stick_click_action);
     if (click && !g_stick_click_was) toggle_first_person();
     g_stick_click_was = click;
+    // The right thumbstick's click recentres, as F6 does; Y recovers from a
+    // fall straight to the jet ski (as F4 does).
+    const bool right_click = get_bool(g_right_click_action);
+    if (right_click && !g_right_click_was) recenter();
+    g_right_click_was = right_click;
+    const bool y = get_bool(g_y_action);
+    if (y && !g_y_was) recover();
+    g_y_was = y;
 
     for (int hand = 0; hand < 2; ++hand) {
         const float strength = std::clamp(g_rumble[hand].load(std::memory_order_relaxed), 0.0f, 1.0f);

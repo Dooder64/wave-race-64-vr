@@ -48,6 +48,10 @@ void recenter();
 // a headset too. F5 switches it.
 bool first_person();
 void toggle_first_person();
+// Y on the controllers, F4: in the middle of a fall in first person -- thrown,
+// skidding, sinking, swimming back -- straight to the jet ski's stern,
+// climbing back on as soon as the game lets it.
+void recover();
 // How much of the rider's lean, pitch and roll first person takes, 0 to 1
 // (the settings' VR tab).
 void set_first_person_intensity(float intensity);

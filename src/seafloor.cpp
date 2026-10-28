@@ -1,7 +1,8 @@
-// Seafloors under Dolphin Park, Sunny Beach, Sunset Bay (sand) and Drake
-// Lake (mud), and the water's fog round an eye below the waves. Sunset Bay
-// and Drake Lake are floored the same way as Sunny Beach, from shores
-// measured the same way; see their depths below.
+// Seafloors under Dolphin Park, Sunny Beach, Sunset Bay (sand), Drake Lake
+// (mud), Marine Fortress (rock) and Port Blue (silt), and the water's fog
+// round an eye below the waves. Sunset Bay and Drake Lake are floored the
+// same way as Sunny Beach, from shores measured the same way; Marine Fortress
+// and Port Blue by their walls; see their depths below.
 //
 // The game draws nothing under its water but a flat textured floor at the
 // water's own level, so the water looks bottomless everywhere and a view
@@ -10,8 +11,9 @@
 // palm island and the piers in the middle, deepening quickly away from them
 // (some 4 m a hundred and fifty metres out) to about 10 m by the buoy
 // barrier (a ring of radius 7700 about the origin), then on past it, sloping
-// gently down to some 30 m at three times the barrier's radius, and there
-// falling away steeply into deep water. It is built once when the course is
+// gently down towards 15 m -- the deepest any floor here goes, anywhere, by
+// rule: deep water underfoot, let alone an abyss, unsettled more than it
+// thrilled (kMaxDepth). It is built once when the course is
 // loaded, in world space, and drawn in place of the game's flat floor, before
 // the water, so the water's depth tint (RT64's WaterPS: the deeper what lies
 // under the surface, the more of the water's own colour) shades it from above.
@@ -36,8 +38,8 @@
 // instead, in the game's own seabed sand: just under the game's beaches,
 // which carry on under the water to 50 units down some 400 units out, then
 // dropping steeply into the channel (some 10 m in its middle), and on the
-// seaward side sloping as Dolphin Park's does, on past the buoys to three
-// times their distance from the shore, and there falling away. Its shores
+// seaward side sloping as Dolphin Park's does, on past the buoys towards
+// 15 m. Its shores
 // are where the beaches' triangles cross the water's level (measured with
 // WR64_3D_TRACE_VERTS and WR64_3D_TRACE_RAW), each edge turned to have the
 // land on its left; the swim back walks on their sand, and goes round the
@@ -67,11 +69,13 @@ bool water_built_for(uint32_t segment3, float eye[3], float* centre_x, float* ce
 namespace {
 
 // The marker and the identity matrix; the cells' triangles, the same for
-// every chunk; the drawing state; then for each frame buffer the list
-// drawing the chunks round the camera. The vertices, a chunk after another.
+// every chunk; the drawing state; a sand made here, for a course without one
+// of its own; then for each frame buffer the list drawing the chunks round
+// the camera. The vertices, a chunk after another.
 constexpr uint32_t kBase = 0x500000;
 constexpr uint32_t kTriangles = kBase + 0x100;
 constexpr uint32_t kState = kBase + 0x400;
+constexpr uint32_t kMadeSand = kBase + 0x800;
 constexpr uint32_t kFrameLists = kBase + 0x1000, kFrameListSize = 0x8000;
 constexpr uint32_t kBaseEnd = kFrameLists + 2 * kFrameListSize;
 constexpr uint32_t kVertices = 0x400000;
@@ -90,9 +94,10 @@ constexpr float kTexelsPerUnit = 32.0f / 128.0f;
 constexpr float kDrawRadius = 7000.0f;
 
 // The barrier; the shelf beyond it, sloping down at about the floor's
-// average slope inside it, to three times its radius; and there the drop.
+// average slope inside it. The deepest any floor goes: 15 m.
 constexpr float kBarrier = 7700.0f;
 constexpr float kShelfSlope = 0.045f, kShelfEnd = 3.0f * kBarrier;
+constexpr float kMaxDepth = 500.0f;
 
 struct Anchor { float x, z, radius; };
 // The palm island, and the piers' pillars (to 100 units).
@@ -113,13 +118,20 @@ float smoothstep(float a, float b, float x) {
 
 // The shelf past a boundary `boundary` (a radius, or a distance from the
 // shore): sloping down at kShelfSlope, eased in over 2000 units about the
-// boundary so the floor does not kink there, to `end`; and there the drop,
-// steep and then on down for good. `at` is the same kind of measure.
-float shelf_and_drop(float at, float boundary, float end) {
+// boundary so the floor does not kink there. `at` is the same kind of
+// measure. (It once ended in a drop to an abyss; no floor goes below
+// kMaxDepth now.)
+float shelf(float at, float boundary) {
     constexpr float kEase = 2000.0f;
     const float past = std::clamp(at - (boundary - kEase / 2.0f), 0.0f, kEase);
-    return kShelfSlope * (past * past / (2.0f * kEase) + std::max(0.0f, at - (boundary + kEase / 2.0f))) +
-           5200.0f * smoothstep(end + 150.0f, end + 1600.0f, at) + std::max(0.0f, at - (end + 1600.0f)) * 0.6f;
+    return kShelfSlope * (past * past / (2.0f * kEase) + std::max(0.0f, at - (boundary + kEase / 2.0f)));
+}
+
+// A depth held to kMaxDepth, eased into it over the last 100 units so the
+// floor levels off without a crease.
+float capped(float depth) {
+    constexpr float kEase = 100.0f;
+    return depth <= kMaxDepth - kEase ? depth : kMaxDepth - kEase + kEase * std::tanh((depth - (kMaxDepth - kEase)) / kEase);
 }
 
 // Broad, low swells in the sand. Far longer than the grid's cells: shorter
@@ -137,10 +149,9 @@ float dolphin_depth(float x, float z) {
     // Shallow by the shore, deepening quickly at first and levelling off at
     // about 10 m: deep enough for ramps and stunts to land in.
     float depth = 25.0f + 315.0f * (1.0f - std::exp(-shore / 1100.0f));
-    // Swells, flattening out towards the drop; the shelf and the drop past
-    // the barrier.
+    // Swells, flattening out far out; the shelf past the barrier.
     depth += swells(x, z) * (1.0f - smoothstep(kShelfEnd, kShelfEnd + 500.0f, r));
-    return depth + shelf_and_drop(r, kBarrier, kShelfEnd);
+    return depth + shelf(r, kBarrier);
 }
 
 // Sunny Beach's shores at the water's level, each edge a -> b with the land
@@ -266,10 +277,10 @@ float sunny_depth(float x, float z) {
     float depth = 10.0f + kSunnyBeachSlope * std::min(d, kBeachReach);
     // ...and past them: steeply into the channel between the sandbar and
     // the mainland, or as Dolphin Park slopes on the seaward side, on past
-    // the buoys to the drop.
+    // the buoys.
     const float past = std::max(0.0f, d - kBeachReach);
     const float channel = 330.0f * (1.0f - std::exp(-past / 300.0f));
-    const float sea = 300.0f * (1.0f - std::exp(-past / 1100.0f)) + shelf_and_drop(d, kSunnyBuoys, kSunnyShelfEnd);
+    const float sea = 300.0f * (1.0f - std::exp(-past / 1100.0f)) + shelf(d, kSunnyBuoys);
     const float in_channel = smoothstep(150.0f, 600.0f, z) * (1.0f - smoothstep(kSandbarEnd, kSandbarEnd + 1600.0f, std::fabs(x)));
     depth += in_channel * channel + (1.0f - in_channel) * sea;
     return depth + swells(x, z) * smoothstep(kBeachReach, kBeachReach + 500.0f, d) *
@@ -280,7 +291,7 @@ float sunny_depth(float x, float z) {
 // to an islet at either side, the open sea all round, past a row of buoys
 // some 1600 units off. Its banks are steep, 60 units down within 30 of the
 // water's edge; past them the floor slopes as Dolphin Park's does, on past
-// the buoys to three times their distance, and there falls away.
+// the buoys.
 constexpr Edge kSunsetShore[] = {
     { -3798, -2658, -3758, -2758 }, { -3798, -2518, -3798, -2658 }, { -3798, -2308, -3798, -2518 },
     { -3798, 542, -3758, 442 }, { -3798, 682, -3798, 542 }, { -3798, 892, -3798, 682 },
@@ -349,7 +360,7 @@ float sunset_depth(float x, float z) {
     if (d <= 0.0f) return 40.0f;
     const float past = std::max(0.0f, d - kSunsetBank);
     return 45.0f + 300.0f * (1.0f - std::exp(-past / 1100.0f)) +
-           shelf_and_drop(d, kSunsetBuoys, kSunsetShelfEnd) +
+           shelf(d, kSunsetBuoys) +
            swells(x, z) * smoothstep(kSunsetBank, kSunsetBank + 500.0f, d) * (1.0f - smoothstep(kSunsetShelfEnd, kSunsetShelfEnd + 500.0f, d));
 }
 
@@ -462,12 +473,274 @@ float drake_depth(float x, float z) {
     return 40.0f + 330.0f * (1.0f - std::exp(-d / 300.0f)) + swells(x, z) * smoothstep(200.0f, 600.0f, d);
 }
 
+// How far (x, z) is from the nearest of `count` edges, whichever side.
+float edge_distance(const Edge* edges, size_t count, float x, float z) {
+    float best = 1e18f, distance = 1e9f;
+    nearer_shore(edges, count, x, z, best, distance);
+    return std::fabs(distance);
+}
+
+// Marine Fortress (course 3) and Port Blue (course 5): walls standing out of
+// the water -- a fortress's, and platforms' and a ship's -- rather than
+// shores: thin and open-ended, so with no inside or outside to them that a
+// shore's edges have. Their floors go by how far a point is from the
+// nearest wall, either side. Marine Fortress's walls go down to some 60
+// units, Port Blue's to 100 (its ship's to 300); each floor starts a little
+// above that at a wall's foot, so as to meet it with no gap between.
+constexpr Edge kMarineShore[] = {
+    { -4245, -2540, -3270, -2540 }, { -4245, -2390, -4245, -2540 }, { -4245, -2340, -4245, -2390 },
+    { -3920, -2340, -4245, -2340 }, { -3270, -2540, -2945, -2540 }, { -2983, 4861, -2974, 4765 },
+    { -2983, 5261, -2983, 4861 }, { -2983, 5361, -2983, 5261 }, { -2974, 4765, -2926, 4372 },
+    { -2967, 6154, -2951, 5761 }, { -2967, 6261, -2967, 6154 }, { -2951, 5676, -2983, 5361 },
+    { -2951, 5761, -2951, 5676 }, { -2951, 6586, -2967, 6261 }, { -2951, 6661, -2951, 6586 },
+    { -2945, -3640, -2939, -3730 }, { -2945, -3490, -2945, -3640 }, { -2945, -3140, -2945, -3490 },
+    { -2945, -2990, -2945, -3140 }, { -2945, -2640, -2945, -2990 }, { -2945, -2490, -2945, -2640 },
+    { -2945, -2340, -3920, -2340 }, { -2945, -2140, -2945, -2490 }, { -2945, -1990, -2945, -2140 },
+    { -2945, -1640, -2945, -1990 }, { -2945, -1490, -2945, -1640 }, { -2945, -1140, -2945, -1490 },
+    { -2945, -990, -2945, -1140 }, { -2945, -640, -2945, -990 }, { -2945, -490, -2945, -640 },
+    { -2945, -140, -2945, -490 }, { -2945, 10, -2945, -140 }, { -2945, 360, -2945, 10 },
+    { -2945, 880, -2945, 360 }, { -2945, 1360, -2945, 880 }, { -2945, 1360, -2945, 1454 },
+    { -2945, 1454, -2945, 1800 }, { -2945, 1800, -2945, 1894 }, { -2945, 1894, -2945, 2240 },
+    { -2945, 3361, -2945, 3468 }, { -2945, 3468, -2945, 3861 }, { -2945, 3861, -2945, 3968 },
+    { -2945, 3968, -2945, 4361 }, { -2945, 4361, -2926, 4372 }, { -2940, 2300, -2945, 2240 },
+    { -2940, 2300, -2920, 2520 }, { -2939, -3730, -2925, -3940 }, { -2925, -3940, -2916, -3994 },
+    { -2916, -3994, -2895, -4120 }, { -2915, 2541, -2920, 2520 }, { -2915, 2541, -2895, 2620 },
+    { -2896, 7880, -2608, 7840 }, { -2895, -4120, -2860, -4190 }, { -2895, 2620, -2884, 2641 },
+    { -2884, 2641, -2845, 2720 }, { -2860, -4190, -2845, -4220 }, { -2855, 6757, -2951, 6661 },
+    { -2845, -4220, -2810, -4255 }, { -2845, 2720, -2834, 2731 }, { -2845, 6767, -2855, 6757 },
+    { -2836, 8060, -2896, 7880 }, { -2834, 2731, -2795, 2770 }, { -2810, -4255, -2795, -4270 },
+    { -2805, 8155, -2836, 8060 }, { -2795, -4270, -2780, -4270 }, { -2795, 2770, -2784, 2770 },
+    { -2784, 2770, -2745, 2770 }, { -2780, -4270, -2745, -4270 }, { -2745, -4270, -2710, -4235 },
+    { -2745, 2770, -2734, 2759 }, { -2734, 2759, -2695, 2720 }, { -2710, -4235, -2695, -4220 },
+    { -2695, -4220, -2660, -4150 }, { -2695, 2720, -2684, 2699 }, { -2684, 2699, -2645, 2620 },
+    { -2660, -4150, -2645, -4120 }, { -2645, 2620, -2640, 2599 }, { -2640, 2599, -2620, 2520 },
+    { -2638, -4090, -2645, -4120 }, { -2620, -4020, -2638, -4090 }, { -2620, 2520, -2615, 2490 },
+    { -2615, 2490, -2595, 2380 }, { -2612, -3960, -2620, -4020 }, { -2595, -3820, -2612, -3960 },
+    { -2595, -3820, -2595, -3470 }, { -2595, -3470, -2595, -3320 }, { -2595, -3320, -2595, -2970 },
+    { -2595, -2970, -2595, -2820 }, { -2595, -2820, -2556, -2675 }, { -2567, 2276, -2595, 2380 },
+    { -2567, 2276, -2466, 1897 }, { -2556, -2675, -2466, -2337 }, { -2552, 3361, -2945, 3361 },
+    { -2466, -2337, -2424, -2182 }, { -2466, 1897, -2436, 1786 }, { -2445, 3361, -2552, 3361 },
+    { -2445, 6783, -2845, 6767 }, { -2436, 1786, -2327, 1380 }, { -2424, -2182, -2327, -1820 },
+    { -2345, 6783, -2445, 6783 }, { -2327, -1820, -2320, -1822 }, { -2324, 8005, -2805, 8155 },
+    { -2320, -1822, -2304, -1827 }, { -2304, -1827, -2205, -1719 }, { -2251, 1304, -2327, 1380 },
+    { -2251, 1304, -1974, 1027 }, { -2205, -1719, -1974, -1467 }, { -2170, 7955, -2324, 8005 },
+    { -2142, 3099, -2445, 3361 }, { -2142, 3099, -2060, 3028 }, { -2104, 7780, -2608, 7840 },
+    { -2104, 7780, -2095, 7805 }, { -2095, 7805, -2170, 7955 }, { -1974, -1467, -1781, -1260 },
+    { -1974, 1027, -1893, 946 }, { -1945, 6767, -2345, 6783 }, { -1926, 2576, -2060, 3028 },
+    { -1893, 946, -1595, 648 }, { -1890, 2453, -1926, 2576 }, { -1845, 6763, -1945, 6767 },
+    { -1800, 7994, -1768, 7901 }, { -1781, -1260, -1653, -1122 }, { -1776, 2066, -1890, 2453 },
+    { -1776, 2066, -1745, 1961 }, { -1768, 7901, -1726, 7816 }, { -1653, -1122, -1461, -1067 },
+    { -1625, 1684, -1745, 1961 }, { -1592, 1608, -1625, 1684 }, { -1494, 617, -1595, 648 },
+    { -1494, 617, -1124, 505 }, { -1461, -1067, -1172, -985 }, { -1452, 6763, -1845, 6763 },
+    { -1386, 8034, -1800, 7994 }, { -1345, 6767, -1452, 6763 }, { -1294, 1310, -1592, 1608 },
+    { -1250, 7780, -1726, 7816 }, { -1213, 1229, -1294, 1310 }, { -1190, 8010, -1386, 8034 },
+    { -1172, -985, -826, -886 }, { -1021, 474, -1124, 505 }, { -1021, 474, -645, 361 },
+    { -1010, 7815, -1190, 8010 }, { -984, 7780, -1250, 7780 }, { -984, 7780, -1010, 7815 },
+    { -979, 6708, -1345, 6767 }, { -908, 6694, -979, 6708 }, { -907, 1133, -1213, 1229 },
+    { -907, 1133, -823, 1107 }, { -826, -886, -595, -820 }, { -645, 361, -538, 361 },
+    { -595, -820, -395, -820 }, { -538, 361, -145, 361 }, { -528, 6571, -908, 6694 },
+    { -528, 6571, -434, 6540 }, { -471, 7517, -604, 7449 }, { -447, 992, -823, 1107 },
+    { -413, 7553, -471, 7517 }, { -395, -820, -95, -820 }, { -378, 7354, -604, 7449 },
+    { -345, 961, -447, 992 }, { -342, 6491, -434, 6540 }, { -145, 361, -38, 361 },
+    { -95, -820, 105, -820 }, { -38, 361, 355, 361 }, { -28, 7418, -413, 7553 },
+    { 20, 6294, -342, 6491 }, { 41, 7172, -378, 7354 }, { 41, 7172, 54, 7213 },
+    { 54, 7213, 84, 7388 }, { 84, 7388, -28, 7418 }, { 105, -820, 405, -820 },
+    { 126, 961, -345, 961 }, { 255, 961, 126, 961 }, { 302, 6017, 20, 6294 },
+    { 345, 961, 255, 961 }, { 355, 361, 423, 361 }, { 373, 5948, 302, 6017 },
+    { 405, -820, 555, -820 }, { 423, 361, 674, 361 }, { 498, 7108, 328, 7066 },
+    { 507, 6859, 328, 7066 }, { 555, -820, 905, -820 }, { 574, 7138, 498, 7108 },
+    { 605, 5632, 373, 5948 }, { 674, 361, 674, 381 }, { 674, 381, 674, 386 },
+    { 674, 386, 714, 386 }, { 674, 936, 674, 941 }, { 674, 941, 674, 961 },
+    { 674, 961, 345, 961 }, { 674, 5539, 605, 5632 }, { 711, 5465, 674, 5539 },
+    { 714, 386, 874, 386 }, { 755, 579, 755, 361 }, { 755, 661, 755, 579 },
+    { 755, 879, 755, 661 }, { 755, 961, 755, 879 }, { 805, 361, 805, 443 },
+    { 805, 443, 805, 661 }, { 805, 661, 805, 743 }, { 805, 743, 805, 961 },
+    { 834, 936, 674, 936 }, { 839, 6484, 507, 6859 }, { 839, 6484, 873, 6526 },
+    { 840, 3970, 845, 4074 }, { 840, 3970, 855, 3961 }, { 845, 4074, 878, 4561 },
+    { 855, -39, 1205, -39 }, { 855, 20, 855, -39 }, { 855, 236, 855, 20 },
+    { 855, 1086, 870, 1086 }, { 855, 1459, 855, 1086 }, { 855, 1561, 855, 1459 },
+    { 855, 2032, 855, 1561 }, { 855, 2161, 855, 2032 }, { 855, 2632, 855, 2161 },
+    { 855, 2761, 855, 2632 }, { 855, 3232, 855, 2761 }, { 855, 3361, 855, 3232 },
+    { 855, 3832, 855, 3361 }, { 855, 3961, 855, 3832 }, { 861, 5167, 711, 5465 },
+    { 870, 236, 855, 236 }, { 870, 1086, 874, 1086 }, { 873, 6526, 1003, 6657 },
+    { 874, 236, 870, 236 }, { 874, 356, 874, 236 }, { 874, 386, 874, 356 },
+    { 874, 936, 834, 936 }, { 874, 1056, 874, 936 }, { 874, 1056, 874, 1086 },
+    { 877, 4671, 861, 5167 }, { 878, 4561, 877, 4671 }, { 898, -751, 1018, -744 },
+    { 900, -772, 898, -751 }, { 900, -772, 905, -820 }, { 904, 6755, 574, 7138 },
+    { 1003, 6657, 904, 6755 }, { 1018, -744, 1297, -727 }, { 1205, -39, 1355, -39 },
+    { 1297, -727, 1417, -720 }, { 1355, -39, 1705, -39 }, { 1417, -720, 1697, -704 },
+    { 1697, -704, 1840, -658 }, { 1705, -39, 1855, -39 }, { 1840, -658, 2173, -551 },
+    { 1855, -39, 2205, -39 }, { 2173, -551, 2316, -505 }, { 2205, -39, 2355, -39 },
+    { 2316, -505, 2649, -399 }, { 2355, -39, 2705, -39 }, { 2649, -399, 2799, -399 },
+    { 2705, -39, 2855, -39 }, { 2799, -399, 3149, -399 }, { 2855, -39, 3204, -57 },
+    { 3149, -399, 3238, -391 }, { 3238, -391, 3447, -371 }, { 3354, -65, 3204, -57 },
+    { 3354, -65, 3498, -86 }, { 3447, -371, 3481, -363 }, { 3481, -363, 3560, -345 },
+    { 3498, -86, 3560, -95 }, { 3560, -345, 3630, -310 }, { 3590, -110, 3560, -95 },
+    { 3630, -310, 3660, -295 }, { 3660, -295, 3695, -260 }, { 3660, -145, 3590, -110 },
+    { 3675, -160, 3660, -145 }, { 3695, -260, 3710, -245 }, { 3710, -245, 3710, -230 },
+    { 3710, -230, 3710, -195 }, { 3710, -195, 3675, -160 },
+};
+
+// Marine Fortress, in the fortress's greenish rock: sloping from the walls
+// as Sunset Bay's does but deepening sooner, then gently on.
+constexpr float kMarineEdge = 2000.0f, kMarineShelfEnd = 3.0f * kMarineEdge;
+float marine_depth(float x, float z) {
+    const float d = edge_distance(kMarineShore, sizeof(kMarineShore) / sizeof(kMarineShore[0]), x, z);
+    return 45.0f + 300.0f * (1.0f - std::exp(-d / 450.0f)) + shelf(d, kMarineEdge) +
+           swells(x, z) * smoothstep(100.0f, 600.0f, d) * (1.0f - smoothstep(kMarineShelfEnd, kMarineShelfEnd + 500.0f, d));
+}
+
+constexpr Edge kPortBlueShore[] = {
+    { -5900, -4150, -5800, -4150 }, { -5900, -3850, -5900, -4150 }, { -5900, -3750, -5900, -3850 },
+    { -5900, -3750, -5600, -3750 }, { -5900, -2050, -5900, -2150 }, { -5900, -1750, -5900, -2050 },
+    { -5900, -50, -5900, -150 }, { -5900, 250, -5900, -50 }, { -5900, 1950, -5900, 1850 },
+    { -5900, 2250, -5900, 1950 }, { -5800, -4150, -5500, -4150 }, { -5800, -1750, -5900, -1750 },
+    { -5800, -1750, -5500, -1750 }, { -5800, 250, -5900, 250 }, { -5800, 250, -5500, 250 },
+    { -5800, 2250, -5900, 2250 }, { -5600, -3750, -5500, -3750 }, { -5600, -2150, -5900, -2150 },
+    { -5600, -150, -5900, -150 }, { -5600, 1850, -5900, 1850 }, { -5500, -4150, -5500, -4050 },
+    { -5500, -4050, -5500, -3750 }, { -5500, -2150, -5600, -2150 }, { -5500, -2150, -5500, -1850 },
+    { -5500, -1850, -5500, -1750 }, { -5500, -150, -5600, -150 }, { -5500, -150, -5500, 150 },
+    { -5500, 150, -5500, 250 }, { -5500, 1850, -5600, 1850 }, { -5500, 1850, -5500, 2150 },
+    { -5500, 2150, -5500, 2250 }, { -5500, 2250, -5800, 2250 }, { -5066, -5750, -4854, -5962 },
+    { -4995, -5679, -5066, -5750 }, { -4854, -5962, -4783, -6033 }, { -4783, -5467, -4995, -5679 },
+    { -4712, -5538, -4783, -5467 }, { -4571, -5821, -4783, -6033 }, { -4500, -5750, -4712, -5538 },
+    { -4500, -5750, -4571, -5821 }, { -4000, -7500, -4000, -7429 }, { -4000, -7429, -4000, -7000 },
+    { -4000, -7000, -3929, -6929 }, { -3929, -6929, -3500, -6500 }, { -3900, -2000, -3900, -3500 },
+    { -3900, -1000, -3900, -2000 }, { -3900, 0, -3900, -1000 }, { -3900, 1000, -3900, 0 },
+    { -3900, 2000, -3900, 1000 }, { -3900, 3000, -3900, 2000 }, { -3900, 4000, -3900, 3000 },
+    { -3900, 4000, -3600, 5000 }, { -3600, 5000, -3210, 5500 }, { -3571, -7929, -4000, -7500 },
+    { -3500, -8000, -3571, -7929 }, { -3500, -8000, -2214, -8000 }, { -3436, -6500, -3500, -6500 },
+    { -3400, -4500, -3900, -3500 }, { -3210, 5500, -2940, 6000 }, { -3050, -6500, -3436, -6500 },
+    { -3036, -6486, -3050, -6500 }, { -2950, -6400, -3036, -6486 }, { -2940, 6000, -2860, 6000 },
+    { -2921, -6400, -2950, -6400 }, { -2921, -6400, -2750, -6400 }, { -2860, 6000, -2590, 5500 },
+    { -2750, -6400, -2736, -6414 }, { -2650, -6500, -2736, -6414 }, { -2557, -6500, -2650, -6500 },
+    { -2400, -4500, -3400, -4500 }, { -2350, 5596, -1950, 5596 }, { -2350, 5725, -2350, 5596 },
+    { -2350, 5908, -2350, 5725 }, { -2350, 5963, -2350, 5908 }, { -2350, 5978, -2350, 5963 },
+    { -2214, -8000, -2000, -8000 }, { -2200, 5000, -2590, 5500 }, { -2000, -8000, -1786, -8000 },
+    { -2000, -6500, -2557, -6500 }, { -1976, 5978, -2350, 5978 }, { -1957, -6457, -2000, -6500 },
+    { -1950, 5596, -1850, 5596 }, { -1900, -3500, -2400, -4500 }, { -1900, -3500, -1900, -2000 },
+    { -1900, -3500, -1500, -3700 }, { -1900, -2000, -1900, -1000 }, { -1900, -1000, -1900, 0 },
+    { -1900, 0, -1900, 1000 }, { -1900, 200, -1450, 200 }, { -1900, 1000, -1900, 2000 },
+    { -1900, 2000, -1900, 3000 }, { -1900, 4000, -2200, 5000 }, { -1900, 4000, -1900, 3000 },
+    { -1850, 5596, -1850, 5725 }, { -1850, 5725, -1850, 5908 }, { -1850, 5908, -1850, 5978 },
+    { -1850, 5978, -1976, 5978 }, { -1786, -8000, -500, -8000 }, { -1700, -6200, -1957, -6457 },
+    { -1700, -6200, -1700, -6186 }, { -1700, -6186, -1700, -6100 }, { -1700, -6100, -1671, -6071 },
+    { -1671, -6071, -1500, -5900 }, { -1500, -5900, -1486, -5900 }, { -1500, -3700, -1100, -3900 },
+    { -1500, 5196, -1100, 5196 }, { -1500, 5325, -1500, 5196 }, { -1500, 5508, -1500, 5325 },
+    { -1500, 5563, -1500, 5508 }, { -1500, 5578, -1500, 5563 }, { -1486, -5900, -1400, -5900 },
+    { -1450, 200, -1000, 200 }, { -1357, -5857, -1400, -5900 }, { -1150, 4796, -750, 4796 },
+    { -1150, 4925, -1150, 4796 }, { -1150, 5108, -1150, 4925 }, { -1150, 5163, -1150, 5108 },
+    { -1150, 5178, -1150, 5163 }, { -1126, 5578, -1500, 5578 }, { -1100, -5600, -1357, -5857 },
+    { -1100, -5579, -1100, -5600 }, { -1100, -5450, -1100, -5579 }, { -1100, -4650, -1014, -4736 },
+    { -1100, -4621, -1100, -4650 }, { -1100, -4621, -1100, -4450 }, { -1100, -3900, -1014, -3986 },
+    { -1100, -3729, -1100, -3900 }, { -1100, -3700, -1100, -3729 }, { -1100, -2600, -1014, -2686 },
+    { -1100, -2571, -1100, -2600 }, { -1100, -2400, -1100, -2571 }, { -1100, -1700, -1014, -1786 },
+    { -1100, -1671, -1100, -1700 }, { -1100, -1500, -1100, -1671 }, { -1100, -800, -1014, -886 },
+    { -1100, -771, -1100, -800 }, { -1100, -600, -1100, -771 }, { -1100, 1200, -1014, 1114 },
+    { -1100, 1229, -1100, 1200 }, { -1100, 1400, -1100, 1229 }, { -1086, -5436, -1100, -5450 },
+    { -1086, -4436, -1100, -4450 }, { -1086, -3686, -1100, -3700 }, { -1086, -2386, -1100, -2400 },
+    { -1086, -1486, -1100, -1500 }, { -1086, -586, -1100, -600 }, { -1086, 1414, -1100, 1400 },
+    { -1086, 1414, -1000, 1500 }, { -1014, -3986, -1000, -4000 }, { -1014, -2686, -1000, -2700 },
+    { -1014, -1786, -1000, -1800 }, { -1014, -886, -1000, -900 }, { -1014, 1114, -1000, 1100 },
+    { -1000, -5350, -1086, -5436 }, { -1000, -5350, -962, -5350 }, { -1000, -4750, -1014, -4736 },
+    { -1000, -4350, -1086, -4436 }, { -1000, -4350, -970, -4350 }, { -1000, -3600, -1086, -3686 },
+    { -1000, -2829, -1000, -3600 }, { -1000, -2700, -1000, -2829 }, { -1000, -2643, -1000, -2700 },
+    { -1000, -2300, -1086, -2386 }, { -1000, -2300, -1000, -2643 }, { -1000, -2229, -1000, -2300 },
+    { -1000, -1800, -1000, -2229 }, { -1000, -1743, -1000, -1800 }, { -1000, -1400, -1086, -1486 },
+    { -1000, -1400, -1000, -1743 }, { -1000, -1329, -1000, -1400 }, { -1000, -900, -1000, -1329 },
+    { -1000, -843, -1000, -900 }, { -1000, -500, -1086, -586 }, { -1000, -500, -1000, -843 },
+    { -1000, -500, -1000, -220 }, { -1000, -220, -1000, 200 }, { -1000, 200, -940, 200 },
+    { -1000, 5196, -1100, 5196 }, { -1000, 5196, -1000, 5325 }, { -1000, 5325, -1000, 5508 },
+    { -1000, 5508, -1000, 5578 }, { -1000, 5578, -1126, 5578 }, { -988, -4750, -1000, -4750 },
+    { -980, -4000, -1000, -4000 }, { -970, -4350, -950, -4350 }, { -962, -5350, -950, -5350 },
+    { -950, -5350, -650, -5350 }, { -950, -4750, -988, -4750 }, { -950, -4350, -530, -4350 },
+    { -950, -4071, -950, -4500 }, { -950, -4071, -950, -3900 }, { -950, -4000, -980, -4000 },
+    { -940, 200, -900, 200 }, { -925, 1100, -1000, 1100 }, { -900, 200, -210, 200 },
+    { -900, 1100, -925, 1100 }, { -776, 5178, -1150, 5178 }, { -750, 4796, -650, 4796 },
+    { -650, -5350, 250, -5350 }, { -650, 4796, -650, 4925 }, { -650, 4925, -650, 5108 },
+    { -650, 5108, -650, 5178 }, { -650, 5178, -776, 5178 }, { -612, 1100, -900, 1100 },
+    { -600, -1650, -560, -1930 }, { -600, -1530, -600, -1650 }, { -600, -1450, -600, -1530 },
+    { -560, -1930, -500, -2350 }, { -530, -4350, -250, -4350 }, { -530, -4000, -950, -4000 },
+    { -510, -1360, -600, -1450 }, { -500, -8000, -286, -8000 }, { -500, -2350, -200, -2650 },
+    { -450, -1300, -510, -1360 }, { -330, -1300, -450, -1300 }, { -286, -8000, 1000, -8000 },
+    { -250, -4350, -163, -4350 }, { -250, -4000, -530, -4000 }, { -250, -1300, -330, -1300 },
+    { -210, 200, 250, 200 }, { -200, -2650, 250, -3100 }, { -163, -4350, -105, -4350 },
+    { -150, -2205, -150, -2041 }, { -150, -2041, -150, -1795 }, { -150, -1795, -132, -1777 },
+    { -132, -1777, -105, -1750 }, { -105, -4350, 217, -4068 }, { -50, -4750, -950, -4750 },
+    { 50, -3700, -250, -4000 }, { 200, -1360, -250, -1300 }, { 217, -4068, 700, -3645 },
+    { 237, -1792, -105, -1750 }, { 237, -1792, 751, -1856 }, { 250, -5350, 1000, -5350 },
+    { 250, -4750, -50, -4750 }, { 250, -3500, 50, -3700 }, { 250, -3260, 250, -3500 },
+    { 250, -3100, 250, -3260 }, { 250, 200, 370, 200 }, { 250, 1100, -612, 1100 },
+    { 360, -2655, -150, -2205 }, { 370, 200, 550, 200 }, { 500, -4750, 250, -4750 },
+    { 500, -1400, 200, -1360 }, { 500, 1100, 250, 1100 }, { 550, 200, 630, 160 },
+    { 630, 160, 750, 100 }, { 650, -1250, 500, -1400 }, { 700, -3645, 700, -3369 },
+    { 700, -3369, 700, -2955 }, { 700, -2955, 360, -2655 }, { 700, -100, 1200, -100 },
+    { 750, -1150, 650, -1250 }, { 750, 100, 790, 20 }, { 790, 20, 850, -100 },
+    { 810, -970, 750, -1150 }, { 850, -850, 810, -970 }, { 850, -400, 850, -850 },
+    { 850, -100, 850, -400 }, { 929, 1500, -1000, 1500 }, { 951, -1694, 751, -1856 },
+    { 951, -1694, 1250, -1450 }, { 1000, -8000, 1214, -8000 }, { 1000, -5350, 1250, -5350 },
+    { 1214, -8000, 2500, -8000 }, { 1250, -5350, 2225, -5350 }, { 1250, -4750, 500, -4750 },
+    { 1250, -1450, 1250, -910 }, { 1250, -910, 1250, -100 }, { 1250, -100, 1250, -70 },
+    { 1250, -70, 1250, -50 }, { 1250, -50, 1250, 220 }, { 1250, 220, 1250, 400 },
+    { 1250, 400, 1290, 440 }, { 1250, 1100, 500, 1100 }, { 1250, 1500, 929, 1500 },
+    { 1290, 440, 1350, 500 }, { 1350, 500, 1650, 500 }, { 1400, -100, 1200, -100 },
+    { 1575, -4750, 1250, -4750 }, { 1575, 1100, 1250, 1100 }, { 1650, 500, 2550, 500 },
+    { 2225, -5350, 2550, -5350 }, { 2500, -8000, 2714, -8000 }, { 2536, 1500, 1250, 1500 },
+    { 2550, -5350, 2562, -5350 }, { 2550, -4750, 1575, -4750 }, { 2550, 500, 2588, 500 },
+    { 2550, 1100, 1575, 1100 }, { 2562, -5350, 2600, -5350 }, { 2562, 1100, 2550, 1100 },
+    { 2588, -4750, 2550, -4750 }, { 2588, 500, 2600, 500 }, { 2600, -5550, 2614, -5564 },
+    { 2600, -5379, 2600, -5550 }, { 2600, -5350, 2600, -5379 }, { 2600, -4750, 2588, -4750 },
+    { 2600, -4750, 2600, -4707 }, { 2600, -4707, 2600, -4450 }, { 2600, -4450, 2600, -4284 },
+    { 2600, -4284, 2600, -3288 }, { 2600, -3950, 3100, -3450 }, { 2600, -3122, 2600, -3288 },
+    { 2600, -2125, 2600, -3122 }, { 2600, -1959, 2600, -2125 }, { 2600, -962, 2600, -1959 },
+    { 2600, -962, 2600, 34 }, { 2600, 34, 2600, 200 }, { 2600, 200, 2643, 243 },
+    { 2600, 1100, 2562, 1100 }, { 2600, 1175, 2600, 1100 }, { 2600, 1200, 2600, 1175 },
+    { 2607, 493, 2600, 500 }, { 2614, -5564, 2700, -5650 }, { 2650, 250, 2643, 243 },
+    { 2650, 250, 2650, 421 }, { 2650, 421, 2650, 450 }, { 2650, 450, 2607, 493 },
+    { 2686, 1286, 2600, 1200 }, { 2700, -5650, 2843, -5650 }, { 2700, 1300, 2686, 1286 },
+    { 2714, -8000, 4000, -8000 }, { 2750, 1500, 2536, 1500 }, { 2843, -5650, 3700, -5650 },
+    { 3100, -3450, 3600, -2950 }, { 3100, -800, 2600, -300 }, { 3300, -2350, 3462, -2350 },
+    { 3300, -2274, 3300, -2350 }, { 3300, -1950, 3300, -2274 }, { 3462, -2350, 3500, -2350 },
+    { 3462, -1950, 3300, -1950 }, { 3500, -2350, 3538, -2331 }, { 3500, -1950, 3462, -1950 },
+    { 3538, -2331, 3700, -2250 }, { 3538, -1969, 3500, -1950 }, { 3557, 1300, 2700, 1300 },
+    { 3600, -2950, 3600, -2125 }, { 3600, -2125, 3600, -1300 }, { 3600, -1300, 3100, -800 },
+    { 3700, -5650, 3821, -5529 }, { 3700, -2250, 3700, -2088 }, { 3700, -2088, 3700, -2050 },
+    { 3700, -2050, 3538, -1969 }, { 3700, 1300, 3557, 1300 }, { 3821, -5529, 4550, -4800 },
+    { 3821, 1179, 3700, 1300 }, { 4000, -8000, 4250, -8000 }, { 4036, 1500, 2750, 1500 },
+    { 4100, -3774, 4100, -3850 }, { 4100, -3450, 4100, -3774 }, { 4100, -850, 4424, -850 },
+    { 4100, -774, 4100, -850 }, { 4100, -450, 4100, -774 }, { 4176, -3450, 4100, -3450 },
+    { 4176, -450, 4100, -450 }, { 4250, -8000, 5750, -8000 }, { 4250, 1500, 4036, 1500 },
+    { 4424, -3850, 4100, -3850 }, { 4424, -3850, 4500, -3850 }, { 4424, -850, 4500, -850 },
+    { 4464, 1500, 4250, 1500 }, { 4500, -3850, 4500, -3526 }, { 4500, -3526, 4500, -3450 },
+    { 4500, -3450, 4176, -3450 }, { 4500, -850, 4500, -526 }, { 4500, -526, 4500, -450 },
+    { 4500, -450, 4176, -450 }, { 4550, -4800, 5193, -4157 }, { 4550, 450, 3821, 1179 },
+    { 5193, -4157, 5300, -4050 }, { 5193, -193, 4550, 450 }, { 5300, -3941, 5300, -4050 },
+    { 5300, -3288, 5300, -3941 }, { 5300, -3288, 5300, -2291 }, { 5300, -2291, 5300, -2125 },
+    { 5300, -2125, 5300, -1128 }, { 5300, -1128, 5300, -962 }, { 5300, -962, 5300, -867 },
+    { 5300, -867, 5300, -300 }, { 5300, -300, 5193, -193 }, { 5750, -8000, 5750, -7714 },
+    { 5750, -7714, 5750, -6000 }, { 5750, -6000, 5750, -5714 }, { 5750, -5714, 5750, -4000 },
+    { 5750, -4000, 5750, -3714 }, { 5750, -3714, 5750, -2000 }, { 5750, -2000, 5750, -1714 },
+    { 5750, -1714, 5750, 0 }, { 5750, 0, 5750, 214 }, { 5750, 214, 5750, 1500 },
+    { 5750, 1500, 4464, 1500 },
+};
+
+// Port Blue, an oil rig's sea: level and deep, 15 m (kMaxDepth), in silt;
+// rising only round the platforms' and the ship's feet, as mounds about rig
+// legs, to meet their walls.
+constexpr float kPortBlueDepth = kMaxDepth;
+float port_blue_depth(float x, float z) {
+    const float d = edge_distance(kPortBlueShore, sizeof(kPortBlueShore) / sizeof(kPortBlueShore[0]), x, z);
+    return 95.0f + (kPortBlueDepth - 95.0f) * (1.0f - std::exp(-d / 250.0f));
+}
+
 // A course's floor: where its grid lies (its corner and its chunks each
-// way), its sand (a 32x32 RGBA16 block in one of the course's segments) and
+// way), its sand (a 32x32 RGBA16 block in one of the course's segments, or
+// made here, kMade) and
 // how it repeats (its render tile's settings: wrapped, or mirrored for a
 // texture whose edges do not meet -- wrapped, Dolphin Park's lined up into
 // stripes), and its depth.
 constexpr uint32_t kWrapped = 0x00014050u, kMirrored = 0x00054150u;  // 32x32, each way
+constexpr int kMade = -1;
 struct Floor {
     uint32_t course;
     float x0, z0;
@@ -488,6 +761,11 @@ constexpr Floor kFloors[] = {
     { 2, -12288.0f, -13312.0f, 24, 26, 14, 0x0800, kMirrored, sunset_depth },
     // The lower half of a Drake Lake bank's 32x64 texture: olive-brown mud.
     { 4, -7168.0f, -7168.0f, 14, 15, 14, 0x6800, kMirrored, drake_depth },
+    // Marine Fortress's green mossy rock, the top of its 32x64 texture.
+    { 3, -12288.0f, -12288.0f, 23, 28, 14, 0x2800, kMirrored, marine_depth },
+    // Port Blue has nothing like silt of its own -- metal, rust and signs --
+    // so it is made: see make_silt.
+    { 5, -11264.0f, -12288.0f, 21, 23, kMade, 0, kWrapped, port_blue_depth },
 };
 
 const Floor* floor_for(uint32_t course) {
@@ -555,6 +833,28 @@ struct Builder {
         at += 8;
     }
 };
+
+// A silt for a course without one of its own, at kMadeSand: 32x32 RGBA16,
+// grey-brown, softly mottled by waves whose periods divide the texture's
+// width, so that it wraps without a seam.
+void make_silt(uint8_t* rdram) {
+    for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            const float u = 6.2831853f * float(x) / 32.0f, v = 6.2831853f * float(y) / 32.0f;
+            float n = 0.45f * std::sin(u + 2.0f * v + 0.7f) + 0.35f * std::sin(3.0f * u - v + 1.9f) +
+                      0.25f * std::sin(2.0f * u + 5.0f * v + 4.1f) + 0.20f * std::sin(7.0f * u + 3.0f * v + 2.6f);
+            // A little grain from a hash of the texel.
+            uint32_t h = uint32_t(x * 73856093) ^ uint32_t(y * 19349663);
+            h ^= h >> 13; h *= 0x5BD1E995u; h ^= h >> 15;
+            n += (float(h & 0xFF) / 255.0f - 0.5f) * 0.35f;
+            const float shade = 1.0f + 0.12f * n;
+            const int r = std::clamp(int(92.0f * shade), 0, 255), g = std::clamp(int(86.0f * shade), 0, 255),
+                      b = std::clamp(int(70.0f * shade), 0, 255);
+            const uint16_t texel = uint16_t(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | 1);
+            *reinterpret_cast<uint16_t*>(rdram + ((kMadeSand + uint32_t(y * 32 + x) * 2) ^ 2)) = texel;
+        }
+    }
+}
 
 // Writes `floor`, its sand at physical `sand`; returns whether it fits and
 // the area was free.
@@ -629,11 +929,11 @@ bool build(uint8_t* rdram, const Floor& floor, uint32_t sand) {
             for (int j = 0; j <= kCells; ++j) {
                 for (int i = 0; i <= kCells; ++i) {
                     const float x = x0 + float(i) * kCell, z = z0 + float(j) * kCell;
-                    const float y = -floor.depth(x, z);
+                    const float y = -capped(floor.depth(x, z));
                     // The normal from the slope either way.
                     const float e = 40.0f;
-                    const float dx = (floor.depth(x + e, z) - floor.depth(x - e, z)) / (2 * e);
-                    const float dz = (floor.depth(x, z + e) - floor.depth(x, z - e)) / (2 * e);
+                    const float dx = (capped(floor.depth(x + e, z)) - capped(floor.depth(x - e, z))) / (2 * e);
+                    const float dz = (capped(floor.depth(x, z + e)) - capped(floor.depth(x, z - e))) / (2 * e);
                     const float nl = 1.0f / std::sqrt(dx * dx + 1.0f + dz * dz);
                     const float light = std::max(0.0f, (dx * lx + ly + dz * lz) * nl / ll);
                     const float shade = std::clamp(0.45f + 0.55f * light, 0.0f, 1.0f) * 235.0f;
@@ -765,7 +1065,13 @@ bool seafloor_height_at(uint32_t course, float x, float z, float* height) {
     if (seafloor_off() || floor == nullptr) return false;
     if (course == 0) {
         const float beach = kCliffFoot - kBeachSlope * std::max(0.0f, outside(kSolid[kCliff], x, z));
-        *height = std::max(-dolphin_depth(x, z), beach);
+        *height = std::max(-capped(dolphin_depth(x, z)), beach);
+        return true;
+    }
+    if (course == 3 || course == 5) {
+        // Walls, not shores: the floor everywhere (standing on a wall's top
+        // is the course's collision's to say).
+        *height = -capped(floor->depth(x, z));
         return true;
     }
     if (course == 2 || course == 4) {
@@ -775,7 +1081,7 @@ bool seafloor_height_at(uint32_t course, float x, float z, float* height) {
         if (d <= 0.0f) {
             *height = std::min(-d * kSunnyBeachSlope, 50.0f);
         } else {
-            *height = -floor->depth(x, z);
+            *height = -capped(floor->depth(x, z));
             if (course == 2 && d < kSunsetBank) *height = std::max(*height, -d * kSunsetBankSlope);
         }
         return true;
@@ -787,10 +1093,16 @@ bool seafloor_height_at(uint32_t course, float x, float z, float* height) {
     if (shore.distance <= 0.0f) {
         *height = std::min(-shore.distance * kSunnyBeachSlope, shore.sandbar ? 20.0f : 50.0f);
     } else {
-        *height = -sunny_depth(x, z);
+        *height = -capped(sunny_depth(x, z));
         if (shore.distance < kBeachReach) *height = std::max(*height, -shore.distance * kSunnyBeachSlope);
     }
     return true;
+}
+
+// Whether what stands out of the water on course `course` is walls, too
+// tall to be flown over: Marine Fortress's and Port Blue's.
+bool course_has_walls(uint32_t course) {
+    return course == 3 || course == 5;
 }
 
 // How far (x, z) is from anything solid standing out of the water on course
@@ -811,6 +1123,9 @@ float course_clearance(uint32_t course, float x, float z) {
     // (Drake Lake's walked on further in, its island all through: landing
     // on it, the swim back found no way off.)
     if (course == 4) return drake_shore(x, z) + kDrakeLandEdge;
+    // Marine Fortress's and Port Blue's walls, gone round.
+    if (course == 3) return edge_distance(kMarineShore, sizeof(kMarineShore) / sizeof(kMarineShore[0]), x, z);
+    if (course == 5) return edge_distance(kPortBlueShore, sizeof(kPortBlueShore) / sizeof(kPortBlueShore[0]), x, z);
     if (course != 0) return nearest;
     for (const Outline& o : kSolid) nearest = std::min(nearest, outside(o, x, z));
     for (size_t i = 1; i < sizeof(kShore) / sizeof(kShore[0]); ++i) {
@@ -839,14 +1154,16 @@ uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[
     dump_textures(rdram, course, segments);
     const Floor* floor = floor_for(course);
     const uint32_t segment13 = segments[13];
-    if (seafloor_off() || floor == nullptr || segment13 == 0 || segments[floor->sand_segment] == 0) return 0;
-    const uint32_t sand = segments[floor->sand_segment] + floor->sand;
+    const bool made = floor != nullptr && floor->sand_segment == kMade;
+    if (seafloor_off() || floor == nullptr || segment13 == 0 || (!made && segments[floor->sand_segment] == 0)) return 0;
+    const uint32_t sand = made ? kMadeSand : segments[floor->sand_segment] + floor->sand;
     static uint32_t built_course = ~0u, built_sand = 0;
     static bool ok = false;
     if (built_course != course || built_sand != sand) {
         built_course = course;
         built_sand = sand;
         ok = build(rdram, *floor, sand);
+        if (ok && made) make_silt(rdram);
     }
     if (!ok) return 0;
     if (course == 1) {
