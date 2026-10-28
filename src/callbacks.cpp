@@ -64,6 +64,8 @@ RspExitReason aspMain_run(uint8_t* rdram, uint32_t ucode_addr);
 namespace wr64 {
 std::atomic<float> g_stick_x{ 0.0f };
 float last_stick_x() { return g_stick_x.load(std::memory_order_relaxed); }
+// patches/swim_back.cpp: a debug wipe-out (F3).
+void swim_request_throw();
 }
 
 namespace {
@@ -871,6 +873,7 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
             if (event->key.keysym.sym == SDLK_F5) wr64::vr::toggle_first_person();
             if (event->key.keysym.sym == SDLK_F6) wr64::vr::recenter();
             if (event->key.keysym.sym == SDLK_F4) wr64::vr::recover();
+            if (event->key.keysym.sym == SDLK_F3) wr64::swim_request_throw();
             if (event->key.keysym.sym == SDLK_F7) wr64::vr::cycle_debug_offset();
             if (event->key.keysym.sym == SDLK_F8) wr64::vr::cycle_stereo();
         }

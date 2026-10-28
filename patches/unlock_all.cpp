@@ -3,14 +3,15 @@
 // The game keeps what the player has opened in two bytes of the save it
 // reads into memory (USA Rev A, physical): the courses -- 0x16 is all of
 // them, Glacier Coast and Southern Island too -- and the difficulties, bits
-// for Hard, Expert and the dolphin to ride (0x13, all three). With the Debug
+// for Hard, Expert, Reverse, the time trials' harder ones and the dolphin
+// (0x1F, all of them). With the Debug
 // tab's switch on (or WR64_UNLOCK_ALL=1), both are set every frame, so any
 // course can be picked in Time Trials and any difficulty in Championship,
 // whatever has been won or erased. The game may write them into the save
 // when it next saves: switching off leaves what it saved.
 //
 // The addresses and values are the published GameShark codes for this
-// version (801CB28B 0016, 801CB280 0013).
+// version (801CB28B 0016, 801CB280 001F).
 
 #include <atomic>
 #include <cstdint>
@@ -21,7 +22,7 @@ namespace wr64 {
 namespace {
 
 constexpr uint32_t kOpenCourses = 0x1CB28B, kOpenDifficulties = 0x1CB280;
-constexpr uint8_t kAllCourses = 0x16, kAllDifficulties = 0x13;
+constexpr uint8_t kAllCourses = 0x16, kAllDifficulties = 0x1F;
 
 std::atomic<bool> g_unlock{ std::getenv("WR64_UNLOCK_ALL") != nullptr && std::getenv("WR64_UNLOCK_ALL")[0] == '1' };
 

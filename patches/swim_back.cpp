@@ -16,7 +16,9 @@
 // throw or a climb, and each refusal now and then; WR64_TEST_THROW=<seconds>
 // throws the human's rider every so many seconds of riding, by setting that
 // countdown to 1 -- in scripted test runs only (WR64_INPUT_SCRIPT), as is
-// WR64_TEST_FINISH=<seconds>, which marks the rider finished.
+// WR64_TEST_FINISH=<seconds>, which marks the rider finished. X on the
+// controllers (F3) throws the human's rider at once, the same way: a debug
+// wipe-out, for looking round the seafloors.
 
 #include "recomp.h"
 
@@ -42,6 +44,7 @@ constexpr uint32_t kGameState = 0x0DAB24;
 constexpr int32_t kRiding = 22, kThrown = 23, kClimbing = 7;
 
 std::atomic<bool> g_holding{ false };
+std::atomic<bool> g_throw_asked{ false };
 
 int32_t& word(uint8_t* rdram, uint32_t physical) { return *reinterpret_cast<int32_t*>(rdram + physical); }
 uint16_t& half(uint8_t* rdram, uint32_t physical) { return *reinterpret_cast<uint16_t*>(rdram + (physical ^ 2)); }
@@ -57,6 +60,11 @@ bool racing(uint8_t* rdram) {
 }
 
 }  // namespace
+
+// X on the controllers, F3: the human's rider thrown off next frame it rides.
+void swim_request_throw() {
+    g_throw_asked.store(true, std::memory_order_relaxed);
+}
 
 // From src/first_person.cpp, each frame of a race in first person.
 void swim_set_holding(bool holding) {
@@ -87,6 +95,20 @@ void swim_animation_hook(uint8_t* rdram, recomp_context* ctx) {
 // and WR64_TEST_THROW's throws.
 void swim_frame(uint8_t* rdram) {
     if (!racing(rdram)) g_holding.store(false, std::memory_order_relaxed);
+
+    // A debug wipe-out asked for: thrown as soon as the rider is riding.
+    if (g_throw_asked.load(std::memory_order_relaxed)) {
+        const uint32_t state = kRiderState + uint32_t(human_slot(rdram)) * kRiderStateStride;
+        if (!racing(rdram)) {
+            g_throw_asked.store(false, std::memory_order_relaxed);
+        }
+        else if (word(rdram, state + kAnimation) == kRiding) {
+            half(rdram, state + kThrowCountdown) = 1;
+            g_throw_asked.store(false, std::memory_order_relaxed);
+            std::fprintf(stderr, "[wr64-swim] wiped out on request\n");
+            std::fflush(stderr);
+        }
+    }
 
     // WR64_TEST_FINISH=<seconds>, in a scripted test run only: the human's
     // rider marked finished (its race record's +0x2F4, as

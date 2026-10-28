@@ -28,6 +28,14 @@
 #include "librecomp/overlays.hpp"
 
 #include <cstdio>
+#include <cstdlib>
+
+// WR64_DMA_LOG=1: every transfer from the cartridge reported, not just the
+// first twenty.
+static bool dma_log_all() {
+    static const bool on = std::getenv("WR64_DMA_LOG") != nullptr;
+    return on;
+}
 
 // librecomp's implementation, which does the actual transfer.
 extern "C" void osPiStartDma_recomp(uint8_t* rdram, recomp_context* ctx);
@@ -61,7 +69,7 @@ void pi_start_dma_hook(uint8_t* rdram, recomp_context* ctx) {
     load_overlays(rom_offset, static_cast<int32_t>(dram_addr), size);
 
     static int calls = 0;
-    if (++calls <= 20) {
+    if (++calls <= 20 || dma_log_all()) {
         std::fprintf(stderr, "[wr64-dma] #%d rom 0x%06X -> ram 0x%08X size 0x%X\n",
                      calls, rom_offset, static_cast<uint32_t>(dram_addr), size);
         std::fflush(stderr);
@@ -111,6 +119,10 @@ extern "C" void game_dma_copy(uint8_t* rdram, recomp_context* ctx) {
 
     recomp::do_rom_read(rdram, ram_addr, physical_addr, size);
     load_overlays(rom_offset, static_cast<int32_t>(ram_addr), size);
+    if (dma_log_all()) {
+        std::fprintf(stderr, "[wr64-dma] copy rom 0x%06X -> ram 0x%08X size 0x%X\n", rom_offset, ram_arg | 0x80000000u, size);
+        std::fflush(stderr);
+    }
 
     ctx->r2 = 0;
 }

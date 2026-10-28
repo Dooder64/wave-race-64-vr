@@ -105,6 +105,8 @@ void body_splash_note(bool riding, float hull_x, float hull_z, float hull_water,
 bool seafloor_height_at(uint32_t course, float x, float z, float* height);
 float course_clearance(uint32_t course, float x, float z);
 bool course_has_walls(uint32_t course);
+// src/companions.cpp: the player's rider's riding pose, for the companions.
+void companion_note_pose(const uint8_t* rdram, uint32_t parts, int32_t animation);
 namespace water {
 // src/water.cpp: the course's solid ground, and the skidding body's spray.
 bool ground_height_at(float x, float z, float below, float* height);
@@ -1272,6 +1274,9 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
     const uint32_t slot = human_slot(rdram);
     const uint32_t parts = segment3 + kRiderParts + slot * kRiderStride;
     trace_frame(rdram, parts, slot);
+    // The rider's riding pose, for the companions on the water (before the
+    // body is shrunk away below).
+    companion_note_pose(rdram, parts, *reinterpret_cast<const int32_t*>(rdram + kRiderState + slot * kRiderStateStride + kAnimation));
     if (!vr::first_person()) {
         g_swim.phase = Swim::Riding;
         swim_set_holding(false);

@@ -162,6 +162,9 @@ bool fish_rewrite(uint8_t* rdram, const uint32_t segments[16], uint32_t course, 
                   std::vector<std::pair<uint32_t, uint32_t>>& out);
 void fish_field(uint8_t* rdram, const uint32_t segments[16], uint32_t course,
                 std::vector<std::pair<uint32_t, uint32_t>>& out);
+// src/companions.cpp: the fellow riders on the water, after the player's.
+void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t course,
+                     std::vector<std::pair<uint32_t, uint32_t>>& out);
 // patches/swim_back.cpp: once a frame.
 void swim_frame(uint8_t* rdram);
 // patches/unlock_all.cpp: once a frame.
@@ -2068,6 +2071,33 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
     wr64::water::begin_frame(list_vaddr);
     trace_3d(rdram, list_vaddr, state);
     survey_frame(rdram, list_vaddr, state);
+    // WR64_RAM_DUMP=<file>: the whole of RDRAM written out once, 300 race
+    // frames in, for looking at what the game holds where.
+    if (racing(state)) {
+        static const char* ram_dump = std::getenv("WR64_RAM_DUMP");
+        static int race_frames = 0;
+        ++race_frames;
+        // WR64_3D_TRACE_REWRITTEN=<file>: the last frame's list as rewritten
+        // (still in the scratch space), traced as WR64_3D_TRACE traces the
+        // game's, at the same moment.
+        static const char* rewritten = std::getenv("WR64_3D_TRACE_REWRITTEN");
+        if (rewritten != nullptr && race_frames == 300) {
+            if (std::FILE* one = std::fopen(rewritten, "w")) {
+                Tracer t{};
+                t.rdram = rdram;
+                t.f = one;
+                t.walk(kScratch & 0x00FFFFFFu, 0);
+                std::fclose(one);
+            }
+        }
+        if (ram_dump != nullptr && race_frames == 300) {
+            if (FILE* f = std::fopen(ram_dump, "wb")) {
+                std::fwrite(rdram, 1, 0x800000, f);
+                std::fclose(f);
+                std::fprintf(stderr, "[wr64] RDRAM written to %s\n", ram_dump);
+            }
+        }
+    }
     wr64::swim_frame(rdram);
     wr64::unlock_frame(rdram);
 
@@ -2317,6 +2347,15 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
                     if (const uint32_t splash = wr64::body_splash_list(rdram, w.physical(w1), w.segments[5], w.segments[3])) {
                         w.emit(uint32_t(kOpDisplayList) << 24, splash);
                     }
+                }
+                // Fellow riders out on the water (src/companions.cpp), drawn
+                // as the player's rider is, just after it.
+                if (w1 == 0x02000000u && racing(state)) {
+                    static std::vector<std::pair<uint32_t, uint32_t>> companions;
+                    companions.clear();
+                    const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));
+                    wr64::companions_draw(rdram, w.segments, course, companions);
+                    for (const auto& [a, b] : companions) w.emit(a, b);
                 }
             }
             if (modern_water) w.water_material(false);
