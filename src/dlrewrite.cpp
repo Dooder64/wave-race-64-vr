@@ -169,6 +169,7 @@ void unlock_frame(uint8_t* rdram);
 // src/seafloor.cpp: the list drawing the course's seafloor, and an identity
 // matrix to draw it under; or 0.
 uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[16], uint32_t* identity);
+bool seafloor_only_below(uint32_t course);
 }
 
 namespace {
@@ -739,7 +740,10 @@ struct Walker {
         if (list == kSkyFloorList && racing(state)) {
             uint32_t identity = 0;
             const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));
-            const uint32_t floor = wr64::seafloor_list(rdram, course, segments, &identity);
+            // (A course whose floor shows only from below the waves: only
+            // with the first-person eye there, haze_list set at the view.)
+            const bool shown = !wr64::seafloor_only_below(course) || haze_list != 0;
+            const uint32_t floor = shown ? wr64::seafloor_list(rdram, course, segments, &identity) : 0;
             if (floor != 0) {
                 const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
                 emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);

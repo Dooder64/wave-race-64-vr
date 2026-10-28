@@ -1,5 +1,7 @@
-// Sand seafloors under Dolphin Park and Sunny Beach, and the water's fog
-// round an eye below the waves.
+// Seafloors under Dolphin Park, Sunny Beach, Sunset Bay (sand) and Drake
+// Lake (mud), and the water's fog round an eye below the waves. Sunset Bay
+// and Drake Lake are floored the same way as Sunny Beach, from shores
+// measured the same way; see their depths below.
 //
 // The game draws nothing under its water but a flat textured floor at the
 // water's own level, so the water looks bottomless everywhere and a view
@@ -198,8 +200,29 @@ constexpr Edge kMainland[] = {
 constexpr float kBeachReach = 400.0f, kSunnyBeachSlope = 50.0f / 400.0f;
 constexpr float kSunnyBuoys = 1700.0f, kSunnyShelfEnd = 3.0f * kSunnyBuoys;
 constexpr float kSandbarEnd = 5900.0f;
-// How far the mainland's beach goes up from the water before its hills.
-constexpr float kMainlandBeach = 500.0f;
+// How far the mainland's beach goes up from the water before its hills;
+// how far elsewhere the land is walked on before it counts as solid.
+constexpr float kMainlandBeach = 500.0f, kLandEdge = 100.0f;
+
+// Whether one of `count` shore edges is nearer (x, z) than `best` (squared,
+// 1e18 to begin with); if so `best` and `distance` become its -- positive in
+// the water, negative on land.
+bool nearer_shore(const Edge* edges, size_t count, float x, float z, float& best, float& distance) {
+    bool nearer = false;
+    for (size_t i = 0; i < count; ++i) {
+        const Edge& e = edges[i];
+        const float ex = e.bx - e.ax, ez = e.bz - e.az;
+        const float t = std::clamp(((x - e.ax) * ex + (z - e.az) * ez) / std::max(ex * ex + ez * ez, 1e-3f), 0.0f, 1.0f);
+        const float dx = x - e.ax - t * ex, dz = z - e.az - t * ez;
+        const float squared = dx * dx + dz * dz;
+        if (squared >= best) continue;
+        best = squared;
+        const bool land = ex * (z - e.az) - ez * (x - e.ax) > 0.0f;
+        distance = land ? -std::sqrt(squared) : std::sqrt(squared);
+        nearer = true;
+    }
+    return nearer;
+}
 
 // How far (x, z) is from Sunny Beach's nearest shore, positive in the
 // water and negative on land; and whether that shore is the sandbar's.
@@ -207,21 +230,8 @@ struct Shore { float distance; bool sandbar; };
 Shore sunny_shore(float x, float z) {
     Shore nearest{ 1e9f, false };
     float best = 1e18f;
-    const auto look = [&](const Edge* edges, size_t count, bool sandbar) {
-        for (size_t i = 0; i < count; ++i) {
-            const Edge& e = edges[i];
-            const float ex = e.bx - e.ax, ez = e.bz - e.az;
-            const float t = std::clamp(((x - e.ax) * ex + (z - e.az) * ez) / std::max(ex * ex + ez * ez, 1e-3f), 0.0f, 1.0f);
-            const float dx = x - e.ax - t * ex, dz = z - e.az - t * ez;
-            const float squared = dx * dx + dz * dz;
-            if (squared >= best) continue;
-            best = squared;
-            const bool land = ex * (z - e.az) - ez * (x - e.ax) > 0.0f;
-            nearest = { land ? -std::sqrt(squared) : std::sqrt(squared), sandbar };
-        }
-    };
-    look(kSandbar, sizeof(kSandbar) / sizeof(kSandbar[0]), true);
-    look(kMainland, sizeof(kMainland) / sizeof(kMainland[0]), false);
+    nearest.sandbar = nearer_shore(kSandbar, sizeof(kSandbar) / sizeof(kSandbar[0]), x, z, best, nearest.distance);
+    if (nearer_shore(kMainland, sizeof(kMainland) / sizeof(kMainland[0]), x, z, best, nearest.distance)) nearest.sandbar = false;
     return nearest;
 }
 
@@ -242,6 +252,188 @@ float sunny_depth(float x, float z) {
     depth += in_channel * channel + (1.0f - in_channel) * sea;
     return depth + swells(x, z) * smoothstep(kBeachReach, kBeachReach + 500.0f, d) *
                        (1.0f - smoothstep(kSunnyShelfEnd, kSunnyShelfEnd + 500.0f, d));
+}
+
+// Sunset Bay (course 2): a long island with the town on it and a pier out
+// to an islet at either side, the open sea all round, past a row of buoys
+// some 1600 units off. Its banks are steep, 60 units down within 30 of the
+// water's edge; past them the floor slopes as Dolphin Park's does, on past
+// the buoys to three times their distance, and there falls away.
+constexpr Edge kSunsetShore[] = {
+    { -3798, -2658, -3798, -2518 }, { -3798, -2518, -3798, -2308 }, { -3798, -2308, -3780, -2248 },
+    { -3798, 542, -3798, 682 }, { -3798, 682, -3798, 892 }, { -3798, 892, -3780, 952 },
+    { -3780, -2248, -3760, -2188 }, { -3780, 952, -3760, 1012 }, { -3760, -2188, -3720, -2188 },
+    { -3760, 1012, -3720, 1012 }, { -3758, -2758, -3798, -2658 }, { -3758, 442, -3798, 542 },
+    { -3725, -2833, -3758, -2758 }, { -3725, 367, -3758, 442 }, { -3720, -2188, -3690, -2188 },
+    { -3720, 1012, -3690, 1012 }, { -3690, -2188, -3672, -2248 }, { -3690, 1012, -3672, 952 },
+    { -3685, -2733, -3725, -2833 }, { -3685, 467, -3725, 367 }, { -3672, -2248, -3652, -2308 },
+    { -3672, 952, -3652, 892 }, { -3652, -2658, -3685, -2733 }, { -3652, -2448, -3652, -2658 },
+    { -3652, -2308, -3652, -2448 }, { -3652, 542, -3685, 467 }, { -3652, 752, -3652, 542 },
+    { -3652, 892, -3652, 752 }, { -2154, 1920, -2121, 1484 }, { -2136, 2070, -2154, 1920 },
+    { -2121, 1484, -2114, 1320 }, { -2118, -1680, -2068, -2055 }, { -2118, -1500, -2118, -1680 },
+    { -2118, -1500, -2100, -1080 }, { -2114, 1320, -2048, 900 }, { -2107, 120, -2037, -300 },
+    { -2100, -1080, -2062, -880 }, { -2080, 345, -2107, 120 }, { -2068, -2055, -2039, -2280 },
+    { -2065, 2520, -2136, 2070 }, { -2048, 900, -2018, 720 }, { -2039, -2280, -2025, -2700 },
+    { -2037, -300, -2012, -480 }, { -2028, 2970, -2065, 2520 }, { -2025, -4110, -2010, -4290 },
+    { -2025, -3750, -2025, -4110 }, { -2025, -3510, -2025, -3750 }, { -2025, -3132, -2025, -3510 },
+    { -2025, -2880, -2025, -3132 }, { -2025, -2880, -2025, -2700 }, { -2018, 720, -2080, 345 },
+    { -2018, 3645, -2014, 3120 }, { -2014, 3120, -2028, 2970 }, { -2012, -480, -2062, -880 },
+    { -2010, -4290, -2000, -4410 }, { -2004, 3849, -2018, 3645 }, { -2000, -4410, -1985, -4512 },
+    { -1989, 3888, -2004, 3849 }, { -1985, -4512, -1975, -4580 }, { -1975, -4580, -1945, -4652 },
+    { -1954, 3979, -1989, 3888 }, { -1945, -4652, -1925, -4700 }, { -1925, -4700, -1895, -4730 },
+    { -1909, 4000, -1954, 3979 }, { -1895, -4730, -1875, -4750 }, { -1875, -4750, -1815, -4750 },
+    { -1822, -3071, -1685, -3071 }, { -1815, -4750, -1775, -4750 }, { -1804, 4049, -1909, 4000 },
+    { -1775, -4750, -1745, -4720 }, { -1745, -4720, -1725, -4700 }, { -1725, -4700, -1695, -4628 },
+    { -1709, -3412, -1491, -3130 }, { -1695, -4628, -1675, -4580 }, { -1685, -3071, -1667, -3254 },
+    { -1675, -4580, -1660, -4478 }, { -1667, -3254, -1640, -3520 }, { -1660, -4478, -1650, -4410 },
+    { -1650, -4410, -1635, -4230 }, { -1635, -4230, -1625, -4110 }, { -1634, -3756, -1640, -3520 },
+    { -1625, -4110, -1634, -3756 }, { -1491, -3130, -1176, -2935 }, { -1384, 4032, -1804, 4049 },
+    { -1225, 4034, -1384, 4032 }, { -1176, -2935, -1045, -2554 }, { -1075, 4054, -1225, 4034 },
+    { -1045, -2554, -945, -2341 }, { -945, -2341, -692, -2018 }, { -725, 4089, -1075, 4054 },
+    { -692, -2018, -422, -1678 }, { -532, -390, -454, -121 }, { -472, -740, -532, -390 },
+    { -454, -121, -382, 299 }, { -422, -1678, -392, -1448 }, { -408, 635, -408, 1009 },
+    { -408, 1009, -383, 1231 }, { -393, 1597, -678, 1588 }, { -393, 1597, -308, 1884 },
+    { -392, -1448, -392, -1091 }, { -392, -1091, -472, -740 }, { -383, 1231, -559, 1607 },
+    { -382, 299, -408, 635 }, { -375, 4082, -725, 4089 }, { -308, 1884, -223, 2172 },
+    { -223, 2172, -8, 2382 }, { -25, 4070, -375, 4082 }, { -8, 2382, 207, 2591 },
+    { 207, 2591, 422, 2801 }, { 275, 4070, -25, 4070 }, { 422, 2801, 636, 3011 },
+    { 575, 4070, 275, 4070 }, { 636, 3011, 850, 3220 }, { 850, 3220, 1065, 3430 },
+    { 875, 4070, 575, 4070 }, { 1065, 3430, 1485, 3550 }, { 1175, 4070, 875, 4070 },
+    { 1475, 4070, 1175, 4070 }, { 1485, 3550, 1905, 3670 }, { 1775, 4070, 1475, 4070 },
+    { 1905, 3670, 2205, 3670 }, { 2075, 4070, 1775, 4070 }, { 2205, 3670, 2505, 3670 },
+    { 2375, 4070, 2075, 4070 }, { 2505, 3670, 2715, 3670 }, { 2675, 4070, 2375, 4070 },
+    { 2715, 3670, 2925, 3670 }, { 2925, 3670, 3075, 3670 }, { 2975, 4070, 2675, 4070 },
+    { 3075, 3670, 3225, 3670 }, { 3095, 4070, 2975, 4070 }, { 3215, 4070, 3095, 4070 },
+    { 3225, 3670, 3274, 3692 }, { 3270, 4045, 3215, 4070 }, { 3274, 3692, 3323, 3715 },
+    { 3323, 3715, 3349, 3769 }, { 3325, 4020, 3270, 4045 }, { 3349, 3769, 3375, 3823 },
+    { 3352, 3966, 3325, 4020 }, { 3375, 3823, 3377, 3868 }, { 3377, 3868, 3379, 3913 },
+    { 3379, 3913, 3352, 3966 },
+};
+constexpr float kSunsetBank = 30.0f, kSunsetBankSlope = 60.0f / 30.0f;
+constexpr float kSunsetBuoys = 1600.0f, kSunsetShelfEnd = 3.0f * kSunsetBuoys;
+
+float sunset_shore(float x, float z) {
+    float best = 1e18f, distance = 1e9f;
+    nearer_shore(kSunsetShore, sizeof(kSunsetShore) / sizeof(kSunsetShore[0]), x, z, best, distance);
+    return distance;
+}
+
+float sunset_depth(float x, float z) {
+    const float d = sunset_shore(x, z);
+    if (d <= 0.0f) return 70.0f;
+    const float past = std::max(0.0f, d - kSunsetBank);
+    return 10.0f + kSunsetBankSlope * std::min(d, kSunsetBank) + 300.0f * (1.0f - std::exp(-past / 1100.0f)) +
+           shelf_and_drop(d, kSunsetBuoys, kSunsetShelfEnd) +
+           swells(x, z) * smoothstep(kSunsetBank, kSunsetBank + 500.0f, d) * (1.0f - smoothstep(kSunsetShelfEnd, kSunsetShelfEnd + 500.0f, d));
+}
+
+// Drake Lake (course 4): a lake, a ring of water between its outer shore and
+// a long inner bank with more water inside it, and a small island. Its
+// banks are walls going straight down to some 450 units. The whole of it is
+// floored like Sunny Beach's channel: a little under the water at the banks'
+// feet, then dropping steeply to some 11 m away from them.
+constexpr Edge kDrakeShore[] = {
+    { -4997, -1114, -5031, -543 }, { -4997, -1114, -4983, -1342 }, { -4976, -443, -5031, -543 },
+    { -4976, -443, -4643, 157 }, { -4870, -1507, -4983, -1342 }, { -4838, 1324, -4816, 2035 },
+    { -4816, 2035, -4813, 2124 }, { -4756, 2223, -4813, 2124 }, { -4660, 710, -4838, 1324 },
+    { -4660, 710, -4616, 556 }, { -4643, 157, -4623, 456 }, { -4623, 456, -4616, 556 },
+    { -4616, -2797, -4570, -3252 }, { -4616, -2797, -4559, -2267 }, { -4570, -3252, -4536, -3593 },
+    { -4559, -2267, -4530, -2002 }, { -4530, -2002, -4870, -1507 }, { -4451, -3727, -4536, -3593 },
+    { -4414, 2817, -4756, 2223 }, { -4373, 3114, -4414, 2817 }, { -4373, 3114, -4292, 3709 },
+    { -4279, 3808, -4292, 3709 }, { -4279, 3808, -4198, 4402 }, { -4224, -4084, -4451, -3727 },
+    { -4198, 4402, -3874, 4908 }, { -4120, -4247, -4224, -4084 }, { -3913, -4572, -4120, -4247 },
+    { -3913, -4572, -3361, -4808 }, { -3883, 1306, -3858, 1210 }, { -3883, 1306, -3649, 1665 },
+    { -3874, 4908, -3766, 5076 }, { -3809, -1002, -3807, -902 }, { -3809, -1002, -3741, -1154 },
+    { -3807, -902, -3800, -502 }, { -3800, -502, -3700, -369 }, { -3759, 828, -3858, 1210 },
+    { -3741, -1154, -3403, -1917 }, { -3621, 5301, -3766, 5076 }, { -3621, 5301, -3332, 5752 },
+    { -3610, 1725, -3649, 1665 }, { -3610, 1725, -3557, 2054 }, { -3599, -2897, -3558, -2915 },
+    { -3599, -2897, -3533, -3413 }, { -3595, 3215, -3558, 3288 }, { -3555, 484, -3759, 828 },
+    { -3546, 2467, -3595, 3215 }, { -3533, -3413, -3241, -3450 }, { -3530, 2218, -3557, 2054 },
+    { -3530, 2218, -3546, 2467 }, { -3504, 398, -3555, 484 }, { -3502, 23, -3504, 398 },
+    { -3501, -102, -3700, -369 }, { -3501, -102, -3502, 23 }, { -3483, 1106, -3230, 1494 },
+    { -3474, 1070, -3483, 1106 }, { -3409, 3582, -3558, 3288 }, { -3409, 3582, -3023, 3685 },
+    { -3403, -1917, -3599, -2897 }, { -3401, -740, -3409, -1202 }, { -3401, -740, -3400, -702 },
+    { -3394, -1236, -3409, -1202 }, { -3394, -1236, -3206, -1659 }, { -3361, -4808, -3177, -4886 },
+    { -3359, 628, -3474, 1070 }, { -3340, 596, -3359, 628 }, { -3275, 5787, -3332, 5752 },
+    { -3275, 5787, -2820, 6065 }, { -3266, -4975, -3377, -5086 }, { -3241, -3450, -2764, -3298 },
+    { -3230, 1494, -3210, 1525 }, { -3199, -3097, -3108, -2644 }, { -3195, 3015, -3023, 3354 },
+    { -3193, 2978, -3195, 3015 }, { -3193, 2978, -3162, 2517 }, { -3191, -1693, -3206, -1659 },
+    { -3191, -1693, -3003, -2117 }, { -3177, -4886, -3266, -4975 }, { -3160, 2480, -3162, 2517 },
+    { -3136, 1981, -3210, 1525 }, { -3136, 1981, -3130, 2018 }, { -3130, 2018, -3160, 2480 },
+    { -3123, -332, -3400, -702 }, { -3123, -332, -3101, -302 }, { -3108, -2644, -3101, -2607 },
+    { -3104, 160, -3104, 198 }, { -3104, 160, -3101, -302 }, { -3104, 198, -3340, 596 },
+    { -3101, -2607, -3010, -2154 }, { -3023, 3354, -3009, 3382 }, { -3010, -2154, -3003, -2117 },
+    { -3009, 3382, -2562, 3501 }, { -2926, 3711, -3023, 3685 }, { -2926, 3711, -2822, 3780 },
+    { -2822, 3780, -2510, 3988 }, { -2764, -3298, -2365, -2998 }, { -2649, 6169, -2820, 6065 },
+    { -2562, 3501, -2526, 3511 }, { -2510, 3988, -2425, 4041 }, { -2425, 4041, -2083, 4254 },
+    { -2393, -4710, -3177, -4886 }, { -2370, 3615, -2526, 3511 }, { -2365, -2998, -1882, -2868 },
+    { -2308, 6377, -2649, 6169 }, { -2308, 6377, -1860, 6651 }, { -2302, 4126, -2510, 3988 },
+    { -2093, 4264, -2302, 4126 }, { -2083, 4254, -2510, 3988 }, { -2043, 4214, -2037, 4139 },
+    { -2043, 4214, -1617, 4364 }, { -2008, 3803, -2037, 4139 }, { -1966, -5609, -2526, -5594 },
+    { -1882, -2868, -1399, -2738 }, { -1879, 6805, -1876, 6805 }, { -1879, 6805, -1482, 6805 },
+    { -1876, 6805, -1479, 6805 }, { -1860, 6651, -1711, 6742 }, { -1850, 4324, -2093, 4264 },
+    { -1726, -5616, -1966, -5609 }, { -1617, 4364, -1613, 4365 }, { -1615, -4536, -2393, -4710 },
+    { -1613, 4365, -1611, 4363 }, { -1610, 4361, -1611, 4363 }, { -1608, 4383, -1850, 4324 },
+    { -1576, 6502, -1966, 6586 }, { -1542, -3470, -1512, -3475 }, { -1512, -3475, -596, -3658 },
+    { -1482, 6805, -1479, 6805 }, { -1450, -3103, -1542, -3470 }, { -1450, -3095, -1450, -3103 },
+    { -1399, -2738, -949, -2519 }, { -1361, 4344, -1608, 4383 }, { -1184, 6418, -1576, 6502 },
+    { -1114, 4305, -1361, 4344 }, { -1026, -5631, -1726, -5616 }, { -949, -2519, -500, -2300 },
+    { -870, 4170, -1114, 4305 }, { -848, 6200, -1184, 6418 }, { -821, -4442, -1615, -4536 },
+    { -726, -5637, -1026, -5631 }, { -626, 4034, -870, 4170 }, { -596, -3658, -542, -3658 },
+    { -542, -3658, 305, -3612 }, { -512, 5984, -848, 6200 }, { -500, -2300, -23, -2196 },
+    { -378, 3998, -626, 4034 }, { -304, -2609, -1450, -3095 }, { -266, 5942, -512, 5984 },
+    { -250, -2593, -304, -2609 }, { -131, 3962, -378, 3998 }, { -27, -5652, -726, -5637 },
+    { -27, -4347, -821, -4442 }, { -23, -2196, 468, -2287 }, { -20, 5901, -266, 5942 },
+    { 116, 3926, -131, 3962 }, { 227, 5860, -20, 5901 }, { 273, -5658, -27, -5652 },
+    { 305, -3612, 347, -3599 }, { 347, -3599, 1242, -3288 }, { 363, 3890, 116, 3926 },
+    { 438, -2639, -250, -2593 }, { 462, -2635, 438, -2639 }, { 463, -2059, 816, -2114 },
+    { 468, -2287, 957, -2393 }, { 474, 5818, 227, 5860 }, { 610, 3854, 363, 3890 },
+    { 720, 5778, 474, 5818 }, { 768, -4253, -27, -4347 }, { 816, -2114, 957, -2228 },
+    { 858, 3818, 610, 3854 }, { 957, -2393, 1451, -2471 }, { 957, -2228, 1015, -2237 },
+    { 966, 5736, 720, 5778 }, { 973, -5673, 273, -5658 }, { 1015, -2237, 1451, -2306 },
+    { 1106, 3782, 858, 3818 }, { 1213, 5696, 966, 5736 }, { 1242, -3288, 1242, -3279 },
+    { 1242, -3279, 1425, -2912 }, { 1273, -5680, 973, -5673 }, { 1353, 3747, 1106, 3782 },
+    { 1379, -2901, 462, -2635 }, { 1383, -2430, 1880, -2727 }, { 1425, -2912, 1379, -2901 },
+    { 1451, -2306, 1532, -2332 }, { 1460, 5654, 1213, 5696 }, { 1541, -4429, 768, -4253 },
+    { 1600, 3711, 1353, 3747 }, { 1706, 5612, 1460, 5654 }, { 1848, 3675, 1600, 3711 },
+    { 1880, -2727, 2311, -2981 }, { 1953, 5572, 1706, 5612 }, { 1973, -5695, 1273, -5680 },
+    { 2096, 3639, 1848, 3675 }, { 2200, 5530, 1953, 5572 }, { 2273, -5701, 1973, -5695 },
+    { 2311, -2981, 2725, -3235 }, { 2321, -4607, 1541, -4429 }, { 2343, 3603, 2096, 3639 },
+    { 2446, 5489, 2200, 5530 }, { 2589, 3646, 2343, 3603 }, { 2693, 5448, 2446, 5489 },
+    { 2725, -3235, 3179, -3491 }, { 2835, 3689, 2589, 3646 }, { 2940, 5407, 2693, 5448 },
+    { 2963, -5674, 2940, -5684 }, { 2972, -5716, 2273, -5701 }, { 3055, 3624, 2821, 3661 },
+    { 3082, 3650, 2835, 3689 }, { 3091, -4826, 2321, -4607 }, { 3101, -5616, 2940, -5684 },
+    { 3124, -5606, 2963, -5674 }, { 3124, -5606, 3101, -5616 }, { 3165, -5589, 3124, -5606 },
+    { 3179, -3491, 3579, -3485 }, { 3186, 5365, 2940, 5407 }, { 3186, 5365, 3433, 5324 },
+    { 3271, -5722, 2972, -5716 }, { 3290, 3568, 3055, 3624 }, { 3300, -1081, 3349, -584 },
+    { 3300, 400, 3450, 870 }, { 3329, 3611, 3082, 3650 }, { 3349, -584, 3398, -90 },
+    { 3364, 3511, 3290, 3568 }, { 3398, -90, 3300, 400 }, { 3450, 870, 3602, 1346 },
+    { 3493, -5451, 3124, -5606 }, { 3493, -5451, 3165, -5589 }, { 3507, -2019, 3550, -1514 },
+    { 3526, 3458, 3329, 3611 }, { 3550, -1514, 3300, -1081 }, { 3579, -3485, 3700, -3000 },
+    { 3602, 1346, 3618, 1846 }, { 3604, -2509, 3507, -2019 }, { 3618, 1846, 3797, 2313 },
+    { 3684, 3262, 3364, 3511 }, { 3700, -3000, 3604, -2509 }, { 3709, 3196, 3684, 3262 },
+    { 3723, 3304, 3526, 3458 }, { 3770, 3058, 3723, 3304 }, { 3797, 2313, 3811, 2813 },
+    { 3811, 2813, 3709, 3196 }, { 3817, 2813, 3770, 3058 }, { 3861, -5044, 3091, -4826 },
+    { 3861, -5044, 3994, -5037 }, { 3861, -5044, 3997, -5180 }, { 3893, 4883, 3433, 5324 },
+    { 3997, -5180, 4111, -5294 }, { 4046, 4736, 3893, 4883 }, { 4046, 4736, 4511, 4292 },
+    { 4260, -5024, 3994, -5037 }, { 4260, -5024, 4739, -4787 }, { 4588, 4218, 4511, 4292 },
+    { 4588, 4218, 4848, 3461 }, { 4848, 3461, 5107, 2704 }, { 4963, -1284, 5140, -2064 },
+    { 4978, -4668, 4739, -4787 }, { 4978, -4668, 5135, -4452 }, { 5009, 1110, 5067, 312 },
+    { 5018, -487, 4963, -1284 }, { 5058, 1906, 5009, 1110 }, { 5067, 312, 5018, -487 },
+    { 5107, 2704, 5058, 1906 }, { 5135, -4452, 5448, -4021 }, { 5140, -2064, 5318, -2844 },
+    { 5318, -2844, 5496, -3624 }, { 5448, -4021, 5455, -3964 }, { 5455, -3964, 5496, -3624 },
+};
+
+float drake_shore(float x, float z) {
+    float best = 1e18f, distance = 1e9f;
+    nearer_shore(kDrakeShore, sizeof(kDrakeShore) / sizeof(kDrakeShore[0]), x, z, best, distance);
+    return distance;
+}
+
+float drake_depth(float x, float z) {
+    const float d = drake_shore(x, z);
+    if (d <= 0.0f) return 70.0f;
+    return 40.0f + 330.0f * (1.0f - std::exp(-d / 300.0f)) + swells(x, z) * smoothstep(200.0f, 600.0f, d);
 }
 
 // A course's floor: where its grid lies (its corner and its chunks each
@@ -266,6 +458,10 @@ constexpr Floor kFloors[] = {
     // there. (The game's own floor is painted the water's turquoise, being
     // meant to be seen through it.)
     { 1, -20480.0f, -12288.0f, 40, 20, 14, 0x11800, kWrapped, sunny_depth },
+    // The top 32 rows of Sunset Bay's 32x64 beach strip, sand going wet.
+    { 2, -12288.0f, -13312.0f, 24, 26, 14, 0x0800, kMirrored, sunset_depth },
+    // The lower half of a Drake Lake bank's 32x64 texture: olive-brown mud.
+    { 4, -7168.0f, -7168.0f, 14, 15, 14, 0x6800, kMirrored, drake_depth },
 };
 
 const Floor* floor_for(uint32_t course) {
@@ -502,6 +698,37 @@ bool seafloor_off() {
     return off;
 }
 
+// WR64_SEAFLOOR_TEXDUMP=<prefix> with WR64_SEAFLOOR_TEXLIST=<segment>:<offset
+// in hex>:<texels>,...: a course's candidate sands, 32 texels wide RGBA16,
+// once per course, as raw 8-bit RGBA (<prefix>_<course>_<segment>_<offset>.rgba).
+void dump_textures(uint8_t* rdram, uint32_t course, const uint32_t segments[16]) {
+    static const char* prefix = std::getenv("WR64_SEAFLOOR_TEXDUMP");
+    static const char* list = std::getenv("WR64_SEAFLOOR_TEXLIST");
+    static uint32_t dumped = ~0u;
+    if (prefix == nullptr || list == nullptr || dumped == course) return;
+    dumped = course;
+    for (const char* at = list; *at != 0;) {
+        int segment = 0;
+        unsigned offset = 0, texels = 0;
+        int used = 0;
+        if (std::sscanf(at, "%d:%x:%u%n", &segment, &offset, &texels, &used) != 3 || segment < 0 || segment > 15) break;
+        at += used;
+        if (*at == ',') ++at;
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s_%u_%d_%05X.rgba", prefix, course, segment, offset);
+        if (FILE* f = std::fopen(path, "wb")) {
+            const uint32_t base = (segments[segment] + offset) & 0x7FFFFF;
+            for (unsigned i = 0; i < texels; ++i) {
+                const uint16_t p = *reinterpret_cast<const uint16_t*>(rdram + ((base + i * 2) ^ 2));
+                const uint8_t rgba[4] = { uint8_t((p >> 11) << 3), uint8_t(((p >> 6) & 31) << 3), uint8_t(((p >> 1) & 31) << 3),
+                                          uint8_t((p & 1) ? 255 : 0) };
+                std::fwrite(rgba, 1, 4, f);
+            }
+            std::fclose(f);
+        }
+    }
+}
+
 }  // namespace
 
 // The seafloor's height at (x, z) on course `course`, in *height -- or a
@@ -513,6 +740,18 @@ bool seafloor_height_at(uint32_t course, float x, float z, float* height) {
     if (course == 0) {
         const float beach = kCliffFoot - kBeachSlope * std::max(0.0f, outside(kSolid[kCliff], x, z));
         *height = std::max(-dolphin_depth(x, z), beach);
+        return true;
+    }
+    if (course == 2 || course == 4) {
+        // Sunset Bay and Drake Lake: the land rising from the water, as far
+        // as a beach's height; Sunset Bay's banks going steeply down.
+        const float d = course == 2 ? sunset_shore(x, z) : drake_shore(x, z);
+        if (d <= 0.0f) {
+            *height = std::min(-d * kSunnyBeachSlope, 50.0f);
+        } else {
+            *height = -floor->depth(x, z);
+            if (course == 2 && d < kSunsetBank) *height = std::max(*height, -d * kSunsetBankSlope);
+        }
         return true;
     }
     // Sunny Beach: the beaches' sand, rising from the water at their slope
@@ -540,12 +779,25 @@ float course_clearance(uint32_t course, float x, float z) {
         const Shore shore = sunny_shore(x, z);
         return shore.sandbar ? nearest : shore.distance + kMainlandBeach;
     }
+    // Sunset Bay's town and Drake Lake's banks: solid a little way in from
+    // the water's edge.
+    if (course == 2) return sunset_shore(x, z) + kLandEdge;
+    if (course == 4) return drake_shore(x, z) + kLandEdge;
     if (course != 0) return nearest;
     for (const Outline& o : kSolid) nearest = std::min(nearest, outside(o, x, z));
     for (size_t i = 1; i < sizeof(kShore) / sizeof(kShore[0]); ++i) {
         nearest = std::min(nearest, std::hypot(x - kShore[i].x, z - kShore[i].z) - kPillar);
     }
     return nearest;
+}
+
+// Whether course `course`'s floor is drawn only with the eye below the
+// waves. Drake Lake's water mixes in what lies beneath it for the game's own
+// mirrored scenery (its authored reflection), and from above showed the bed
+// through water that should look opaque: from above, the game's water is
+// left as it was.
+bool seafloor_only_below(uint32_t course) {
+    return course == 4;
 }
 
 // The list drawing the seafloor round the frame's camera for the course
@@ -556,6 +808,7 @@ float course_clearance(uint32_t course, float x, float z) {
 // course's middle.
 uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[16], uint32_t* identity) {
     *identity = 0x80000000u | (kBase + 0x40);
+    dump_textures(rdram, course, segments);
     const Floor* floor = floor_for(course);
     const uint32_t segment13 = segments[13];
     if (seafloor_off() || floor == nullptr || segment13 == 0 || segments[floor->sand_segment] == 0) return 0;
@@ -568,30 +821,6 @@ uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[
         ok = build(rdram, *floor, sand);
     }
     if (!ok) return 0;
-    // WR64_SEAFLOOR_TEXDUMP=<prefix>: the course's candidate sands, once, as
-    // raw 8-bit RGBA (<prefix>_<segment>_<offset>_<width>x<height>.rgba).
-    static const char* dump = std::getenv("WR64_SEAFLOOR_TEXDUMP");
-    static uint32_t dumped = ~0u;
-    if (dump != nullptr && dumped != course) {
-        dumped = course;
-        struct Candidate { int segment; uint32_t offset; int width, height; };
-        for (const Candidate c : { Candidate{ 13, 0x0000, 32, 32 }, Candidate{ 13, 0x0800, 32, 32 },
-                                   Candidate{ 13, 0xA5B0, 32, 64 }, Candidate{ 14, 0x10800, 32, 64 },
-                                   Candidate{ 14, 0x11800, 32, 32 }, Candidate{ 14, 0x12000, 32, 32 } }) {
-            char path[512];
-            std::snprintf(path, sizeof(path), "%s_%d_%05X_%dx%d.rgba", dump, c.segment, c.offset, c.width, c.height);
-            if (FILE* f = std::fopen(path, "wb")) {
-                const uint32_t base = (segments[c.segment] + c.offset) & 0x7FFFFF;
-                for (int i = 0; i < c.width * c.height; ++i) {
-                    const uint16_t p = *reinterpret_cast<const uint16_t*>(rdram + ((base + uint32_t(i) * 2) ^ 2));
-                    const uint8_t rgba[4] = { uint8_t((p >> 11) << 3), uint8_t(((p >> 6) & 31) << 3), uint8_t(((p >> 1) & 31) << 3),
-                                              uint8_t((p & 1) ? 255 : 0) };
-                    std::fwrite(rgba, 1, 4, f);
-                }
-                std::fclose(f);
-            }
-        }
-    }
     if (course == 1) {
         uint32_t texture = 0;
         hide_game_floor(rdram, segment13, kSunnyScenery, 0, texture);

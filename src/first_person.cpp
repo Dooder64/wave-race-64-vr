@@ -348,18 +348,51 @@ void set_first_person_intensity(float intensity) {
 
 namespace {
 
+// Each course's water as the original game colours it (its water seen from
+// behind the jet ski at the start, WR64_WATER=0 and WR64_SEAFLOOR=0 -- a
+// seafloor seen through the water tints it -- the middle of a patch beside
+// the rider), by course: Drake Lake's misty blue-grey, Twilight City's near
+// black. The modern water loses these; under the waves the haze and the
+// surface's underside take them back. Sunset Bay's is its sky's glow just
+// above the horizon, and brightened: even its water's own orange, darkened
+// as the haze darkens away from the surface, read as brown. Each also has
+// how far one sees through it, as a share of WR64_UNDERWATER_VIS: Drake
+// Lake's, still and with its bed in view, looked too clear.
+struct Water { float r, g, b, brightness, visibility; };
+constexpr Water kWaters[] = {
+    { 120, 180, 175, 1.0f, 1.0f },    // Dolphin Park
+    { 100, 185, 190, 1.0f, 1.0f },    // Sunny Beach
+    { 245, 140, 55, 1.4f, 1.0f },     // Sunset Bay
+    { 170, 195, 205, 1.0f, 1.0f },    // Marine Fortress
+    { 145, 180, 185, 1.0f, 0.571f },  // Drake Lake: three quarters as opaque again
+    { 68, 100, 108, 1.0f, 1.0f },     // Port Blue
+    { 50, 56, 62, 1.0f, 1.0f },       // Twilight City
+    { 110, 157, 190, 1.0f, 1.0f },    // Southern Island
+    { 190, 225, 235, 1.0f, 1.0f },    // Glacier Coast
+};
+const Water& water_for(uint32_t course) {
+    return kWaters[course < sizeof(kWaters) / sizeof(kWaters[0]) ? course : 0];
+}
+Vec water_colour(uint32_t course) {
+    const Water& w = water_for(course);
+    return Vec{ w.r, w.g, w.b } * w.brightness;
+}
+
 // The water round `eye` for frame buffer `b`, `surface` the water's height
 // above it: nested spheres about the eye, drawn farthest first, tested
 // against depth but not writing it, each translucent, so that whatever lies
 // beyond a sphere is veiled by it and everything nearer is not. Together they
 // thicken with distance as fog does -- each one's opacity is the water's
 // between it and the next one in, for a visibility of WR64_UNDERWATER_VIS
-// units (450, about 13 m) -- and the outermost is opaque. Their colour is the
+// units (450, about 13 m; less on a course with murkier water) -- and the
+// outermost is opaque. Their colour is the
 // light coming through the water from that direction: brightest looking up
-// at the surface, a blue-green out to the sides, near black straight down,
-// and all of it dimmer the deeper the eye. Returns its list's address.
-uint32_t build_haze(uint8_t* rdram, int b, Vec eye, float surface) {
-    static const float visibility = std::max(50.0f, setting("WR64_UNDERWATER_VIS", 450.0f));
+// at the surface, the course's water colour, darker, out to the sides, near
+// black straight down, and all of it dimmer the deeper the eye. Returns its
+// list's address.
+uint32_t build_haze(uint8_t* rdram, int b, Vec eye, float surface, uint32_t course) {
+    static const float base_visibility = std::max(50.0f, setting("WR64_UNDERWATER_VIS", 450.0f));
+    const float visibility = base_visibility * water_for(course).visibility;
     const uint32_t base = kHaze + uint32_t(b) * kHazeStride;
 
     Matrix identity{};
@@ -368,7 +401,8 @@ uint32_t build_haze(uint8_t* rdram, int b, Vec eye, float surface) {
 
     constexpr int kShells = 40, kRings = 9, kAround = 16;
     constexpr float kInner = 25.0f, kOuter = 2400.0f;
-    const Vec up_colour{ 70.0f, 150.0f, 170.0f }, side_colour{ 22.0f, 80.0f, 100.0f }, down_colour{ 2.0f, 9.0f, 16.0f };
+    const Vec water = water_colour(course);
+    const Vec up_colour = water * 0.9f, side_colour = water * 0.5f, down_colour = water * 0.08f;
     const float dim = std::exp(-std::max(0.0f, surface - eye.y) / 2000.0f);
     auto put_half = [&](uint32_t address, float value) {
         *reinterpret_cast<int16_t*>(rdram + (address ^ 2)) = int16_t(std::lround(std::clamp(value, -32768.0f, 32767.0f)));
@@ -425,15 +459,16 @@ uint32_t build_haze(uint8_t* rdram, int b, Vec eye, float surface) {
 // reflected as seen from above. A disc of the waves' own heights about the
 // eye, opaque, its colour by the angle it is seen at: straight up, inside
 // the cone light leaves the water by (about 49 degrees from overhead), the
-// bright sky through the surface; outside it, the surface mirrors the water
-// below, a dark blue-green; dimmer the deeper the eye. Returns its list's
-// address.
-uint32_t build_underside(uint8_t* rdram, int b, Vec eye, uint32_t segment3) {
+// bright sky through the surface, tinted the course's water colour; outside
+// it, the surface mirrors the water below, that colour darkened; dimmer the
+// deeper the eye. Returns its list's address.
+uint32_t build_underside(uint8_t* rdram, int b, Vec eye, uint32_t segment3, uint32_t course) {
     const uint32_t base = kHaze + uint32_t(b) * kHazeStride;
     constexpr int kAround = 16;
     constexpr float kRadii[] = { 0, 15, 35, 60, 95, 140, 200, 280, 400, 600, 900, 1400, 2400 };
     constexpr int kRings = int(sizeof(kRadii) / sizeof(kRadii[0]));
-    const Vec sky{ 150.0f, 205.0f, 220.0f }, mirror{ 16.0f, 58.0f, 76.0f };
+    const Vec water = water_colour(course);
+    const Vec sky = mix(water, Vec{ 255.0f, 255.0f, 255.0f }, 0.35f), mirror = water * 0.3f;
     auto put_half = [&](uint32_t address, float value) {
         *reinterpret_cast<int16_t*>(rdram + (address ^ 2)) = int16_t(std::lround(std::clamp(value, -32768.0f, 32767.0f)));
     };
@@ -1226,9 +1261,9 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
                                         eye.x, eye.y, eye.z, water_height_at(segment3, eye.x, eye.z));
     }
     if (eye.y < water_height_at(segment3, eye.x, eye.z)) {
-        *haze = 0x80000000u | build_haze(rdram, b, eye, water_height_at(segment3, eye.x, eye.z));
+        *haze = 0x80000000u | build_haze(rdram, b, eye, water_height_at(segment3, eye.x, eye.z), course);
         *identity = 0x80000000u | (kHaze + uint32_t(b) * kHazeStride);
-        *underside = 0x80000000u | build_underside(rdram, b, eye, segment3);
+        *underside = 0x80000000u | build_underside(rdram, b, eye, segment3, course);
     }
 
     // The view: the world turned into the eye's space, looking down -z with y
