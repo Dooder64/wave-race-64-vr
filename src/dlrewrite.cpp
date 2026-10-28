@@ -164,6 +164,8 @@ void fish_field(uint8_t* rdram, const uint32_t segments[16], uint32_t course,
                 std::vector<std::pair<uint32_t, uint32_t>>& out);
 // patches/swim_back.cpp: once a frame.
 void swim_frame(uint8_t* rdram);
+// patches/unlock_all.cpp: once a frame.
+void unlock_frame(uint8_t* rdram);
 // src/seafloor.cpp: the list drawing the course's seafloor, and an identity
 // matrix to draw it under; or 0.
 uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[16], uint32_t* identity);
@@ -2063,6 +2065,7 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
     trace_3d(rdram, list_vaddr, state);
     survey_frame(rdram, list_vaddr, state);
     wr64::swim_frame(rdram);
+    wr64::unlock_frame(rdram);
 
     Walker w{};
     w.rdram = rdram;

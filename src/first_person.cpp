@@ -14,7 +14,8 @@
 // built all of it: the game's view, the projection multiply of 0xE088 in
 // segment 3, is given in place of the game's chase camera a view from the
 // rider's eyes, facing the way the chest faces -- leaning, pitching and
-// rolling with it, nothing smoothed -- and the head is shrunk to nothing.
+// rolling with it, nothing smoothed -- and the rider's whole body is shrunk
+// to nothing.
 // Built from the same frame's matrices, the view and the body never part.
 // The headset's own movement is added after, as for the game's camera.
 // Everything the game itself works out from its camera (what it culls, where
@@ -37,7 +38,8 @@
 //
 // - Onto solid ground (the course's collision, or a seafloor), it stands up
 //   there, the eye as high above the ground as it was above the hull seated,
-//   and walks to the water at WR64_WALK_SPEED km/h (10).
+//   and walks to the water at WR64_WALK_SPEED km/h (30, a little faster than
+//   the swim).
 // - Crashing in a sharp turn -- the stick held at least 75% to one side
 //   (WR64_SHARP_STICK) and the jet ski turning at least 30 degrees a second
 //   (WR64_SHARP_TURN) -- and into the water fast and shallow, it skids:
@@ -128,6 +130,9 @@ constexpr uint32_t kRiderState = 0x192690;
 constexpr uint32_t kRiderStateStride = 0x1718;
 constexpr uint32_t kAnimation = 0xC54, kAnimationFrame = 0xC58, kRecoverCountdown = 0x1608;
 constexpr uint32_t kHead = 3, kChest = 4, kHull = 0;
+// The parts hidden in first person: all of the rider, the head (3) to the
+// feet (17). The jet ski's (0 to 2) are kept.
+constexpr uint32_t kFirstBodyPart = kHead, kLastBodyPart = 17;
 
 // The view written for each frame buffer, in physical memory above the
 // merged waves and the sky (0x741000 to 0x7CD000) and below the audio task's
@@ -649,7 +654,7 @@ std::vector<Vec> plan_route(const Obstacles& o, Vec from, Vec to) {
 // while the swimmer is on the way. `course` is the course raced.
 Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Camera& chest, const Matrix& hull) {
     static const float speed = setting("WR64_SWIM_SPEED", 25.0f) / 3.6f * kUnitsPerMetre;    // units a second
-    static const float walk = setting("WR64_WALK_SPEED", 10.0f) / 3.6f * kUnitsPerMetre;     // units a second
+    static const float walk = setting("WR64_WALK_SPEED", 30.0f) / 3.6f * kUnitsPerMetre;     // units a second
     static const float eye_height = setting("WR64_SWIM_EYE", 12.0f);                        // above the waves
     constexpr float kTurnRate = 4.0f;       // radians a second
     constexpr float kRiseRate = 120.0f;     // units a second, coming up
@@ -1238,11 +1243,16 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
     const uint32_t address = kView + uint32_t(b) * kViewStride;
     write_matrix(rdram, address, view);
 
-    // The head, shrunk to its neck: drawn, but to nothing. The game only
-    // reads this matrix to draw the head.
-    Matrix shrunk{};
-    shrunk.m[3][0] = neck.x; shrunk.m[3][1] = neck.y; shrunk.m[3][2] = neck.z; shrunk.m[3][3] = 1.0f;
-    write_matrix(rdram, parts + kHead * kPartStride, shrunk);
+    // The rider's body, each part shrunk to its own origin: drawn, but to
+    // nothing. The game only reads these matrices to draw them. Any of it in
+    // view distracted -- arms without a body, or the body flung one way while
+    // the view went another.
+    for (uint32_t part = kFirstBodyPart; part <= kLastBodyPart; ++part) {
+        const Vec origin = row(read_matrix(rdram, parts + part * kPartStride), 3);
+        Matrix shrunk{};
+        shrunk.m[3][0] = origin.x; shrunk.m[3][1] = origin.y; shrunk.m[3][2] = origin.z; shrunk.m[3][3] = 1.0f;
+        write_matrix(rdram, parts + part * kPartStride, shrunk);
+    }
 
     static const bool log = std::getenv("WR64_FP_LOG") != nullptr;
     static int frames = 0;

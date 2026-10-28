@@ -201,6 +201,11 @@ void build_launcher(recompui::LauncherMenu* menu) {
 
 }  // namespace
 
+namespace wr64 {
+// patches/unlock_all.cpp: the Debug tab's switch.
+void set_unlock_all(bool on);
+}
+
 namespace wr64::frontend {
 
 void init(bool auto_start) {
@@ -274,6 +279,12 @@ void init(bool auto_start) {
     vr.add_option_change_callback("vr_panel_size", [](auto value, auto, auto context) {
         if (context != recomp::config::OptionChangeContext::Temporary)
             wr64::vr::set_panel_size(float(std::get<double>(value)) / 100.0f);
+    });
+    auto &debug = recompui::config::create_config_tab("Debug", "debug", true);
+    debug.add_bool_option("debug_unlock_all", "Unlock all courses and difficulties", "Open every course in Time Trials and every Championship difficulty, whatever your save holds. The game may keep these in your save when it next saves.", false);
+    debug.add_option_change_callback("debug_unlock_all", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::set_unlock_all(std::get<bool>(value));
     });
     auto &graphics = recompui::config::create_graphics_tab();
     graphics.add_enum_option("texture_quality", "Textures", "Use the bundled HD texture pack or your installed replacement pack. Textures without a replacement keep their original appearance.",
