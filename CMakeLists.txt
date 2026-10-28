@@ -222,7 +222,7 @@ if(WR64_WITH_RUNTIME AND WR64_WITH_RECOMPILED)
     list(APPEND WR64_SOURCES src/renderer.cpp src/callbacks.cpp src/overlays.cpp src/libultra_stubs.cpp
                              src/testdrive.cpp src/display.cpp src/dlrewrite.cpp src/water.cpp src/music.cpp src/textures.cpp
                              src/haptics.cpp src/haptics_mixer.cpp src/haptics_output.cpp src/haptics_observation.cpp
-                             src/vr.cpp src/first_person.cpp src/seafloor.cpp src/body_splash.cpp)
+                             src/vr.cpp src/first_person.cpp src/seafloor.cpp src/body_splash.cpp src/fish.cpp)
     if(WIN32)
         # VR mode's OpenXR session, on RT64's Direct3D 12 device.
         list(APPEND WR64_SOURCES src/vr_openxr.cpp)

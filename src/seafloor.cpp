@@ -6,12 +6,15 @@
 // from below the surface has nothing to see. Dolphin Park (course 0) is
 // given a floor of its own instead: the course's sand, shallow beside the
 // palm island and the piers in the middle, deepening quickly away from them
-// (some 4 m a hundred and fifty metres out) to about 10 m, and at the buoy
-// barrier (a ring of radius 7700 about the origin)
+// (some 4 m a hundred and fifty metres out) to about 10 m by the buoy
+// barrier (a ring of radius 7700 about the origin), then on past it, sloping
+// gently down to some 30 m at three times the barrier's radius, and there
 // falling away steeply into deep water. It is built once when the course is
 // loaded, in world space, and drawn in place of the game's flat floor, before
 // the water, so the water's depth tint (RT64's WaterPS: the deeper what lies
 // under the surface, the more of the water's own colour) shades it from above.
+// Only the part round the camera is drawn each frame, as far as the waves
+// reach.
 //
 // The island and the piers were measured from the course itself: the island
 // from where its collision meets the waterline (WR64_SHORE_DUMP), the piers
@@ -24,9 +27,10 @@
 // slopes gently up where its cliff rises: walked on, it led through it.)
 //
 // Memory. Above the game's 4 MB, below the rewriter's scratch list at
-// 0x700000: the floor at 0x500000, the fog at 0x5C0000. The cartridge never
-// reads osMemSize, so nothing of the game's is there; build() still checks
-// the floor's area is empty, or its own, before it writes.
+// 0x700000: the floor's vertices at 0x400000, its lists at 0x500000, the fog
+// at 0x5C0000. The cartridge never reads osMemSize, so nothing of the game's
+// is there; build() still checks the floor's area is empty, or its own,
+// before it writes.
 //
 // WR64_SEAFLOOR=0 leaves the game's floor alone.
 
@@ -39,14 +43,24 @@
 #include <cstring>
 
 namespace wr64 {
+
+// patches/water_all_round.cpp: the camera the frame's waves were merged round.
+bool water_built_for(uint32_t segment3, float eye[3], float* centre_x, float* centre_z, float* radius);
+
 namespace {
 
+// The marker and the identity matrix; the cells' triangles, the same for
+// every chunk; the drawing state; then for each frame buffer the list
+// drawing the chunks round the camera. The vertices, a chunk after another.
 constexpr uint32_t kBase = 0x500000;
-constexpr uint32_t kList = kBase + 0x100;
-constexpr uint32_t kListEnd = kBase + 0x40000;
-constexpr uint32_t kVertices = kBase + 0x40000;
-constexpr uint32_t kVerticesEnd = kBase + 0xC0000;
+constexpr uint32_t kTriangles = kBase + 0x100;
+constexpr uint32_t kState = kBase + 0x400;
+constexpr uint32_t kFrameLists = kBase + 0x1000, kFrameListSize = 0x8000;
+constexpr uint32_t kBaseEnd = kFrameLists + 2 * kFrameListSize;
+constexpr uint32_t kVertices = 0x400000;
+constexpr uint32_t kVerticesEnd = 0x500000;
 constexpr uint32_t kMarker = 0x53454146u;       // "SEAF", at kBase
+constexpr uint32_t kFrameBuffers[2] = { 0x11F8E8, 0x1388D0 };
 
 // The course's sand: the top 32 rows of its 32x64 RGBA16 beach strip, whose
 // lower rows fade into water. In segment 13, the course's data. Its edges do
@@ -56,14 +70,19 @@ constexpr uint32_t kSandTexture = 0xA5B0;
 
 // The grid: chunks of 1024 units, each 4 cells of 256 a side, so a chunk's
 // 25 vertices are one load and its texture coordinates start again at 0.
-constexpr int kChunk = 1024, kCells = 4, kChunks = 22;
+constexpr int kChunk = 1024, kCells = 4, kChunks = 50;
 constexpr float kCell = float(kChunk) / kCells;
 constexpr float kHalf = float(kChunk * kChunks) / 2.0f;
+constexpr uint32_t kPerChunk = (kCells + 1) * (kCells + 1);
 // The sand repeats every 128 units: 32 texels, 10.5 fixed point.
 constexpr float kTexelsPerUnit = 32.0f / 128.0f;
+// Chunks this near the camera are drawn: past the waves' flat ring (6000).
+constexpr float kDrawRadius = 7000.0f;
 
-// The barrier, and where the drop beyond it begins and ends.
+// The barrier; the shelf beyond it, sloping down at about the floor's
+// average slope inside it, to three times its radius; and there the drop.
 constexpr float kBarrier = 7700.0f;
+constexpr float kShelfSlope = 0.045f, kShelfEnd = 3.0f * kBarrier;
 
 struct Anchor { float x, z, radius; };
 // The palm island, and the piers' pillars (to 100 units).
@@ -95,10 +114,15 @@ float depth_at(float x, float z) {
     // longer than the grid's cells: shorter ripples sampled at 256 units
     // showed as stripes.
     depth += 8.0f * std::sin(x * 0.0021f + z * 0.0008f) * std::sin(z * 0.0017f - x * 0.0006f) *
-             (1.0f - smoothstep(kBarrier, kBarrier + 500.0f, r));
-    // The drop: steep just past the barrier, then on down for good.
-    depth += 5200.0f * smoothstep(kBarrier + 150.0f, kBarrier + 1600.0f, r) +
-             std::max(0.0f, r - (kBarrier + 1600.0f)) * 0.6f;
+             (1.0f - smoothstep(kShelfEnd, kShelfEnd + 500.0f, r));
+    // The shelf past the barrier: its slope eased in over 2000 units about
+    // the barrier, so the floor does not kink there.
+    constexpr float kEase = 2000.0f;
+    const float past = std::clamp(r - (kBarrier - kEase / 2.0f), 0.0f, kEase);
+    depth += kShelfSlope * (past * past / (2.0f * kEase) + std::max(0.0f, r - (kBarrier + kEase / 2.0f)));
+    // The drop: steep just past the shelf, then on down for good.
+    depth += 5200.0f * smoothstep(kShelfEnd + 150.0f, kShelfEnd + 1600.0f, r) +
+             std::max(0.0f, r - (kShelfEnd + 1600.0f)) * 0.6f;
     return depth;
 }
 
@@ -121,7 +145,7 @@ constexpr Outline kSolid[] = {
           { 5350, 5399, 5403, 5352, 5254, 5125, 4987, 4957, 5014, 5169 } },
     { 4, { -172, -90, -90, -172 }, { 5106, 5106, 5295, 5295 } },
 };
-constexpr float kPillar = 45.0f;
+constexpr float kPillar = 55.0f;
 // The island's cliff (in kSolid), and the beach drawn round it: sand going
 // on down from the cliff's foot, 20 units up, as far as 60 units under the
 // water some 620 units out -- well past where the course's collision ends.
@@ -166,10 +190,12 @@ struct Builder {
 bool build(uint8_t* rdram, uint32_t course_data) {
     uint32_t* marker = reinterpret_cast<uint32_t*>(rdram + kBase);
     if (*marker != kMarker) {
-        for (uint32_t a = kBase; a < kVerticesEnd; a += 4) {
-            if (*reinterpret_cast<uint32_t*>(rdram + a) != 0) {
-                std::fprintf(stderr, "[seafloor] memory at 0x%06X is in use; no seafloor\n", a);
-                return false;
+        for (const auto& [from, to] : { std::pair{ kBase, kBaseEnd }, std::pair{ kVertices, kVerticesEnd } }) {
+            for (uint32_t a = from; a < to; a += 4) {
+                if (*reinterpret_cast<uint32_t*>(rdram + a) != 0) {
+                    std::fprintf(stderr, "[seafloor] memory at 0x%06X is in use; no seafloor\n", a);
+                    return false;
+                }
             }
         }
         *marker = kMarker;
@@ -180,7 +206,19 @@ bool build(uint8_t* rdram, uint32_t course_data) {
         put_half(rdram, kBase + 0x60 + uint32_t(i) * 2, 0.0f);
     }
 
-    Builder list{ rdram, kList, kListEnd };
+    // A chunk's cells, two triangles each, called after its vertices' load.
+    Builder triangles{ rdram, kTriangles, kState };
+    for (int j = 0; j < kCells; ++j) {
+        for (int i = 0; i < kCells; ++i) {
+            const uint32_t a = uint32_t(j * (kCells + 1) + i), b = a + 1;
+            const uint32_t c = a + (kCells + 1), d = c + 1;
+            triangles.command(0xBFu << 24, ((a * 5) << 16) | ((c * 5) << 8) | (d * 5));
+            triangles.command(0xBFu << 24, ((a * 5) << 16) | ((d * 5) << 8) | (b * 5));
+        }
+    }
+    triangles.command(0xB8000000u, 0);
+
+    Builder list{ rdram, kState, kFrameLists };
     // Its state: one cycle, the sand filtered and in perspective, opaque,
     // tested against depth and writing it, texture times shade, unlit,
     // unfogged and not culled.
@@ -206,12 +244,13 @@ bool build(uint8_t* rdram, uint32_t course_data) {
     list.command(0xE7000000u, 0);
     list.command(0xF5101000u, 0x00054150u);                // render tile: 32x32, mirrored each way
     list.command(0xF2000000u, 0x0007C07Cu);
+    list.command(0xB8000000u, 0);
+    if (list.full || triangles.full) return false;
 
     // The sun, high and off to one side, gives the ripples and the drop
     // some relief.
     const float lx = 0.3f, ly = 0.9f, lz = 0.3f, ll = std::sqrt(lx * lx + ly * ly + lz * lz);
     uint32_t vertex = kVertices;
-    constexpr uint32_t kPerChunk = (kCells + 1) * (kCells + 1);
     for (int cz = 0; cz < kChunks; ++cz) {
         for (int cx = 0; cx < kChunks; ++cx) {
             if (vertex + kPerChunk * 16 > kVerticesEnd) return false;
@@ -238,23 +277,35 @@ bool build(uint8_t* rdram, uint32_t course_data) {
                     *reinterpret_cast<uint32_t*>(rdram + v + 12) = (c << 24) | (c << 16) | (c << 8) | 0xFFu;
                 }
             }
-            list.command((0x04u << 24) | (kPerChunk << 9) | (kPerChunk * 16 - 1), vertex);
-            for (int j = 0; j < kCells; ++j) {
-                for (int i = 0; i < kCells; ++i) {
-                    const uint32_t a = uint32_t(j * (kCells + 1) + i), b = a + 1;
-                    const uint32_t c = a + (kCells + 1), d = c + 1;
-                    list.command(0xBFu << 24, ((a * 5) << 16) | ((c * 5) << 8) | (d * 5));
-                    list.command(0xBFu << 24, ((a * 5) << 16) | ((d * 5) << 8) | (b * 5));
-                }
-            }
             vertex += kPerChunk * 16;
         }
     }
-    list.command(0xB8000000u, 0);
-    if (list.full) return false;
-    std::fprintf(stderr, "[seafloor] built: %u vertices, %u commands\n",
-                 (vertex - kVertices) / 16, (list.at - kList) / 8);
+    std::fprintf(stderr, "[seafloor] built: %u vertices, %d chunks of %d units\n",
+                 (vertex - kVertices) / 16, kChunks * kChunks, kChunk);
     return true;
+}
+
+// Writes frame buffer `b`'s list drawing the chunks within kDrawRadius of
+// (eye_x, eye_z); returns its address.
+uint32_t frame_list(uint8_t* rdram, int b, float eye_x, float eye_z) {
+    Builder list{ rdram, kFrameLists + uint32_t(b) * kFrameListSize, kFrameLists + uint32_t(b + 1) * kFrameListSize - 8 };
+    list.command(0x06000000u, 0x80000000u | kState);
+    const auto first = [](float at) { return std::clamp(int(std::floor((at + kHalf) / kChunk)), 0, kChunks - 1); };
+    for (int cz = first(eye_z - kDrawRadius); cz <= first(eye_z + kDrawRadius); ++cz) {
+        for (int cx = first(eye_x - kDrawRadius); cx <= first(eye_x + kDrawRadius); ++cx) {
+            const float x0 = -kHalf + float(cx * kChunk), z0 = -kHalf + float(cz * kChunk);
+            const float dx = std::max({ x0 - eye_x, 0.0f, eye_x - (x0 + kChunk) });
+            const float dz = std::max({ z0 - eye_z, 0.0f, eye_z - (z0 + kChunk) });
+            if (dx * dx + dz * dz > kDrawRadius * kDrawRadius) continue;
+            const uint32_t vertex = kVertices + uint32_t(cz * kChunks + cx) * kPerChunk * 16;
+            list.command((0x04u << 24) | (kPerChunk << 9) | (kPerChunk * 16 - 1), 0x80000000u | vertex);
+            list.command(0x06000000u, 0x80000000u | kTriangles);
+        }
+    }
+    list.full = false;
+    list.end += 8;
+    list.command(0xB8000000u, 0);
+    return 0x80000000u | (kFrameLists + uint32_t(b) * kFrameListSize);
 }
 
 }  // namespace
@@ -286,11 +337,13 @@ float course_clearance(uint32_t course, float x, float z) {
     return nearest;
 }
 
-// The list drawing the seafloor for the course loaded, as an address to
-// call, or 0 for a course without one; `identity` is given an identity
-// matrix to draw it under. `course` is the game's course ID and `segment13`
-// the physical base of the course's data.
-uint32_t seafloor_list(uint8_t* rdram, uint32_t course, uint32_t segment13, uint32_t* identity) {
+// The list drawing the seafloor round the frame's camera for the course
+// loaded, as an address to call, or 0 for a course without one; `identity`
+// is given an identity matrix to draw it under. `course` is the game's course
+// ID, `segment13` the physical base of the course's data and `segment3` the
+// frame's buffer. Without waves merged round the camera, the floor round the
+// course's middle.
+uint32_t seafloor_list(uint8_t* rdram, uint32_t course, uint32_t segment13, uint32_t segment3, uint32_t* identity) {
     *identity = 0x80000000u | (kBase + 0x40);
     static const bool off = [] {
         const char* value = std::getenv("WR64_SEAFLOOR");
@@ -303,7 +356,11 @@ uint32_t seafloor_list(uint8_t* rdram, uint32_t course, uint32_t segment13, uint
         built_for = segment13;
         ok = build(rdram, segment13);
     }
-    return ok ? 0x80000000u | kList : 0;
+    if (!ok) return 0;
+    const int b = segment3 == kFrameBuffers[1] ? 1 : 0;
+    float eye[3] = { 0.0f, 0.0f, 0.0f }, centre_x, centre_z, radius;
+    if (!water_built_for(segment3, eye, &centre_x, &centre_z, &radius)) eye[0] = eye[2] = 0.0f;
+    return frame_list(rdram, b, eye[0], eye[2]);
 }
 
 }  // namespace wr64

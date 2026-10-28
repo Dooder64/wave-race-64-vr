@@ -157,11 +157,16 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
 // src/body_splash.cpp: the game's bow splash round the thrown rider's
 // skidding body, to call after the game's particles; or 0.
 uint32_t body_splash_list(uint8_t* rdram, uint32_t list, uint32_t segment5, uint32_t segment3);
+// src/fish.cpp: Dolphin Park's fish, each drawn twice and varied.
+bool fish_rewrite(uint8_t* rdram, const uint32_t segments[16], uint32_t course, uint32_t at, uint32_t* next,
+                  std::vector<std::pair<uint32_t, uint32_t>>& out);
+void fish_field(uint8_t* rdram, const uint32_t segments[16], uint32_t course,
+                std::vector<std::pair<uint32_t, uint32_t>>& out);
 // patches/swim_back.cpp: once a frame.
 void swim_frame(uint8_t* rdram);
 // src/seafloor.cpp: the list drawing the course's seafloor, and an identity
 // matrix to draw it under; or 0.
-uint32_t seafloor_list(uint8_t* rdram, uint32_t course, uint32_t segment13, uint32_t* identity);
+uint32_t seafloor_list(uint8_t* rdram, uint32_t course, uint32_t segment13, uint32_t segment3, uint32_t* identity);
 }
 
 namespace {
@@ -732,15 +737,28 @@ struct Walker {
         if (list == kSkyFloorList && racing(state)) {
             uint32_t identity = 0;
             const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));
-            const uint32_t floor = wr64::seafloor_list(rdram, course, segments[13], &identity);
+            const uint32_t floor = wr64::seafloor_list(rdram, course, segments[13], segments[3], &identity);
             if (floor != 0) {
                 const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
                 emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
                 emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
                 emit(ex | G_EX_PUSHCOMBINE_V1, 0);
+                // Out of the sky's group while they are drawn: RT64 pairs
+                // that group's vertices from one frame to the next in order,
+                // and the floor's chunks round the camera and the fish, more
+                // or fewer each frame, put the sky's vertices out of step --
+                // they flashed between the game's frames in the headset.
+                const bool in_sky = sky == SkySection::Open;
+                if (in_sky) vertex_interp_group(G_EX_ID_AUTO);
                 emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, identity);
                 emit(uint32_t(kOpDisplayList) << 24, floor);
+                // And the fish swimming about the camera, over it.
+                static std::vector<std::pair<uint32_t, uint32_t>> field;
+                field.clear();
+                wr64::fish_field(rdram, segments, course, field);
+                for (const auto& [a, b] : field) emit(a, b);
                 emit(0xBD000000u, 0);                           // pop the modelview
+                if (in_sky) vertex_interp_group(kSkyId);
                 emit(ex | G_EX_POPCOMBINE_V1, 0);
                 emit(ex | G_EX_POPOTHERMODE_V1, 0);
                 emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
@@ -1453,6 +1471,9 @@ struct Tracer {
             const uint32_t w1 = c[1];
             const uint8_t op = static_cast<uint8_t>(w0 >> 24);
             cursor += 8;
+            // WR64_3D_TRACE_RAW=1 also prints every command's two words.
+            static const bool raw = std::getenv("WR64_3D_TRACE_RAW") != nullptr;
+            if (raw) std::fprintf(f, "%*s[%08X %08X]\n", depth * 2, "", w0, w1);
 
             switch (op) {
                 case kOpEndDisplayList:
@@ -2364,6 +2385,21 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             if (w.modelview_depth > 0) --w.modelview_depth;
             w.emit(w0, w1);
             continue;
+        }
+
+        // Dolphin Park's fish, each a top-level matrix load and its pieces:
+        // drawn twice, in sizes, depths and colours of their own.
+        if (op == kOpMtx && ((w0 >> 16) & 0xFF) == kMtxLoad && racing(state)) {
+            static std::vector<std::pair<uint32_t, uint32_t>> fish;
+            fish.clear();
+            uint32_t after = 0;
+            const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));
+            if (wr64::fish_rewrite(rdram, w.segments, course, cursor - 8, &after, fish)) {
+                w.on_matrix(w0, w1);
+                for (const auto& [a, b] : fish) w.emit(a, b);
+                cursor = after;
+                continue;
+            }
         }
 
         if (op == kOpMtx) {
