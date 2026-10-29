@@ -17,8 +17,12 @@
 // throws the human's rider every so many seconds of riding, by setting that
 // countdown to 1 -- in scripted test runs only (WR64_INPUT_SCRIPT), as is
 // WR64_TEST_FINISH=<seconds>, which marks the rider finished. X on the
-// controllers (F3) throws the human's rider at once, the same way: a debug
-// wipe-out, for looking round the seafloors.
+// controllers (F3) throws the human's rider at once, the same way: a
+// wipe-out on demand -- or, stopped and not on the throttle, a backwards dive off
+// the jet ski, which the first-person view plays (src/first_person.cpp) over
+// the same throw. (The game's own backflip, played when a rider retires, is
+// animation 4; started mid-race it also hands the jet ski to the computer.)
+// WR64_ANIM_LOG=1 reports every animation the human's rider starts.
 
 #include "recomp.h"
 
@@ -45,6 +49,10 @@ constexpr int32_t kRiding = 22, kThrown = 23, kClimbing = 7;
 
 std::atomic<bool> g_holding{ false };
 std::atomic<bool> g_throw_asked{ false };
+std::atomic<bool> g_dive_asked{ false };
+// From src/first_person.cpp and src/callbacks.cpp: whether the jet ski is
+// at rest, and whether the throttle is held.
+std::atomic<bool> g_at_rest{ false };
 
 int32_t& word(uint8_t* rdram, uint32_t physical) { return *reinterpret_cast<int32_t*>(rdram + physical); }
 uint16_t& half(uint8_t* rdram, uint32_t physical) { return *reinterpret_cast<uint16_t*>(rdram + (physical ^ 2)); }
@@ -61,9 +69,28 @@ bool racing(uint8_t* rdram) {
 
 }  // namespace
 
-// X on the controllers, F3: the human's rider thrown off next frame it rides.
+// src/callbacks.cpp: whether A, the throttle, was held when the game last
+// read the controllers.
+bool throttle_held();
+
+// X on the controllers, F3: the human's rider thrown off next frame it
+// rides -- as a backwards dive if the jet ski is at rest and the throttle off.
 void swim_request_throw() {
+    g_dive_asked.store(g_at_rest.load(std::memory_order_relaxed) && !throttle_held(), std::memory_order_relaxed);
     g_throw_asked.store(true, std::memory_order_relaxed);
+}
+
+// From src/first_person.cpp, as a throw begins: whether it is a backwards dive,
+// asked for (once).
+bool swim_take_dive() {
+    static const bool test = std::getenv("WR64_TEST_BACKFLIP") != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr;
+    return g_dive_asked.exchange(false, std::memory_order_relaxed) || test;
+}
+
+// From src/first_person.cpp, each race frame: whether the human's jet ski is
+// at rest.
+void swim_set_at_rest(bool at_rest) {
+    g_at_rest.store(at_rest, std::memory_order_relaxed);
 }
 
 // From src/first_person.cpp, each frame of a race in first person.
@@ -84,8 +111,9 @@ void swim_animation_hook(uint8_t* rdram, recomp_context* ctx) {
         }
         return;
     }
-    if (log && human && (animation == kClimbing || animation == kThrown)) {
-        std::fprintf(stderr, "[wr64-swim] animation %d from frame %d\n", animation, int32_t(ctx->r6));
+    static const bool log_all = std::getenv("WR64_ANIM_LOG") != nullptr;
+    if ((log && human && (animation == kClimbing || animation == kThrown)) || (log_all && human)) {
+        std::fprintf(stderr, "[wr64-swim] animation %d from frame %d (a3 %08X)\n", animation, int32_t(ctx->r6), uint32_t(ctx->r7));
         std::fflush(stderr);
     }
     func_80053EAC(rdram, ctx);
@@ -123,6 +151,24 @@ void swim_frame(uint8_t* rdram) {
         if (++raced == finish_at) {
             word(rdram, 0x1C2938 + uint32_t(human_slot(rdram)) * 0x378 + 0x2F4) = 1;
             std::fprintf(stderr, "[wr64-swim] TEST: the human's rider is marked finished\n");
+            std::fflush(stderr);
+        }
+    }
+
+    // WR64_TEST_RETIRE=<seconds>, in a scripted run only: the course-out
+    // countdown started and run out that long into the race (the race
+    // record's +0x2E4 and +0x2E8), so the game retires the human's rider.
+    static const int retire_at = [] {
+        const char* env = std::getenv("WR64_TEST_RETIRE");
+        return env != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr ? int(std::atof(env) * 30.0) : 0;
+    }();
+    if (retire_at > 0 && racing(rdram)) {
+        static int raced_r = 0;
+        if (++raced_r == retire_at) {
+            const uint32_t record = 0x1C2938 + uint32_t(human_slot(rdram)) * 0x378;
+            word(rdram, record + 0x2E4) = 1;
+            word(rdram, record + 0x2E8) = 1;
+            std::fprintf(stderr, "[wr64-swim] TEST: the human's rider is made to retire\n");
             std::fflush(stderr);
         }
     }

@@ -15,8 +15,13 @@
 // round it, turned the way it slides and fading as it slows or leaves the
 // water, by a list of this file's own called just after the game's.
 //
+// The same kept frames are replayed round the fellow rider's jet ski on
+// Dolphin Park (src/companions.cpp) as it rides, so it throws up the same
+// bow splash -- once the player has ridden fast enough for some to be kept.
+//
 // Memory: for each frame buffer, at 0x640000 + 0x20000 b (above the water's
-// fog, src/first_person.cpp), the list, then from +0x8000 its vertices.
+// fog, src/first_person.cpp), the list, then from +0x8000 its vertices; the
+// companion's at 0x560000 + 0x10000 b, its vertices from +0x4000.
 //
 // WR64_BODY_SPLASH=0 leaves it out. WR64_SPLASH_LOG=1 reports what is kept.
 
@@ -38,6 +43,7 @@ constexpr uint32_t kVertices = 0x8000;
 constexpr uint32_t kMostCommands = kVertices / 8 - 1;
 constexpr uint32_t kMostVertices = (kStride - kVertices) / 16;
 constexpr uint32_t kFrameBuffers[2] = { 0x11F8E8, 0x1388D0 };
+constexpr uint32_t kCompanionBase = 0x560000, kCompanionStride = 0x10000, kCompanionVertices = 0x4000;
 
 // The trail the game leaves on the water behind a jet ski: not a splash.
 constexpr uint32_t kWakeTexture = 0x0104E4C0;
@@ -88,6 +94,10 @@ struct State {
     std::vector<KeptFrame> kept;
     size_t next_kept = 0, played = 0;
     float strength = 0;
+    // The companion's jet ski this frame.
+    bool companion = false;
+    float comp_x = 0, comp_z = 0, comp_water = 0, comp_ahead_x = 1, comp_ahead_z = 0, comp_speed = 0, comp_strength = 0;
+    size_t comp_played = 0;
 } g;
 
 bool enabled() {
@@ -162,28 +172,21 @@ void keep(const uint8_t* rdram, uint32_t list, uint32_t segment5) {
     g.next_kept = (g.next_kept + 1) % kKept;
 }
 
-// Writes the next kept frame round the body for frame buffer `b`; returns
-// the list's address, or 0.
-uint32_t replay(uint8_t* rdram, int b) {
-    if (g.kept.empty()) return 0;
-    const float speed = std::hypot(g.slide_x, g.slide_z);
-    // Fading in as the body touches the water, out as it skips up or slows.
-    g.strength += ((g.wet > 0.0f ? 1.0f : 0.0f) - g.strength) * (g.wet > 0.0f ? 0.5f : 0.15f);
-    const float fade = g.strength * std::clamp((speed - 35.0f) / 400.0f, 0.0f, 1.0f);
-    if (fade < 0.02f) return 0;
-    const float ahead_x = speed > 1.0f ? g.slide_x / speed : g.bow_x, ahead_z = speed > 1.0f ? g.slide_z / speed : g.bow_z;
+// Writes kept frame `frame` round (x, z), the water `water` high there,
+// facing (ahead_x, ahead_z), faded by `fade`, as a list at `list` with its
+// vertices at `vertices` (room for `most_vertices` and `most_commands`);
+// returns the list's address, or 0.
+uint32_t replay_at(uint8_t* rdram, const KeptFrame& frame, float x, float z, float water, float ahead_x, float ahead_z,
+                   float fade, uint32_t list, uint32_t vertices, uint32_t most_vertices, uint32_t most_commands) {
     const float side_x = -ahead_z, side_z = ahead_x;
-    const KeptFrame& frame = g.kept[g.played++ % g.kept.size()];
-    const uint32_t list = kBase + uint32_t(b) * kStride;
-    const uint32_t vertices = list + kVertices;
-    if (frame.vertices.size() > kMostVertices || frame.commands.size() > kMostCommands) return 0;
+    if (frame.vertices.size() > most_vertices || frame.commands.size() > most_commands) return 0;
     for (size_t i = 0; i < frame.vertices.size(); ++i) {
         const KeptVertex& k = frame.vertices[i];
         const uint32_t v = vertices + uint32_t(i) * 16;
         std::memcpy(rdram + v, k.raw, 16);
-        put_half(rdram, v, g.body_x + ahead_x * k.along + side_x * k.across);
-        put_half(rdram, v + 2, g.body_water + k.up);
-        put_half(rdram, v + 4, g.body_z + ahead_z * k.along + side_z * k.across);
+        put_half(rdram, v, x + ahead_x * k.along + side_x * k.across);
+        put_half(rdram, v + 2, water + k.up);
+        put_half(rdram, v + 4, z + ahead_z * k.along + side_z * k.across);
         uint8_t& alpha = rdram[(v + 15) ^ 3];
         alpha = uint8_t(std::lround(float(alpha) * fade));
     }
@@ -200,7 +203,52 @@ uint32_t replay(uint8_t* rdram, int b) {
     return 0x80000000u | list;
 }
 
+// Writes the next kept frame round the body for frame buffer `b`; returns
+// the list's address, or 0.
+uint32_t replay(uint8_t* rdram, int b) {
+    if (g.kept.empty()) return 0;
+    const float speed = std::hypot(g.slide_x, g.slide_z);
+    // Fading in as the body touches the water, out as it skips up or slows.
+    g.strength += ((g.wet > 0.0f ? 1.0f : 0.0f) - g.strength) * (g.wet > 0.0f ? 0.5f : 0.15f);
+    const float fade = g.strength * std::clamp((speed - 35.0f) / 400.0f, 0.0f, 1.0f);
+    if (fade < 0.02f) return 0;
+    const float ahead_x = speed > 1.0f ? g.slide_x / speed : g.bow_x, ahead_z = speed > 1.0f ? g.slide_z / speed : g.bow_z;
+    const KeptFrame& frame = g.kept[g.played++ % g.kept.size()];
+    const uint32_t list = kBase + uint32_t(b) * kStride;
+    return replay_at(rdram, frame, g.body_x, g.body_z, g.body_water, ahead_x, ahead_z, fade, list, list + kVertices,
+                     kMostVertices, kMostCommands);
+}
+
 }  // namespace
+
+// From src/companions.cpp, each frame it is drawn: its jet ski, whether on
+// the water (not flying off the ramp), where, the water's height there, which
+// way it heads, and how fast.
+void body_splash_companion(bool on_water, float x, float z, float water, float ahead_x, float ahead_z, float speed) {
+    g.companion = true;
+    g.comp_strength += ((on_water ? 1.0f : 0.0f) - g.comp_strength) * (on_water ? 0.4f : 0.3f);
+    g.comp_x = x; g.comp_z = z; g.comp_water = water;
+    g.comp_ahead_x = ahead_x; g.comp_ahead_z = ahead_z; g.comp_speed = speed;
+}
+
+// For the display-list rewriter, just after the frame's call of the game's
+// particles: the address of a list drawing the bow splash round the
+// companion's jet ski, or 0. `segment3` is the frame's.
+uint32_t body_splash_companion_list(uint8_t* rdram, uint32_t segment3) {
+    if (!enabled() || !g.companion || g.kept.empty()) return 0;
+    g.companion = false;
+    int b = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (segment3 == kFrameBuffers[i]) b = i;
+    }
+    if (b < 0) return 0;
+    const float fade = g.comp_strength * std::clamp((g.comp_speed - 100.0f) / 500.0f, 0.0f, 1.0f);
+    if (fade < 0.02f) return 0;
+    const KeptFrame& frame = g.kept[g.comp_played++ % g.kept.size()];
+    const uint32_t list = kCompanionBase + uint32_t(b) * kCompanionStride;
+    return replay_at(rdram, frame, g.comp_x, g.comp_z, g.comp_water, g.comp_ahead_x, g.comp_ahead_z, fade, list,
+                     list + kCompanionVertices, (kCompanionStride - kCompanionVertices) / 16, kCompanionVertices / 8 - 1);
+}
 
 // From the swim (src/first_person.cpp), each first-person race frame before
 // the game's particles are drawn: whether the player rides (and where the

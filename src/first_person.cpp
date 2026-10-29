@@ -107,6 +107,11 @@ float course_clearance(uint32_t course, float x, float z);
 bool course_has_walls(uint32_t course);
 // src/companions.cpp: the player's rider's riding pose, for the companions.
 void companion_note_pose(const uint8_t* rdram, uint32_t parts, int32_t animation);
+// patches/swim_back.cpp: whether the human's jet ski is at rest, for X.
+void swim_set_at_rest(bool at_rest);
+// patches/swim_back.cpp: whether the throw beginning was asked for as a
+// backwards dive (X at rest, the throttle off).
+bool swim_take_dive();
 namespace water {
 // src/water.cpp: the course's solid ground, and the skidding body's spray.
 bool ground_height_at(float x, float z, float below, float* height);
@@ -228,7 +233,7 @@ Camera blend(const Camera& a, const Camera& b, float t) {
 }
 
 // The swim back after a fall (see the top).
-enum class Swim { Riding, Thrown, Skidding, Bouncing, Sinking, Settling, Swimming, Arrived, Climbing, Mounted };
+enum class Swim { Riding, Thrown, Dive, Skidding, Bouncing, Sinking, Settling, Swimming, Arrived, Climbing, Mounted };
 struct SwimState {
     Swim phase = Swim::Riding;
     Vec eye{};
@@ -819,7 +824,7 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
                   ? 0 : falling + 1;
     if (test_recover > 0 && falling == test_recover) g_recover.store(true, std::memory_order_relaxed);
     if (g_recover.exchange(false, std::memory_order_relaxed) &&
-        (s.phase == Swim::Thrown || s.phase == Swim::Skidding || s.phase == Swim::Bouncing ||
+        (s.phase == Swim::Thrown || s.phase == Swim::Dive || s.phase == Swim::Skidding || s.phase == Swim::Bouncing ||
          s.phase == Swim::Sinking || s.phase == Swim::Settling || s.phase == Swim::Swimming)) {
         s.eye = Vec{ stern.x, surface(stern) + eye_height, stern.z };
         s.facing = bow;
@@ -835,7 +840,7 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
     Camera shown = chest;
     bool spraying = false;
     float spray_wet = 0.0f;
-    if (animation != kThrown && (s.phase == Swim::Skidding || s.phase == Swim::Bouncing || s.phase == Swim::Sinking ||
+    if (animation != kThrown && (s.phase == Swim::Dive || s.phase == Swim::Skidding || s.phase == Swim::Bouncing || s.phase == Swim::Sinking ||
                                  s.phase == Swim::Settling || s.phase == Swim::Swimming)) {
         // The game moved on without the swimmer: the race ended, say.
         s.phase = animation == kClimbing ? Swim::Climbing : Swim::Riding;
@@ -875,6 +880,20 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
             s.thrown_from = s.last = chest.eye;
             s.peak = chest.eye.y;
             s.walled = false;
+            // Asked for at rest: a backwards dive off the jet ski,
+            // played here over the game's throw.
+            if (swim_take_dive()) {
+                s.phase = Swim::Dive;
+                s.entry = chest;
+                s.eye = chest.eye;
+                s.facing = bow;
+                s.spin = 0.0f;
+                s.spin_axis = normalised(cross(Vec{ 0.0f, 1.0f, 0.0f }, bow));
+                if (log) {
+                    std::fprintf(stderr, "[wr64-swim] backwards dive off the jet ski\n");
+                    std::fflush(stderr);
+                }
+            }
         }
         break;
     case Swim::Thrown: {
@@ -1001,6 +1020,41 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
             std::fflush(stderr);
         }
         shown = s.phase == Swim::Swimming ? swimmer() : s.entry;
+        break;
+    }
+    case Swim::Dive: {
+        // A backwards dive off the jet ski: up a little and back, turning
+        // half over backwards so the water comes up head first behind it
+        // (kDiveTime seconds, into the water kDiveDeep units); under, the
+        // turn goes on round to upright as the diver glides on and up a
+        // little (kGlideTime); then the swim back begins, coming up at a
+        // slant.
+        constexpr float kDiveTime = 0.7f, kGlideTime = 0.9f;
+        constexpr float kDiveUp = 35.0f, kDiveBack = 140.0f, kDiveDeep = 70.0f, kGlideBack = 60.0f;
+        ++s.frames;
+        const float seconds = float(s.frames) * kFrameTime;
+        const Vec start = s.entry.eye;
+        const Vec back = s.facing * -1.0f;
+        const float water = surface(start + back * kDiveBack);
+        if (seconds <= kDiveTime) {
+            const float t = seconds / kDiveTime;
+            const float lift = kDiveUp * 4.0f * t * (1.0f - t);
+            const float drop = (start.y - (water - kDiveDeep)) * t * t;
+            s.eye = start + back * (kDiveBack * t) + Vec{ 0.0f, lift - drop, 0.0f };
+            s.spin = -3.14159265f * t * t * (3.0f - 2.0f * t);
+        }
+        else {
+            const float t = std::min(1.0f, (seconds - kDiveTime) / kGlideTime);
+            const float e = t * t * (3.0f - 2.0f * t);
+            s.eye = Vec{ start.x, water - kDiveDeep + 25.0f * e, start.z } + back * (kDiveBack + kGlideBack * e);
+            s.spin = -3.14159265f - 3.14159265f * e;
+        }
+        s.eye.y = std::max(s.eye.y, ground(s.eye) + 15.0f);
+        shown = tumbled(swimmer(), s.spin_axis, s.spin);
+        if (seconds >= kDiveTime + kGlideTime) {
+            s.spin = 0.0f;
+            start_swim(true);
+        }
         break;
     }
     case Swim::Skidding: {
@@ -1249,7 +1303,7 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
     body_splash_note(s.phase == Swim::Riding && animation == kRiding, at_hull.x, at_hull.z, surface(at_hull), bow.x, bow.z,
                      s.phase == Swim::Skidding || s.phase == Swim::Bouncing, s.body.x, s.body.z, surface(s.body),
                      s.velocity.x, s.velocity.z, spray_wet);
-    swim_set_holding(s.phase == Swim::Thrown || s.phase == Swim::Skidding || s.phase == Swim::Bouncing || s.phase == Swim::Sinking ||
+    swim_set_holding(s.phase == Swim::Thrown || s.phase == Swim::Dive || s.phase == Swim::Skidding || s.phase == Swim::Bouncing || s.phase == Swim::Sinking ||
                      s.phase == Swim::Settling || s.phase == Swim::Swimming);
     return shown;
 }
@@ -1277,6 +1331,16 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
     // The rider's riding pose, for the companions on the water (before the
     // body is shrunk away below).
     companion_note_pose(rdram, parts, *reinterpret_cast<const int32_t*>(rdram + kRiderState + slot * kRiderStateStride + kAnimation));
+    // Whether the jet ski is at rest: its hull moving less than a unit a
+    // frame, ten frames running.
+    {
+        static Vec last_hull{};
+        static int still = 0;
+        const Vec at = row(read_matrix(rdram, parts + kHull * kPartStride), 3);
+        still = length(Vec{ at.x - last_hull.x, 0.0f, at.z - last_hull.z }) < 1.0f ? std::min(still + 1, 100) : 0;
+        last_hull = at;
+        swim_set_at_rest(still >= 10);
+    }
     if (!vr::first_person()) {
         g_swim.phase = Swim::Riding;
         swim_set_holding(false);

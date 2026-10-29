@@ -157,6 +157,8 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
 // src/body_splash.cpp: the game's bow splash round the thrown rider's
 // skidding body, to call after the game's particles; or 0.
 uint32_t body_splash_list(uint8_t* rdram, uint32_t list, uint32_t segment5, uint32_t segment3);
+// The same round the fellow rider's jet ski on Dolphin Park; or 0.
+uint32_t body_splash_companion_list(uint8_t* rdram, uint32_t segment3);
 // src/fish.cpp: Dolphin Park's fish, each drawn twice and varied.
 bool fish_rewrite(uint8_t* rdram, const uint32_t segments[16], uint32_t course, uint32_t at, uint32_t* next,
                   std::vector<std::pair<uint32_t, uint32_t>>& out);
@@ -2345,6 +2347,9 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
                 // draws from a list it builds each frame behind segment 5.
                 if (w1 == 0x05000000u && racing(state)) {
                     if (const uint32_t splash = wr64::body_splash_list(rdram, w.physical(w1), w.segments[5], w.segments[3])) {
+                        w.emit(uint32_t(kOpDisplayList) << 24, splash);
+                    }
+                    if (const uint32_t splash = wr64::body_splash_companion_list(rdram, w.segments[3])) {
                         w.emit(uint32_t(kOpDisplayList) << 24, splash);
                     }
                 }

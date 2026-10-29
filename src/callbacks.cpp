@@ -64,6 +64,8 @@ RspExitReason aspMain_run(uint8_t* rdram, uint32_t ucode_addr);
 namespace wr64 {
 std::atomic<float> g_stick_x{ 0.0f };
 float last_stick_x() { return g_stick_x.load(std::memory_order_relaxed); }
+std::atomic<bool> g_throttle{ false };
+bool throttle_held() { return g_throttle.load(std::memory_order_relaxed); }
 // patches/swim_back.cpp: a debug wipe-out (F3).
 void swim_request_throw();
 }
@@ -315,6 +317,7 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
     *x = stick_x / 80.0f;
     *y = stick_y / 80.0f;
     wr64::g_stick_x.store(*x, std::memory_order_relaxed);
+    wr64::g_throttle.store((pressed & BTN_A) != 0, std::memory_order_relaxed);
     wr64::trace_input(controller_num,*buttons,*x,*y);
     return true;
 }

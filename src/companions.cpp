@@ -61,6 +61,8 @@ namespace wr64 {
 
 // patches/water_all_round.cpp: the waves' height at a point.
 float water_height_at(uint32_t segment3, float x, float z);
+// src/body_splash.cpp: the companion's jet ski this frame, for its spray.
+void body_splash_companion(bool on_water, float x, float z, float water, float ahead_x, float ahead_z, float speed);
 
 }  // namespace wr64
 
@@ -317,6 +319,266 @@ float face_height(float x) {
     return kRampTop;
 }
 
+
+// ---- driving -----------------------------------------------------------
+//
+// It drives itself: steering for a point kLookahead units on along whichever
+// route it follows, turning at most kTurnRate, gathering speed to kSpeed.
+// Following a route it keeps to it; told to change, it simply steers for the
+// other, and so sweeps onto it in a natural curve at speed, never stopping.
+// Its two routines: the stunt loop over the ramp, and a lap of the park's
+// edge (a circle of kLapRadius about the middle, inside the buoys and clear
+// of the island and the arches), each kept for 60 to 200 seconds by chance.
+// The change comes where the two meet, in the park's north-east, so the
+// curve between them is short and over open water.
+//
+// Off the ramp's crest it flies and turns once in the air -- a roll either
+// way, or a flip forwards or backwards, a quarter's chance each -- and one
+// time in five gets it wrong: three-quarters round, it lands badly, the
+// rider thrown off ahead, tumbling into the water and under, while the jet
+// ski slews to a stop; five seconds on, the rider is back on and away.
+enum class Routine { Stunts, Lap };
+enum class Crash { None, Thrown, Waiting };
+struct Drive {
+    std::chrono::steady_clock::time_point last{}, change_at{}, crash_at{};
+    Routine routine = Routine::Stunts;
+    bool change = false;
+    float x = 0, y = 0, z = 0, heading = 0, speed = 0, climb = 0, bank = 0, flip = 0, turning = 0;
+    int nearest = -1;
+    bool on_ramp = false, airborne = false, failed = false;
+    float rise = 0, air = 0;
+    int stunt = 0;
+    Crash crash = Crash::None;
+    float body_x = 0, body_y = 0, body_z = 0, body_hx = 1, body_hz = 0, body_spin = 0, body_rise = 0, body_speed = 0;
+} g_drive;
+
+constexpr float kLookahead = 900.0f, kTurnRate = 1.1f, kAccel = 450.0f, kSample = 50.0f;
+constexpr float kLapRadius = 7000.0f;
+
+std::mt19937& chance() {
+    static std::mt19937 engine{ std::random_device{}() };
+    return engine;
+}
+float uniform(float lo, float hi) { return lo + (hi - lo) * float(chance()() % 100000u) / 100000.0f; }
+
+// WR64_COMPANION_TEST_CHANGE=<seconds>, in a scripted run only: each routine
+// kept that long instead of 60 to 200 seconds.
+std::chrono::milliseconds routine_length() {
+    static const float test = [] {
+        const char* value = std::getenv("WR64_COMPANION_TEST_CHANGE");
+        return value != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr ? float(std::atof(value)) : 0.0f;
+    }();
+    return std::chrono::milliseconds(int((test > 0.0f ? test : uniform(60.0f, 200.0f)) * 1000.0f));
+}
+
+// A routine's route as points kSample apart, in the way it is driven.
+const std::vector<std::pair<float, float>>& route(Routine r) {
+    static const std::vector<std::pair<float, float>> stunts = [] {
+        std::vector<std::pair<float, float>> v;
+        const float loop = 2.0f * ((kEast - kWest) + 3.14159265f * kRadius);
+        for (float s = 0.0f; s < loop; s += kSample) { const Track t = track(s); v.emplace_back(t.x, t.z); }
+        return v;
+    }();
+    static const std::vector<std::pair<float, float>> lap = [] {
+        std::vector<std::pair<float, float>> v;
+        const int n = int(6.2831853f * kLapRadius / kSample);
+        for (int i = 0; i < n; ++i) {
+            const float a = 6.2831853f * float(i) / float(n);
+            v.emplace_back(kLapRadius * std::cos(a), kLapRadius * std::sin(a));
+        }
+        return v;
+    }();
+    return r == Routine::Stunts ? stunts : lap;
+}
+
+void start_drive(std::chrono::steady_clock::time_point now) {
+    Drive& d = g_drive;
+    d = Drive{};
+    d.last = now;
+    d.routine = Routine::Stunts;
+    d.change_at = now + routine_length();
+    const Track t = track(0.0f);
+    d.x = t.x; d.z = t.z; d.heading = std::atan2(t.hz, t.hx); d.speed = kSpeed;
+}
+
+// A hull's frame: at (x, y, z), heading (hx, hz), pitched up by `pitch`,
+// banked about its length by `bank`, and turned head over heels by `flip`.
+Matrix frame_matrix(float x, float y, float z, float hx, float hz, float pitch, float bank, float flip) {
+    struct V { float x, y, z; };
+    auto add = [](V a, V b, float k) { return V{ a.x + b.x * k, a.y + b.y * k, a.z + b.z * k }; };
+    auto times = [](V a, float k) { return V{ a.x * k, a.y * k, a.z * k }; };
+    const V f{ hx * std::cos(pitch), std::sin(pitch), hz * std::cos(pitch) };
+    const V u{ -hx * std::sin(pitch), std::cos(pitch), -hz * std::sin(pitch) };
+    const float h = g_pose.handed;
+    const V r{ (u.y * f.z - u.z * f.y) * h, (u.z * f.x - u.x * f.z) * h, (u.x * f.y - u.y * f.x) * h };
+    // Banked: up and across turned about the length.
+    const float cb = std::cos(bank), sb = std::sin(bank);
+    const V u2 = add(times(u, cb), r, sb), r2 = add(times(r, cb), u, -sb);
+    // Flipped: the length and up turned about the across.
+    const float cf = std::cos(flip), sf = std::sin(flip);
+    const V f3 = add(times(f, cf), u2, -sf), u3 = add(times(u2, cf), f, sf);
+    Matrix m{};
+    const float s = g_pose.scale;
+    m.m[0][0] = r2.x * s; m.m[0][1] = r2.y * s; m.m[0][2] = r2.z * s;
+    m.m[1][0] = u3.x * s; m.m[1][1] = u3.y * s; m.m[1][2] = u3.z * s;
+    m.m[2][0] = f3.x * s; m.m[2][1] = f3.y * s; m.m[2][2] = f3.z * s;
+    m.m[3][0] = x; m.m[3][1] = y; m.m[3][2] = z; m.m[3][3] = 1.0f;
+    return m;
+}
+
+void drive(uint32_t segment3, std::chrono::steady_clock::time_point now, float dt) {
+    Drive& d = g_drive;
+    static const bool log = std::getenv("WR64_COMPANION_LOG") != nullptr;
+    const float water = water_height_at(segment3, d.x, d.z);
+
+    // Time for the other routine: changed where the two meet.
+    if (!d.change && now >= d.change_at) d.change = true;
+    if (d.change && !d.airborne && d.crash == Crash::None && d.x > 4300.0f && d.z > 3000.0f && d.z < 6300.0f) {
+        d.change = false;
+        d.routine = d.routine == Routine::Stunts ? Routine::Lap : Routine::Stunts;
+        d.nearest = -1;
+        d.change_at = now + routine_length();
+        if (log) {
+            std::fprintf(stderr, "[wr64-companion] off on %s\n", d.routine == Routine::Stunts ? "a stunt run" : "a lap of the park");
+            std::fflush(stderr);
+        }
+    }
+
+    // A bail: the rider thrown off ahead, then under, then back on.
+    if (d.crash != Crash::None) {
+        const float since = std::chrono::duration<float>(now - d.crash_at).count();
+        d.speed = std::max(0.0f, d.speed - 700.0f * dt);
+        d.flip *= std::max(0.0f, 1.0f - 6.0f * dt);
+        d.bank *= std::max(0.0f, 1.0f - 6.0f * dt);
+        d.x += std::cos(d.heading) * d.speed * dt;
+        d.z += std::sin(d.heading) * d.speed * dt;
+        d.y = water;
+        d.climb = 0.0f;
+        const float body_water = water_height_at(segment3, d.body_x, d.body_z);
+        if (d.crash == Crash::Thrown) {
+            d.body_x += d.body_hx * d.body_speed * dt;
+            d.body_z += d.body_hz * d.body_speed * dt;
+            d.body_rise -= kGravity * dt;
+            d.body_y += d.body_rise * dt;
+            d.body_spin += 9.0f * dt;
+            if (d.body_y <= body_water && d.body_rise < 0.0f) {
+                d.crash = Crash::Waiting;
+                d.body_speed = 0.0f;
+            }
+        }
+        else {
+            d.body_y -= 60.0f * dt;                     // sinking out of sight
+        }
+        if (since > 5.0f) {
+            d.crash = Crash::None;
+            d.flip = d.bank = 0.0f;
+        }
+        return;
+    }
+
+    if (d.airborne) {
+        // Flying, turning the stunt, then down onto the water.
+        d.air += dt;
+        d.x += std::cos(d.heading) * d.speed * dt;
+        d.z += std::sin(d.heading) * d.speed * dt;
+        d.rise -= kGravity * dt;
+        d.y += d.rise * dt;
+        d.climb = d.rise / std::max(d.speed, 1.0f);
+        const float r = std::clamp((d.air - kRollStart) / kRollLength, 0.0f, 1.0f);
+        const float turn = 6.2831853f * (d.failed ? 0.72f : 1.0f) * r * r * (3.0f - 2.0f * r);
+        d.bank = d.stunt == 0 ? turn : d.stunt == 1 ? -turn : 0.0f;
+        d.flip = d.stunt == 2 ? turn : d.stunt == 3 ? -turn : 0.0f;
+        if (d.y <= water && d.rise < 0.0f) {
+            d.airborne = false;
+            d.y = water;
+            d.climb = 0.0f;
+            if (d.failed) {
+                d.crash = Crash::Thrown;
+                d.crash_at = now;
+                d.body_x = d.x; d.body_y = water + 40.0f; d.body_z = d.z;
+                d.body_hx = std::cos(d.heading); d.body_hz = std::sin(d.heading);
+                d.body_speed = d.speed * 0.6f;
+                d.body_rise = 220.0f;
+                d.body_spin = 0.0f;
+                if (log) {
+                    std::fprintf(stderr, "[wr64-companion] bailed the landing\n");
+                    std::fflush(stderr);
+                }
+            }
+            else {
+                d.bank = d.flip = 0.0f;
+            }
+        }
+        return;
+    }
+
+    // On the water: steering for a point ahead on its route, up to speed.
+    d.speed = std::min(kSpeed, d.speed + kAccel * dt);
+    const auto& points = route(d.routine);
+    const int n = int(points.size());
+    auto distance2 = [&](int i) {
+        const float dx = points[i].first - d.x, dz = points[i].second - d.z;
+        return dx * dx + dz * dz;
+    };
+    if (d.nearest < 0) {
+        d.nearest = 0;
+        for (int i = 1; i < n; ++i) if (distance2(i) < distance2(d.nearest)) d.nearest = i;
+    }
+    else {
+        int best = d.nearest;
+        for (int k = -10; k <= 40; ++k) {
+            const int i = ((d.nearest + k) % n + n) % n;
+            if (distance2(i) < distance2(best)) best = i;
+        }
+        d.nearest = best;
+    }
+    const auto& target = points[(d.nearest + int(kLookahead / kSample)) % n];
+    const float want = std::atan2(target.second - d.z, target.first - d.x);
+    const float diff = std::remainder(want - d.heading, 6.2831853f);
+    const float step = std::clamp(diff, -kTurnRate * dt, kTurnRate * dt);
+    d.heading = std::remainder(d.heading + step, 6.2831853f);
+    d.turning += ((dt > 0.0f ? step / dt : 0.0f) - d.turning) * std::min(1.0f, 6.0f * dt);
+    d.x += std::cos(d.heading) * d.speed * dt;
+    d.z += std::sin(d.heading) * d.speed * dt;
+    d.bank = kLean * std::clamp(d.turning / (kSpeed / kRadius), -1.0f, 1.0f);
+    d.flip = 0.0f;
+
+    // The ramp: up its face, heading along it on the stunt run, and off the
+    // crest into the air with a stunt picked.
+    const bool along_ramp = d.routine == Routine::Stunts && std::cos(d.heading) > 0.95f &&
+                            d.z > kRampNear + 100.0f && d.z < kRampFar - 100.0f;
+    if (along_ramp && d.x >= kRampStart && d.x < kRampCrest) {
+        d.on_ramp = true;
+        d.y = std::max(water, face_height(d.x));
+        d.climb = (face_height(d.x + 10.0f) - face_height(d.x - 10.0f)) / 20.0f;
+    }
+    else if (d.on_ramp && d.x >= kRampCrest) {
+        d.on_ramp = false;
+        d.airborne = true;
+        d.air = 0.0f;
+        d.y = kRampTop;
+        d.rise = kPop;
+        d.stunt = int(chance()() % 4u);
+        d.failed = chance()() % 5u == 0;
+        // WR64_COMPANION_TEST_STUNT=<0-3>[,fail], in a scripted run only.
+        static const int forced = [] {
+            const char* value = std::getenv("WR64_COMPANION_TEST_STUNT");
+            return value != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr ? (value[0] - '0') + (std::strchr(value, 'f') ? 10 : 0) : -1;
+        }();
+        if (forced >= 0) { d.stunt = forced % 10; d.failed = forced >= 10; }
+        if (log) {
+            static const char* names[] = { "a roll left", "a roll right", "a front flip", "a back flip" };
+            std::fprintf(stderr, "[wr64-companion] off the ramp: %s%s\n", names[d.stunt], d.failed ? ", going wrong" : "");
+            std::fflush(stderr);
+        }
+    }
+    else {
+        d.on_ramp = false;
+        d.y = water;
+        d.climb = 0.0f;
+    }
+}
+
 }  // namespace
 
 // From src/first_person.cpp, at each race frame's view, before the body is
@@ -353,16 +615,16 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
     // without -- brings a racer of its own, one the player is not, by chance,
     // and starts its run again.
     using Clock = std::chrono::steady_clock;
-    static Clock::time_point start{}, last{};
+    static Clock::time_point last{};
     const Clock::time_point now = Clock::now();
-    if (g_racer.character < 0 || now - last > std::chrono::seconds(2)) {
+    const bool fresh = g_racer.character < 0 || now - last > std::chrono::seconds(2);
+    if (fresh) {
         const int player = player_character(rdram);
         static std::mt19937 chance{ std::random_device{}() };
         int c = int(chance() % uint32_t(kCharacters - 1));
         if (player >= 0 && c >= player) ++c;
         g_racer.character = c;
         g_racer.ready = load_racer(rdram, c);
-        start = now;
         std::fprintf(stderr, "[wr64-companion] character %d rides with the player (character %d)%s\n", c, player,
                      g_racer.ready ? "" : ": its models did not load");
         std::fflush(stderr);
@@ -370,47 +632,21 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
     last = now;
     if (!g_racer.ready) return;
     const uint32_t* lists = g_racer.lists;
+    (void)lists;
 
-    // Where round its run it is now.
-    const float seconds = std::chrono::duration<float>(now - start).count();
-    const float along = seconds * kSpeed;
-    const Track t = track(along);
-    const float water = water_height_at(segments[3], t.x, t.z);
-    float y = water, climb = 0.0f, roll = 0.0f;
-    const bool on_ramp_line = t.outbound && t.z > kRampNear && t.z < kRampFar;
-    if (on_ramp_line && t.x >= kRampStart && t.x < kRampCrest) {
-        // Up the ramp's face.
-        y = std::max(water, face_height(t.x));
-        climb = (face_height(t.x + 10.0f) - face_height(t.x - 10.0f)) / 20.0f;
-    }
-    else if (on_ramp_line && t.x >= kRampCrest) {
-        // Off the crest: flying, then down onto the water.
-        const float air = (t.x - kRampCrest) / kSpeed;
-        const float height = kRampTop + kPop * air - 0.5f * kGravity * air * air;
-        if (height > water) {
-            y = height;
-            climb = (kPop - kGravity * air) / kSpeed;
-            const float r = std::clamp((air - kRollStart) / kRollLength, 0.0f, 1.0f);
-            roll = 6.2831853f * r * r * (3.0f - 2.0f * r);
-        }
-    }
-    // Its axes: ahead along its heading, pitched by its climb; up; across.
-    // Leaning into a turn, and rolling in the air, about the way it goes.
-    const float pitch = std::atan(climb);
-    float fx = t.hx * std::cos(pitch), fy = std::sin(pitch), fz = t.hz * std::cos(pitch);
-    float ux = -t.hx * std::sin(pitch), uy = std::cos(pitch), uz = -t.hz * std::sin(pitch);
-    // across = up x ahead, or the other way, as the game's hull has it
-    const float h = g_pose.handed;
-    float rx = (uy * fz - uz * fy) * h, ry = (uz * fx - ux * fz) * h, rz = (ux * fy - uy * fx) * h;
-    const float bank = roll + kLean * t.turn;
-    const float c = std::cos(bank), sn = std::sin(bank);
-    const float ux2 = ux * c + rx * sn, uy2 = uy * c + ry * sn, uz2 = uz * c + rz * sn;
-    const float rx2 = rx * c - ux * sn, ry2 = ry * c - uy * sn, rz2 = rz * c - uz * sn;
-    Matrix hull{};
-    const float s = g_pose.scale;
-    hull.m[0][0] = rx2 * s; hull.m[0][1] = ry2 * s; hull.m[0][2] = rz2 * s;
-    hull.m[1][0] = ux2 * s; hull.m[1][1] = uy2 * s; hull.m[1][2] = uz2 * s;
-    hull.m[2][0] = fx * s;  hull.m[2][1] = fy * s;  hull.m[2][2] = fz * s;
+    // Its driving this frame.
+    const float dt = std::clamp(std::chrono::duration<float>(now - g_drive.last).count(), 0.0f, 0.1f);
+    g_drive.last = now;
+    if (fresh) start_drive(now);
+    drive(segments[3], now, dt);
+    const Drive& d = g_drive;
+    const float hx = std::cos(d.heading), hz = std::sin(d.heading);
+    Matrix hull = frame_matrix(d.x, d.y, d.z, hx, hz, std::atan(d.climb), d.bank, d.flip);
+    Matrix body = d.crash == Crash::None ? hull : frame_matrix(d.body_x, d.body_y, d.body_z, d.body_hx, d.body_hz, 0.0f, 0.0f, d.body_spin);
+    const bool body_shown = d.crash == Crash::None || d.body_y > water_height_at(segments[3], d.body_x, d.body_z) - 80.0f;
+    // The spray round its hull, on the water and moving (src/body_splash.cpp).
+    body_splash_companion(!d.airborne && d.crash != Crash::Waiting, d.x, d.z,
+                          water_height_at(segments[3], d.x, d.z), hx, hz, d.speed);
     // WR64_COMPANION_TEST_OFFSET=<dx>,<dz>, in a scripted run only: drawn
     // that far from where it rides, to bring it before a test's camera.
     static const std::pair<float, float> offset = [] {
@@ -419,7 +655,7 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         if (value != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr) std::sscanf(value, "%f,%f", &o.first, &o.second);
         return o;
     }();
-    hull.m[3][0] = t.x + offset.first; hull.m[3][1] = y; hull.m[3][2] = t.z + offset.second; hull.m[3][3] = 1.0f;
+    for (Matrix* m : { &hull, &body }) { m->m[3][0] += offset.first; m->m[3][2] += offset.second; }
     // WR64_COMPANION_TEST_BESIDE=1, in a scripted run only: drawn beside the
     // player's jet ski instead, 400 units ahead and 200 to its left.
     static const bool beside = std::getenv("WR64_COMPANION_TEST_BESIDE") != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr;
@@ -427,19 +663,24 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         hull = g_pose.hull;
         const float side = 200.0f / g_pose.scale, ahead = 400.0f / g_pose.scale;
         for (int c2 = 0; c2 < 3; ++c2) hull.m[3][c2] += hull.m[0][c2] * side + hull.m[2][c2] * ahead;
+        body = hull;
     }
 
     static const bool log = std::getenv("WR64_COMPANION_LOG") != nullptr;
     static int frames = 0;
     if (log && frames++ % 40 == 0) {
-        std::fprintf(stderr, "[wr64-companion] at %.0f %.0f %.0f, roll %.2f, first part list %08X\n", t.x, y, t.z, roll, lists[0]);
+        std::fprintf(stderr, "[wr64-companion] at %.0f %.0f %.0f, %s, speed %.0f, heading %.2f\n", d.x, d.y, d.z,
+                     d.routine == Routine::Stunts ? "stunts" : "lap", d.speed, d.heading);
         std::fflush(stderr);
     }
 
     const uint32_t base = kMatrices + uint32_t(b) * kMatrixStride;
     for (int p = 0; p < kParts; ++p) {
         const uint32_t address = base + uint32_t(p) * 64;
-        write_matrix(rdram, address, multiply(g_pose.parts[p], hull));
+        // The jet ski's parts (0 to 2) on its hull; the rider's on the body,
+        // apart from it after a bail, and gone once under.
+        if (p >= 3 && !body_shown) continue;
+        write_matrix(rdram, address, multiply(g_pose.parts[p], p < 3 ? hull : body));
         out.emplace_back(0x01020040u, 0x80000000u | address);
         out.emplace_back(0x06000000u, lists[p < kUniqueParts ? p : p - 6]);
     }
