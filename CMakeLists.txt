@@ -223,6 +223,7 @@ if(WR64_WITH_RUNTIME AND WR64_WITH_RECOMPILED)
                              src/testdrive.cpp src/display.cpp src/dlrewrite.cpp src/water.cpp src/music.cpp src/textures.cpp
                              src/haptics.cpp src/haptics_mixer.cpp src/haptics_output.cpp src/haptics_observation.cpp
                              src/vr.cpp src/first_person.cpp src/seafloor.cpp src/body_splash.cpp src/fish.cpp
+                             src/underwater_audio.cpp
     src/companions.cpp)
     if(WIN32)
         # VR mode's OpenXR session, on RT64's Direct3D 12 device.

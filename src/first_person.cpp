@@ -75,6 +75,7 @@
 // water's fog is drawn round it after the scene and before the HUD: thicker
 // with distance, lighter towards the surface, darker the deeper one looks.
 
+#include "wr64/underwater_audio.h"
 #include "wr64/vr.h"
 
 #include <algorithm>
@@ -1583,6 +1584,8 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
     }
     const float surface = water_height_at(segment3, eye.x, eye.z);
     const uint32_t breath = build_bubbles(rdram, b, camera, surface, course, eye.y < surface);
+    // And everything heard through water (src/underwater_audio.cpp).
+    underwater_audio::set_underwater(eye.y < surface);
     if (eye.y < surface) {
         *haze = 0x80000000u | build_haze(rdram, b, eye, surface, course);
         *identity = 0x80000000u | (kHaze + uint32_t(b) * kHazeStride);

@@ -48,6 +48,7 @@
 #include "wr64/renderer.h"
 #include "wr64/water.h"
 #include "wr64/music.h"
+#include "wr64/underwater_audio.h"
 #include "wr64/haptics.h"
 #include "wr64/vr.h"
 
@@ -445,6 +446,8 @@ void queue_samples(int16_t* audio_data, size_t sample_count) {
     }
 
     wr64::music::mix(unswapped.data(), sample_count, g_audio_frequency);
+    // Everything heard through water while the first-person eye is under.
+    wr64::underwater_audio::process(unswapped.data(), sample_count, g_audio_frequency);
     SDL_QueueAudio(g_audio_device, unswapped.data(),
                    static_cast<Uint32>(sample_count * sizeof(int16_t)));
 
