@@ -153,7 +153,8 @@ bool sky_all_round(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyList
 bool sky_results_dome(uint8_t* rdram, uint32_t segment3, uint32_t segment6, SkyLists* lists);
 // src/first_person.cpp: a view from the player's rider to multiply onto the
 // projection in place of the game's, its head shrunk away; or 0.
-uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity, uint32_t* underside);
+uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity, uint32_t* underside,
+                           uint32_t* bubbles);
 // src/body_splash.cpp: the game's bow splash round the thrown rider's
 // skidding body, to call after the game's particles; or 0.
 uint32_t body_splash_list(uint8_t* rdram, uint32_t list, uint32_t segment5, uint32_t segment3);
@@ -463,7 +464,7 @@ struct Walker {
     // With a first-person eye below the waves: the water's fog to draw round
     // it, the matrix for it, the waves' underside to draw in their place, and
     // whether the fog has been drawn this frame.
-    uint32_t haze_list = 0, haze_identity = 0, underside_list = 0;
+    uint32_t haze_list = 0, haze_identity = 0, underside_list = 0, bubble_list = 0;
     bool haze_drawn = false;
     Class cls = Class::Auto;
     uint32_t centred_sections = 0;
@@ -2060,6 +2061,21 @@ void draw_water_fog(Walker& w, uint32_t state) {
     w.emit(0xB900031Du, 0x00504A50u);                   // translucent surface, depth tested, not written
     w.emit(0xFCFFFFFFu, 0xFFFE793Cu);                   // shade colour and opacity, both cycles
     w.emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, w.haze_identity);
+    // The rider's breath's bubbles first, in a state of their own, so the fog
+    // veils those farther off (src/first_person.cpp, build_bubbles); then the
+    // fog's state put back.
+    if (w.bubble_list != 0) {
+        w.emit(uint32_t(kOpDisplayList) << 24, w.bubble_list);
+        w.emit(0xE7000000u, 0);                         // pipe sync
+        w.emit(0xBB000000u, 0x00000000u);               // texture off
+        w.emit(0xB6000000u, 0x000F3000u);
+        w.emit(0xB7000000u, 0x00000205u);
+        w.emit(0xBA001402u, 0x00000000u);
+        w.emit(0xB9000002u, 0x00000000u);
+        w.emit(0xB9000201u, 0x00000000u);
+        w.emit(0xB900031Du, 0x00504A50u);
+        w.emit(0xFCFFFFFFu, 0xFFFE793Cu);
+    }
     w.emit(uint32_t(kOpDisplayList) << 24, w.haze_list);
     w.emit(0xBD000000u, 0);                             // pop the modelview
     w.emit(ex | G_EX_POPCOMBINE_V1, 0);
@@ -2502,7 +2518,8 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             if ((params & kMtxProjection) && !(params & kMtxLoad) && w1 == kSceneView && racing(state)) {
                 if (!w.first_person_tried) {
                     w.first_person_tried = true;
-                    w.first_person_view = wr64::first_person_view(rdram, w.segments[3], &w.haze_list, &w.haze_identity, &w.underside_list);
+                    w.first_person_view = wr64::first_person_view(rdram, w.segments[3], &w.haze_list, &w.haze_identity,
+                                                                  &w.underside_list, &w.bubble_list);
                 }
                 if (w.first_person_view != 0) matrix = w.first_person_view;
             }

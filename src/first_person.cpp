@@ -158,6 +158,12 @@ constexpr uint32_t kHazeList = 0x18000;
 // And after them the waves' underside: its vertices, then its list.
 constexpr uint32_t kUnderVertices = 0x2D000;
 constexpr uint32_t kUnderList = 0x2E000;
+// Then the rider's breath's bubbles: their list and vertices; and their
+// texture, once, at the end of the first frame buffer's area.
+constexpr uint32_t kBubbleMatrix = 0x2FF00;
+constexpr uint32_t kBubbleList = 0x30000;
+constexpr uint32_t kBubbleVertices = 0x31000;
+constexpr uint32_t kBubbleTexture = kHaze + 0x3F000;
 
 // The rider's animations: riding, thrown off, and climbing back on.
 constexpr int32_t kRiding = 22, kThrown = 23, kClimbing = 7;
@@ -527,6 +533,189 @@ uint32_t build_underside(uint8_t* rdram, int b, Vec eye, uint32_t segment3, uint
     }
     command(0xB8u << 24, 0);
     return base + kUnderList;
+}
+
+// The rider's breath while the eye is below the waves: every few seconds a
+// breath out, a small burst of bubbles from just in front of and below the
+// eye, rising, wobbling as they go, quicker the bigger they are, and gone at
+// the surface. Each is a flat round sprite turned to face the eye, as the
+// game's buoys are: an original 32x32 texture made here (intensity and
+// opacity, a bright rim, a clearer middle and a highlight), tinted by the
+// course's water and dimmer the deeper the eye. Drawn just before the
+// water's fog (see draw_water_fog in src/dlrewrite.cpp), so those farther off
+// fade into it. Back above the water they are gone. WR64_BUBBLES=0 leaves
+// them out. Being only a few units across, their vertices are kept sixteen
+// times larger, about the eye, and drawn under a matrix bringing them back:
+// whole-unit vertices would have snapped their corners about.
+struct Bubble { Vec at, velocity; float radius, age, wobble, phase; };
+
+void make_bubble_texture(uint8_t* rdram) {
+    for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            const float dx = (float(x) + 0.5f - 16.0f) / 15.0f, dy = (float(y) + 0.5f - 16.0f) / 15.0f;
+            const float r = std::sqrt(dx * dx + dy * dy);
+            float alpha = 0.0f, light = 0.0f;
+            if (r <= 1.0f) {
+                // A film seen edge-on at its rim, face-on in the middle.
+                const float rim = std::pow(r, 6.0f);
+                alpha = 0.28f + 0.67f * rim;
+                light = 0.70f + 0.30f * rim;
+                // The window's reflection, up and to the left.
+                const float hx = dx + 0.38f, hy = dy + 0.38f;
+                const float spot = std::max(0.0f, 1.0f - std::sqrt(hx * hx + hy * hy) / 0.22f);
+                alpha = std::max(alpha, spot);
+                light = std::max(light, 0.75f + 0.25f * spot);
+                // Soft at the very edge.
+                alpha *= clamp01((1.0f - r) * 15.0f);
+            }
+            const uint16_t texel = uint16_t((uint32_t(light * 255.0f) << 8) | uint32_t(alpha * 255.0f));
+            *reinterpret_cast<uint16_t*>(rdram + ((kBubbleTexture + uint32_t(y * 32 + x) * 2) ^ 2)) = texel;
+        }
+    }
+}
+
+uint32_t build_bubbles(uint8_t* rdram, int b, const Camera& camera, float surface, uint32_t course, bool under) {
+    static const bool off = [] { const char* v = std::getenv("WR64_BUBBLES"); return v != nullptr && v[0] == '0'; }();
+    if (off) return 0;
+    static bool texture_made = false;
+    if (!texture_made) {
+        make_bubble_texture(rdram);
+        texture_made = true;
+    }
+    constexpr size_t kMost = 48;
+    constexpr float kFine = 16.0f;
+    static std::vector<Bubble> bubbles;
+    static std::mt19937 chance{ std::random_device{}() };
+    static float until_breath = 0.6f, burst_left = 0.0f, until_next = 0.0f;
+    static int burst_count = 0;
+    const auto uniform = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(chance); };
+    if (!under) {
+        bubbles.clear();
+        until_breath = 0.6f;
+        burst_count = 0;
+        return 0;
+    }
+
+    // A breath out every few seconds: six to twelve bubbles over half a
+    // second, from the mouth, a little ahead of and below the eye.
+    until_breath -= kFrameTime;
+    if (until_breath <= 0.0f) {
+        until_breath = uniform(2.2f, 4.0f);
+        burst_count = int(uniform(6.0f, 12.99f));
+        burst_left = 0.5f;
+        until_next = 0.0f;
+    }
+    if (burst_count > 0) {
+        burst_left -= kFrameTime;
+        until_next -= kFrameTime;
+        while (until_next <= 0.0f && burst_count > 0 && bubbles.size() < kMost) {
+            // Just past the camera's near plane (10 units): any nearer and
+            // they would be cut away.
+            const Vec mouth = camera.eye + camera.ahead * 12.0f - camera.up * 4.0f;
+            const Vec spread = camera.right * uniform(-2.0f, 2.0f) + camera.up * uniform(-1.0f, 1.0f);
+            bubbles.push_back({ mouth + camera.right * uniform(-1.0f, 1.0f), camera.ahead * uniform(3.0f, 6.0f) + spread,
+                                uniform(0.7f, 2.2f), 0.0f, uniform(0.3f, 0.7f), uniform(0.0f, 6.2831853f) });
+            --burst_count;
+            until_next += 0.5f / 10.0f;
+        }
+        if (burst_left <= 0.0f) burst_count = 0;
+    }
+
+    // Rising: drawn on towards a top speed that grows with size, the breath's
+    // push forward dying away, a little sideways wobble; gone at the surface
+    // or after twelve seconds.
+    for (Bubble& bubble : bubbles) {
+        bubble.age += kFrameTime;
+        // A breath's bubbles rise at 20 to 30 cm a second.
+        const float top = 4.5f + 2.5f * bubble.radius;
+        bubble.velocity.y += (top - bubble.velocity.y) * std::min(1.0f, 2.5f * kFrameTime);
+        bubble.velocity.x *= 1.0f - std::min(1.0f, 2.0f * kFrameTime);
+        bubble.velocity.z *= 1.0f - std::min(1.0f, 2.0f * kFrameTime);
+        const float sway = std::cos(bubble.phase + bubble.age * (3.0f + 1.5f / bubble.radius)) * bubble.wobble * bubble.radius;
+        bubble.at = bubble.at + bubble.velocity * kFrameTime + Vec{ sway * kFrameTime * 6.0f, 0.0f, 0.0f };
+    }
+    bubbles.erase(std::remove_if(bubbles.begin(), bubbles.end(),
+                                 [&](const Bubble& bubble) {
+                                     return bubble.at.y + bubble.radius >= surface || bubble.age > 12.0f ||
+                                            length(bubble.at - camera.eye) > 1500.0f;
+                                 }),
+                  bubbles.end());
+    if (bubbles.empty()) return 0;
+
+    // Each a square facing the eye, four vertices; eight bubbles a load.
+    const uint32_t base = kHaze + uint32_t(b) * kHazeStride;
+    Matrix fine{};
+    for (int i = 0; i < 3; ++i) fine.m[i][i] = 1.0f / kFine;
+    fine.m[3][0] = camera.eye.x; fine.m[3][1] = camera.eye.y; fine.m[3][2] = camera.eye.z;
+    fine.m[3][3] = 1.0f;
+    write_matrix(rdram, base + kBubbleMatrix, fine);
+    auto put_half = [&](uint32_t address, float value) {
+        *reinterpret_cast<int16_t*>(rdram + (address ^ 2)) = int16_t(std::lround(std::clamp(value, -32768.0f, 32767.0f)));
+    };
+    const Vec water = water_colour(course);
+    const Vec tint = mix(water, Vec{ 255.0f, 255.0f, 255.0f }, 0.6f) * std::exp(-std::max(0.0f, surface - camera.eye.y) / 2000.0f);
+    const uint32_t rgba = (uint32_t(std::clamp(tint.x, 0.0f, 255.0f)) << 24) | (uint32_t(std::clamp(tint.y, 0.0f, 255.0f)) << 16) |
+                          (uint32_t(std::clamp(tint.z, 0.0f, 255.0f)) << 8) | 0xE0u;
+    for (size_t i = 0; i < bubbles.size(); ++i) {
+        const Bubble& bubble = bubbles[i];
+        Vec facing = camera.eye - bubble.at;
+        facing = facing * (1.0f / std::max(length(facing), 1e-3f));
+        Vec side = cross(Vec{ 0.0f, 1.0f, 0.0f }, facing);
+        side = length(side) > 1e-3f ? side * (1.0f / length(side)) : camera.right;
+        const Vec lift = cross(facing, side);
+        const float s[4] = { 0.0f, 32.0f, 32.0f, 0.0f }, t[4] = { 32.0f, 32.0f, 0.0f, 0.0f };
+        const float across[4] = { -1.0f, 1.0f, 1.0f, -1.0f }, down[4] = { -1.0f, -1.0f, 1.0f, 1.0f };
+        for (int c = 0; c < 4; ++c) {
+            const Vec p = (bubble.at - camera.eye + side * (across[c] * bubble.radius) + lift * (down[c] * bubble.radius)) * kFine;
+            const uint32_t v = base + kBubbleVertices + uint32_t(i * 4 + c) * 16;
+            put_half(v + 0, p.x); put_half(v + 2, p.y); put_half(v + 4, p.z); put_half(v + 6, 0.0f);
+            put_half(v + 8, s[c] * 32.0f); put_half(v + 10, t[c] * 32.0f);
+            *reinterpret_cast<uint32_t*>(rdram + v + 12) = rgba;
+        }
+    }
+    uint32_t* out = reinterpret_cast<uint32_t*>(rdram + base + kBubbleList);
+    uint32_t commands = 0;
+    auto command = [&](uint32_t w0, uint32_t w1) { out[commands * 2] = w0; out[commands * 2 + 1] = w1; ++commands; };
+    // Its state: one cycle, the texture filtered and in perspective, texture
+    // times shade in colour and opacity, translucent, tested against depth but
+    // not writing it, unlit, unfogged, not culled. (The caller puts RT64's
+    // state back after.)
+    command(0xE7000000u, 0);                                // pipe sync
+    command(0xB6000000u, 0x000F3000u);                      // clear cull, fog, lighting, texgen
+    command(0xB7000000u, 0x00000205u);                      // set z-buffer, shade, smooth shading
+    command(0xBA001402u, 0x00000000u);                      // one cycle
+    command(0xBA000C02u, 0x00002000u);                      // bilinear
+    command(0xBA001301u, 0x00080000u);                      // perspective
+    command(0xBA000903u, 0x00000C00u);                      // convert: filter
+    command(0xBA001001u, 0x00000000u);                      // LOD: tile
+    command(0xBA000E02u, 0x00000000u);                      // no palette
+    command(0xB9000002u, 0x00000000u);                      // no alpha compare
+    command(0xB9000201u, 0x00000000u);                      // depth from the pixel
+    command(0xB900031Du, 0x00504A50u);                      // translucent surface, depth tested, not written
+    command(0xFC121824u, 0xFF33FFFFu);                      // texture times shade, colour and opacity
+    command(0xBB000001u, 0xFFFFFFFFu);                      // texture on, full scale
+    // 32x32 IA16, loaded as a block (a line of 8 64-bit words), clamped.
+    command(0xFD700000u, 0x80000000u | kBubbleTexture);
+    command(0xF5700000u, 0x07000000u);
+    command(0xE6000000u, 0);
+    command(0xF3000000u, ((1024u - 1u) << 12) | 0x100u | 0x07000000u);
+    command(0xE7000000u, 0);
+    command(0xF5700000u | (8u << 9), (2u << 18) | (5u << 14) | (2u << 8) | (5u << 4));
+    command(0xF2000000u, (31u << 14) | (31u << 2));
+    command(0x01060040u, 0x80000000u | (base + kBubbleMatrix));   // load and push the fine matrix
+    for (size_t first = 0; first < bubbles.size(); first += 8) {
+        const uint32_t count = uint32_t(std::min<size_t>(8, bubbles.size() - first));
+        const uint32_t n = count * 4;
+        command((0x04u << 24) | (n << 9) | (n * 16 - 1), 0x80000000u | (base + kBubbleVertices + uint32_t(first * 4) * 16));
+        for (uint32_t q = 0; q < count; ++q) {
+            const uint32_t a = q * 4, bb = a + 1, c = a + 2, d = a + 3;
+            command(0xBFu << 24, ((a * 5) << 16) | ((bb * 5) << 8) | (c * 5));
+            command(0xBFu << 24, ((a * 5) << 16) | ((c * 5) << 8) | (d * 5));
+        }
+    }
+    command(0xBD000000u, 0);                                // pop it
+    command(0xB8u << 24, 0);
+    return base + kBubbleList;
 }
 
 // The view `camera` turned `angle` radians about `axis` (a unit vector) at
@@ -1316,10 +1505,13 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
 // away; or 0, leaving the frame as it is. With the eye below the waves,
 // `haze` is given the list drawing the water's fog round it, `identity` an
 // identity matrix to draw it with and `underside` the list drawing the
-// waves' underside in place of the water; otherwise both lists are 0.
-uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity, uint32_t* underside) {
+// waves' underside in place of the water, and `bubbles` the list drawing the
+// rider's breath's bubbles (or 0, none just now); otherwise all three are 0.
+uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity, uint32_t* underside,
+                           uint32_t* bubbles) {
     *haze = 0;
     *underside = 0;
+    *bubbles = 0;
     int b = -1;
     for (int i = 0; i < 2; ++i) {
         if (segment3 == kFrameBuffers[i]) b = i;
@@ -1389,10 +1581,13 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
         if (n++ % 15 == 0) std::fprintf(stderr, "[wr64-fog] eye %.0f %.0f %.0f surface %.1f\n",
                                         eye.x, eye.y, eye.z, water_height_at(segment3, eye.x, eye.z));
     }
-    if (eye.y < water_height_at(segment3, eye.x, eye.z)) {
-        *haze = 0x80000000u | build_haze(rdram, b, eye, water_height_at(segment3, eye.x, eye.z), course);
+    const float surface = water_height_at(segment3, eye.x, eye.z);
+    const uint32_t breath = build_bubbles(rdram, b, camera, surface, course, eye.y < surface);
+    if (eye.y < surface) {
+        *haze = 0x80000000u | build_haze(rdram, b, eye, surface, course);
         *identity = 0x80000000u | (kHaze + uint32_t(b) * kHazeStride);
         *underside = 0x80000000u | build_underside(rdram, b, eye, segment3, course);
+        *bubbles = breath != 0 ? 0x80000000u | breath : 0;
     }
 
     // The view: the world turned into the eye's space, looking down -z with y
