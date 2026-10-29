@@ -136,6 +136,11 @@ struct Eye {
     uint32_t width = 0, height = 0;
     std::vector<XrSwapchainImageD3D12KHR> images;
     uint32_t acquired = 0;
+    // What each image last had drawn in it: for an eye, the view it was drawn
+    // from (fov zero = never drawn); for the screen, how it was drawn (0 never,
+    // 2 the flat screen, 3 the HUD layer).
+    std::vector<XrView> drawn_view;
+    std::vector<int> drawn_mode;
 };
 
 // The flat screen's image: the game's 4:3, about as many pixels across as
@@ -247,6 +252,7 @@ bool g_stick_click_was = false, g_right_click_was = false, g_y_was = false, g_x_
 
 uint64_t g_frames = 0;
 uint64_t g_drawn = 0;
+uint64_t g_held = 0;
 uint64_t g_screen_frames = 0;
 std::chrono::steady_clock::time_point g_last_report;
 
@@ -817,6 +823,42 @@ void end_frame(void*, int rendered, uint64_t head_tag) {
         rendered_views = kept.views;
     }
 
+    // A frame RT64 didn't draw would reach the headset empty, which shows as
+    // one black frame. The images it was handed still hold what was last drawn
+    // in them, a few frames back, so those are shown again with the views they
+    // were drawn from, and the compositor corrects them for the head's
+    // movement since. Drawn frames record what went into each image.
+    static int last_rendered = 0;
+    XrView held_views[2];
+    bool held = false;
+    if (g_images_acquired) {
+        Eye& left = g_eyes[0];
+        Eye& right = g_eyes[1];
+        int& screen_mode = g_screen.drawn_mode[g_screen.acquired];
+        if (rendered == 0) {
+            const XrView& l = left.drawn_view[left.acquired];
+            const XrView& r = right.drawn_view[right.acquired];
+            const bool eyes_kept = l.fov.angleUp != 0.0f && r.fov.angleUp != 0.0f;
+            if (last_rendered == 2 && screen_mode == 2) {
+                rendered = 2;
+            }
+            else if (last_rendered != 2 && eyes_kept) {
+                rendered = (last_rendered == 3 && screen_mode == 3) ? 3 : 1;
+                held_views[0] = l;
+                held_views[1] = r;
+                rendered_views = held_views;
+            }
+            held = rendered != 0;
+        }
+        else {
+            if (rendered != 2) {
+                left.drawn_view[left.acquired] = rendered_views[0];
+                right.drawn_view[right.acquired] = rendered_views[1];
+            }
+            if (rendered != 1) screen_mode = rendered;
+        }
+    }
+
     XrCompositionLayerProjectionView views[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW },
                                                   { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     for (uint32_t e = 0; e < 2; ++e) {
@@ -861,8 +903,7 @@ void end_frame(void*, int rendered, uint64_t head_tag) {
         rendered == 2 ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&screen)
                       : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer),
         reinterpret_cast<XrCompositionLayerBaseHeader*>(&panel) };
-    static int last_rendered = 0;
-    if (rendered != 0 && rendered != last_rendered) {
+    if (rendered != 0 && !held && rendered != last_rendered) {
         last_rendered = rendered;
         if (rendered == 2) {
             std::fprintf(stderr, "[wr64-vr] frames go to the flat screen, %.1f m away and %.1f m wide\n",
@@ -889,7 +930,8 @@ void end_frame(void*, int rendered, uint64_t head_tag) {
     g_images_acquired = false;
 
     ++g_frames;
-    if (submit) ++g_drawn;
+    if (submit && !held) ++g_drawn;
+    if (held) ++g_held;
     if (submit && rendered == 2) ++g_screen_frames;
     const auto now = std::chrono::steady_clock::now();
     if (now - g_last_report >= std::chrono::seconds(2)) {
@@ -897,11 +939,16 @@ void end_frame(void*, int rendered, uint64_t head_tag) {
         if (g_last_report.time_since_epoch().count() != 0) {
             std::fprintf(stderr, "[wr64-vr] %.0f headset frames a second, %.0f of them drawn, %.0f on the flat screen\n",
                          double(g_frames) / interval, double(g_drawn) / interval, double(g_screen_frames) / interval);
+            if (g_held != 0) {
+                std::fprintf(stderr, "[wr64-vr] %llu undrawn frames shown again from earlier images instead of black\n",
+                             static_cast<unsigned long long>(g_held));
+            }
             std::fflush(stderr);
         }
         g_last_report = now;
         g_frames = 0;
         g_drawn = 0;
+        g_held = 0;
         g_screen_frames = 0;
     }
 
@@ -958,6 +1005,7 @@ bool create_swapchains() {
         eye.images.assign(count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR });
         xrEnumerateSwapchainImages(eye.swapchain, count, &count,
                                    reinterpret_cast<XrSwapchainImageBaseHeader*>(eye.images.data()));
+        eye.drawn_view.assign(count, XrView{ XR_TYPE_VIEW });
     }
 
     {
@@ -980,6 +1028,7 @@ bool create_swapchains() {
         g_screen.images.assign(count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR });
         xrEnumerateSwapchainImages(g_screen.swapchain, count, &count,
                                    reinterpret_cast<XrSwapchainImageBaseHeader*>(g_screen.images.data()));
+        g_screen.drawn_mode.assign(count, 0);
     }
 
     const DXGI_FORMAT made = g_eyes[0].images[0].texture->GetDesc().Format;
