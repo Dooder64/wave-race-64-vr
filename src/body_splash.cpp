@@ -15,13 +15,15 @@
 // round it, turned the way it slides and fading as it slows or leaves the
 // water, by a list of this file's own called just after the game's.
 //
-// The same kept frames are replayed round the fellow rider's jet ski on
-// Dolphin Park (src/companions.cpp) as it rides, so it throws up the same
+// The same kept frames are replayed round the fellow riders' jet skis on
+// Dolphin Park (src/companions.cpp) as they ride, so they throw up the same
 // bow splash -- once the player has ridden fast enough for some to be kept.
 //
 // Memory: for each frame buffer, at 0x640000 + 0x20000 b (above the water's
 // fog, src/first_person.cpp), the list, then from +0x8000 its vertices; the
-// companion's at 0x560000 + 0x10000 b, its vertices from +0x4000.
+// first companion's at 0x560000 + 0x10000 b, its vertices from +0x4000; the
+// pair's at 0x5A0000 + 0x10000 (i - 1) + 0x8000 b, their vertices from
+// +0x2000.
 //
 // WR64_BODY_SPLASH=0 leaves it out. WR64_SPLASH_LOG=1 reports what is kept.
 
@@ -44,6 +46,8 @@ constexpr uint32_t kMostCommands = kVertices / 8 - 1;
 constexpr uint32_t kMostVertices = (kStride - kVertices) / 16;
 constexpr uint32_t kFrameBuffers[2] = { 0x11F8E8, 0x1388D0 };
 constexpr uint32_t kCompanionBase = 0x560000, kCompanionStride = 0x10000, kCompanionVertices = 0x4000;
+constexpr uint32_t kPairBase = 0x5A0000, kPairStride = 0x8000, kPairVertices = 0x2000;
+constexpr int kCompanions = 3;
 
 // The trail the game leaves on the water behind a jet ski: not a splash.
 constexpr uint32_t kWakeTexture = 0x0104E4C0;
@@ -94,10 +98,12 @@ struct State {
     std::vector<KeptFrame> kept;
     size_t next_kept = 0, played = 0;
     float strength = 0;
-    // The companion's jet ski this frame.
-    bool companion = false;
-    float comp_x = 0, comp_z = 0, comp_water = 0, comp_ahead_x = 1, comp_ahead_z = 0, comp_speed = 0, comp_strength = 0;
-    size_t comp_played = 0;
+    // The companions' jet skis this frame.
+    struct Companion {
+        bool noted = false;
+        float x = 0, z = 0, water = 0, ahead_x = 1, ahead_z = 0, speed = 0, strength = 0;
+        size_t played = 0;
+    } companions[kCompanions];
 } g;
 
 bool enabled() {
@@ -221,33 +227,44 @@ uint32_t replay(uint8_t* rdram, int b) {
 
 }  // namespace
 
-// From src/companions.cpp, each frame it is drawn: its jet ski, whether on
-// the water (not flying off the ramp), where, the water's height there, which
-// way it heads, and how fast.
-void body_splash_companion(bool on_water, float x, float z, float water, float ahead_x, float ahead_z, float speed) {
-    g.companion = true;
-    g.comp_strength += ((on_water ? 1.0f : 0.0f) - g.comp_strength) * (on_water ? 0.4f : 0.3f);
-    g.comp_x = x; g.comp_z = z; g.comp_water = water;
-    g.comp_ahead_x = ahead_x; g.comp_ahead_z = ahead_z; g.comp_speed = speed;
+// From src/companions.cpp, each frame companion `index` is drawn: its jet
+// ski, whether on the water (not flying off the ramp), where, the water's
+// height there, which way it heads, and how fast.
+void body_splash_companion(int index, bool on_water, float x, float z, float water, float ahead_x, float ahead_z,
+                           float speed) {
+    if (index < 0 || index >= kCompanions) return;
+    State::Companion& c = g.companions[index];
+    c.noted = true;
+    c.strength += ((on_water ? 1.0f : 0.0f) - c.strength) * (on_water ? 0.4f : 0.3f);
+    c.x = x; c.z = z; c.water = water;
+    c.ahead_x = ahead_x; c.ahead_z = ahead_z; c.speed = speed;
 }
 
 // For the display-list rewriter, just after the frame's call of the game's
-// particles: the address of a list drawing the bow splash round the
-// companion's jet ski, or 0. `segment3` is the frame's.
-uint32_t body_splash_companion_list(uint8_t* rdram, uint32_t segment3) {
-    if (!enabled() || !g.companion || g.kept.empty()) return 0;
-    g.companion = false;
+// particles: the address of a list drawing the bow splash round companion
+// `index`'s jet ski, or 0. `segment3` is the frame's.
+uint32_t body_splash_companion_list(uint8_t* rdram, uint32_t segment3, int index) {
+    if (!enabled() || index < 0 || index >= kCompanions || g.kept.empty()) return 0;
+    State::Companion& c = g.companions[index];
+    if (!c.noted) return 0;
+    c.noted = false;
     int b = -1;
     for (int i = 0; i < 2; ++i) {
         if (segment3 == kFrameBuffers[i]) b = i;
     }
     if (b < 0) return 0;
-    const float fade = g.comp_strength * std::clamp((g.comp_speed - 100.0f) / 500.0f, 0.0f, 1.0f);
+    const float fade = c.strength * std::clamp((c.speed - 100.0f) / 500.0f, 0.0f, 1.0f);
     if (fade < 0.02f) return 0;
-    const KeptFrame& frame = g.kept[g.comp_played++ % g.kept.size()];
-    const uint32_t list = kCompanionBase + uint32_t(b) * kCompanionStride;
-    return replay_at(rdram, frame, g.comp_x, g.comp_z, g.comp_water, g.comp_ahead_x, g.comp_ahead_z, fade, list,
-                     list + kCompanionVertices, (kCompanionStride - kCompanionVertices) / 16, kCompanionVertices / 8 - 1);
+    // Each a different kept frame, so the three are not alike.
+    const KeptFrame& frame = g.kept[(c.played++ + size_t(index) * 7) % g.kept.size()];
+    if (index == 0) {
+        const uint32_t list = kCompanionBase + uint32_t(b) * kCompanionStride;
+        return replay_at(rdram, frame, c.x, c.z, c.water, c.ahead_x, c.ahead_z, fade, list, list + kCompanionVertices,
+                         (kCompanionStride - kCompanionVertices) / 16, kCompanionVertices / 8 - 1);
+    }
+    const uint32_t list = kPairBase + uint32_t(index - 1) * 2 * kPairStride + uint32_t(b) * kPairStride;
+    return replay_at(rdram, frame, c.x, c.z, c.water, c.ahead_x, c.ahead_z, fade, list, list + kPairVertices,
+                     (kPairStride - kPairVertices) / 16, kPairVertices / 8 - 1);
 }
 
 // From the swim (src/first_person.cpp), each first-person race frame before
