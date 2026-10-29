@@ -23,6 +23,7 @@
 
 #include "wr64/vr.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -128,6 +129,40 @@ float draw_distance() {
 // with C linkage and C types.
 extern "C" int wr64_vr_all_round(void) {
     return wr64::vr::all_round() ? 1 : 0;
+}
+
+// The camera-facing matrices of the course's second object group (race and
+// boundary buoys), moved out of the game's frame buffer, where one player has
+// room for only 32, to an area of their own with room for 256, one per frame
+// buffer: physical 0x7D8000 and 0x7DC000, above the first-person views and
+// below the audio task's copy at 0x7E0000. Given the frame buffer's address
+// (D_801AE948) and the number of players; 0 = leave the game's own.
+namespace {
+// Which of the game's two frame buffers this is (0 or 1), or -1.
+int buffer_slot(uint32_t buffer) {
+    static uint32_t buffers[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        if (buffers[i] == 0) buffers[i] = buffer;
+        if (buffers[i] == buffer) return i;
+    }
+    return -1;
+}
+}  // namespace
+
+extern "C" uint32_t wr64_vr_facing_area(uint32_t buffer, int players) {
+    if (!wr64::vr::all_round() || players != 1) return 0;
+    const int slot = buffer_slot(buffer);
+    return slot < 0 ? 0 : 0x7D8000u + uint32_t(slot) * 0x4000u;
+}
+
+// The same for the race buoys (the first object group), whose matrices the
+// game keeps at 0x95C0 (the buoy) and 0x9BC0 (its marker) of the frame's
+// buffer, 12 a player: here 64 each, from physical 0x7D1000, 0x2000 a frame
+// buffer, the buoys' first and their markers' 0x1000 on. `marker` picks.
+extern "C" uint32_t wr64_vr_buoy_area(uint32_t buffer, int players, int marker) {
+    if (!wr64::vr::all_round() || players != 1) return 0;
+    const int slot = buffer_slot(buffer);
+    return slot < 0 ? 0 : 0x7D1000u + uint32_t(slot) * 0x2000u + (marker ? 0x1000u : 0u);
 }
 
 extern "C" int wr64_vr_draw_distance(int value) {

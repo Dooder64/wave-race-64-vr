@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 namespace wr64 {
 
@@ -36,6 +37,17 @@ void set_unlock_all(bool on) {
 
 // Each frame, from the display-list rewriter.
 void unlock_frame(uint8_t* rdram) {
+    // Test aid: WR64_TEST_DIFFICULTY=n holds gDifficulty (0x801CB338; 0 Normal,
+    // 1 Hard, 2 Expert), for scripted runs whose menu presses can't move the
+    // difficulty cursor.
+    static const int difficulty = [] {
+        const char* value = std::getenv("WR64_TEST_DIFFICULTY");
+        return value != nullptr ? std::atoi(value) : -1;
+    }();
+    if (difficulty >= 0) {
+        const int32_t word = difficulty;
+        std::memcpy(rdram + 0x1CB338, &word, sizeof word);
+    }
     if (!g_unlock.load(std::memory_order_relaxed)) return;
     // Bytes of big-endian words, as the runtime keeps them.
     rdram[kOpenCourses ^ 3] = kAllCourses;

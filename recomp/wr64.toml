@@ -162,6 +162,73 @@ func = "func_8006E674"
 before_vram = 0x8006ECA4
 text = '{ extern int wr64_vr_all_round(void); if (wr64_vr_all_round()) ctx->f8.fl = -2.0f; }'
 
+# Second group's facing matrices (race and boundary buoys turn to the camera):
+# each player has room for 32, at 0xA1C0 + 0x800 * player of the frame's
+# buffer, and the game stops handing them out at 32 (slti $t5, 0x20). Seen
+# all round, many more are in view, and those past the cap -- the highest
+# numbered, the last buoys of a lap -- keep a stale matrix and are drawn on
+# top of another buoy or at the finish line. With one player they move to an
+# area of their own with room for 256 (wr64_vr_facing_area in src/vr.cpp):
+# the base each is written at ($s3, added to the buffer's address), the cap
+# (the test's result, $at, just before its branch), and the base the display
+# list addresses them from ($s2, physical, segment 0).
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006EF34
+text = '{ extern uint32_t wr64_vr_facing_area(uint32_t buffer, int players); uint32_t buffer = (uint32_t)MEM_W(0, (int32_t)0x801AE948); uint32_t area = wr64_vr_facing_area(buffer, MEM_W(0, (int32_t)0x800DAB28)); if (area != 0) ctx->r19 = (int32_t)(0x80000000u + area - buffer); }'
+
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006F020
+text = '{ extern uint32_t wr64_vr_facing_area(uint32_t buffer, int players); if (wr64_vr_facing_area((uint32_t)MEM_W(0, (int32_t)0x801AE948), MEM_W(0, (int32_t)0x800DAB28)) != 0) ctx->r1 = SIGNED(ctx->r13) < 0x100 ? 1 : 0; }'
+
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006F1C0
+text = '{ extern uint32_t wr64_vr_facing_area(uint32_t buffer, int players); uint32_t area = wr64_vr_facing_area((uint32_t)MEM_W(0, (int32_t)0x801AE948), MEM_W(0, (int32_t)0x800DAB28)); if (area != 0) ctx->r18 = (int32_t)area; }'
+
+# The race buoys (the first group) have the same trouble with a smaller
+# limit: 12 a player (slti $t5, 0xC), their matrices at 0x95C0 (the buoy)
+# and 0x9BC0 (its marker) + 0x300 * player of the frame's buffer. With one
+# player they move to areas of their own with room for 64
+# (wr64_vr_buoy_area): the three writes ($at, the area's offset, just
+# before it is added to the address), the cap, and the three bases the
+# display list addresses them from ($s2).
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006FEF0
+text = '{ extern uint32_t wr64_vr_buoy_area(uint32_t, int, int); uint32_t buffer = (uint32_t)MEM_W(0, (int32_t)0x801AE948); uint32_t area = wr64_vr_buoy_area(buffer, MEM_W(0, (int32_t)0x800DAB28), 0); if (area != 0) ctx->r1 = (int32_t)(0x80000000u + area - buffer); }'
+
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8006FFD0
+text = '{ extern uint32_t wr64_vr_buoy_area(uint32_t, int, int); uint32_t buffer = (uint32_t)MEM_W(0, (int32_t)0x801AE948); uint32_t area = wr64_vr_buoy_area(buffer, MEM_W(0, (int32_t)0x800DAB28), 1); if (area != 0) ctx->r1 = (int32_t)(0x80000000u + area - buffer); }'
+
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x800700D4
+text = '{ extern uint32_t wr64_vr_buoy_area(uint32_t, int, int); uint32_t buffer = (uint32_t)MEM_W(0, (int32_t)0x801AE948); uint32_t area = wr64_vr_buoy_area(buffer, MEM_W(0, (int32_t)0x800DAB28), 0); if (area != 0) ctx->r1 = (int32_t)(0x80000000u + area - buffer); }'
+
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8007010C
+text = '{ extern uint32_t wr64_vr_buoy_area(uint32_t, int, int); if (wr64_vr_buoy_area((uint32_t)MEM_W(0, (int32_t)0x801AE948), MEM_W(0, (int32_t)0x800DAB28), 0) != 0) ctx->r1 = SIGNED(ctx->r13) < 0x40 ? 1 : 0; }'
+
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x80070164
+text = '{ extern uint32_t wr64_vr_buoy_area(uint32_t, int, int); uint32_t area = wr64_vr_buoy_area((uint32_t)MEM_W(0, (int32_t)0x801AE948), MEM_W(0, (int32_t)0x800DAB28), 0); if (area != 0) ctx->r18 = (int32_t)area; }'
+
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x8007117C
+text = '{ extern uint32_t wr64_vr_buoy_area(uint32_t, int, int); uint32_t area = wr64_vr_buoy_area((uint32_t)MEM_W(0, (int32_t)0x801AE948), MEM_W(0, (int32_t)0x800DAB28), 0); if (area != 0) ctx->r18 = (int32_t)area; }'
+
+[[patches.hook]]
+func = "func_8006E674"
+before_vram = 0x80071434
+text = '{ extern uint32_t wr64_vr_buoy_area(uint32_t, int, int); uint32_t area = wr64_vr_buoy_area((uint32_t)MEM_W(0, (int32_t)0x801AE948), MEM_W(0, (int32_t)0x800DAB28), 1); if (area != 0) ctx->r18 = (int32_t)area; }'
+
 # Third group: c.lt.s $f24, $f4 -- 0 < cosine. $f24 holds zero for the rest of
 # the function, so the cosine is raised instead.
 [[patches.hook]]

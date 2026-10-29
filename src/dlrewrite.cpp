@@ -1652,6 +1652,20 @@ void trace_3d(uint8_t* rdram, uint32_t list_vaddr, uint32_t state) {
     }
     static const long wanted_state = state_env != nullptr ? std::strtol(state_env, nullptr, 16) : -1;
     if (wanted_state >= 0 ? (state != uint32_t(wanted_state)) : !racing(state)) return;
+    // WR64_3D_TRACE_BUOY=n waits until the arrow points at buoy n (the
+    // human's race record, 0x801C2938 + slot * 0x378, +0x0C) and then a
+    // further 15 frames, for the moment a buoy goes missing in a played race.
+    static const char* buoy_env = std::getenv("WR64_3D_TRACE_BUOY");
+    if (buoy_env != nullptr) {
+        static int after = -1;
+        if (after < 0) {
+            const int32_t slot = std::clamp(*reinterpret_cast<const int32_t*>(rdram + 0x0D48DC), 0, 3);
+            const int32_t next = *reinterpret_cast<const int32_t*>(rdram + 0x1C2938 + slot * 0x378 + 0x0C);
+            if (next != std::atoi(buoy_env)) return;
+            after = 15;
+        }
+        if (after > 0) { --after; return; }
+    }
 
     static const char* frames_env = std::getenv("WR64_3D_TRACE_FRAMES");
     static const int wanted = frames_env != nullptr ? std::atoi(frames_env) : 2;
