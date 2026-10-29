@@ -82,6 +82,9 @@ _Add anything else here — the user's own bug list goes in the right round._
 Kept here so they don't get lost; see the roadmap for order.
 
 - Several Dolphin Park riders with their own personalities and smarter decisions.
+- Maybe later: bumping into the Dolphin Park riders. Tried (the player's
+  speed into a rider turned back through the game's own jet-ski state, the
+  rider shoved aside) and taken out: it didn't feel good in the headset.
 - Target mode: bail on purpose so the empty jet ski launches at targets.
 - Rare glimpse of a huge, harmless sea creature in deep water after a throw.
 - Bigger ocean with rougher waves away from the course; more underwater detail.

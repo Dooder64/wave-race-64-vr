@@ -970,6 +970,17 @@ void start_pair(std::chrono::steady_clock::time_point now) {
         r.near = r.stopped = true;
     }
     if (trick) start_trick(p, now);
+    // WR64_COMPANION_TEST_PAIR_AT=<x>,<z>, scripted: stopped there instead,
+    // one either side of it (z), for a minute.
+    static const char* at = std::getenv("WR64_INPUT_SCRIPT") != nullptr ? std::getenv("WR64_COMPANION_TEST_PAIR_AT") : nullptr;
+    float x = 0.0f, z = 0.0f;
+    if (at != nullptr && std::sscanf(at, "%f,%f", &x, &z) == 2) {
+        p.leave_at = now + std::chrono::seconds(60);
+        for (int i = 0; i < 2; ++i) {
+            p.riders[i].x = x;
+            p.riders[i].z = z + (i == 0 ? -0.5f : 0.5f) * kAbreast;
+        }
+    }
 }
 
 // Side by side to their places at sight p.sight (see head_for); whether
@@ -1378,18 +1389,29 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         return o;
     }();
     // Draws racer `slot` with its jet ski on `hull` and its rider on `body`
-    // (or not, once under).
+    // (or not, once under), as the game draws the player's (its list at
+    // segment 2): the parts' matrices are the jet ski's three and the head,
+    // chest and hips, then each limb's twice, as it is and mirrored (7, 9
+    // ... 17); the others first with back faces culled, then the mirrored with
+    // front faces culled -- the mirror turns them inside out -- leaving the
+    // state as the game's list leaves it.
     auto draw = [&](int slot, Matrix hull, Matrix body, bool body_shown) {
         for (Matrix* m : { &hull, &body }) { m->m[3][0] += offset.first; m->m[3][2] += offset.second; }
         const uint32_t base = kSlots[slot].matrices + uint32_t(b) * kMatrixStride;
         const uint32_t* lists = g_racers[slot].lists;
-        for (int p = 0; p < kParts; ++p) {
-            const uint32_t address = base + uint32_t(p) * 64;
-            // The jet ski's parts (0 to 2) on its hull; the rider's on the body.
-            if (p >= 3 && !body_shown) continue;
-            write_matrix(rdram, address, multiply(g_pose.parts[p], p < 3 ? hull : body));
-            out.emplace_back(0x01020040u, 0x80000000u | address);
-            out.emplace_back(0x06000000u, lists[p < kUniqueParts ? p : p - 6]);
+        constexpr uint32_t kCullFront = 0x1000, kCullBack = 0x2000;
+        for (const bool mirrored : { false, true }) {
+            out.emplace_back(0xB6000000u, mirrored ? kCullBack : kCullFront);
+            out.emplace_back(0xB7000000u, mirrored ? kCullFront : kCullBack);
+            for (int p = 0; p < kParts; ++p) {
+                if ((p >= 7 && (p - 6) % 2 == 1) != mirrored) continue;
+                // The jet ski's parts (0 to 2) on its hull; the rider's on the body.
+                if (p >= 3 && !body_shown) continue;
+                const uint32_t address = base + uint32_t(p) * 64;
+                write_matrix(rdram, address, multiply(g_pose.parts[p], p < 3 ? hull : body));
+                out.emplace_back(0x01020040u, 0x80000000u | address);
+                out.emplace_back(0x06000000u, lists[p < 6 ? p : 6 + (p - 6) / 2]);
+            }
         }
     };
 
