@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include "shared/rt64_water_params.h"
 
@@ -30,13 +31,21 @@ bool ground_height_at(float x, float z, float below, float* height);
 void set_body_spray(bool active, float x, float y, float z, float wet);
 // The game states whose menus are drawn over a camera looking straight down
 // on the "full grid" of waves: course select, the time trial and race
-// results, the initials entry for a new record (0x64), and the menu after a
-// time trial. Each comes with its leaving state (the next odd number), which
-// draws the same screen.
+// results, the Championship's game over (0x5A), the initials entry for a new
+// record (0x64), and the menu after a time trial. Each comes with its leaving
+// state (the next odd number), which draws the same screen. Any other screen
+// found drawing the same way -- the backdrop's list, then the full grid's --
+// is learnt (learn_full_grid_screen, from the rewriter) and counts from then on.
+inline std::atomic<bool> g_learnt_full_grid[128];
 inline bool full_grid_screen(uint32_t state) {
     switch (state & ~1u) {
-        case 0x14: case 0x32: case 0x34: case 0x50: case 0x64: return true;
-        default: return false;
+        case 0x14: case 0x32: case 0x34: case 0x50: case 0x5A: case 0x64: return true;
+        default: return state < 256 && g_learnt_full_grid[(state & 0xFF) >> 1].load(std::memory_order_relaxed);
     }
+}
+// True the first time a state is learnt.
+inline bool learn_full_grid_screen(uint32_t state) {
+    return state < 256 && !full_grid_screen(state) &&
+           !g_learnt_full_grid[state >> 1].exchange(true, std::memory_order_relaxed);
 }
 }

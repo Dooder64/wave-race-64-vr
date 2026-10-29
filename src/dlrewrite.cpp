@@ -222,6 +222,8 @@ constexpr uint32_t kSunGlareTexture = 0x01005748;
 // whole picture behind their water; that rectangle is left out in VR (see 6.
 // at the top).
 constexpr uint32_t kBackdropSetupList = 0x0106F8A0;
+// The full grid of waves the results-like screens look down on.
+constexpr uint32_t kFullGridList = 0x010082F0;
 
 // The game's camera projection, which it builds each frame in its frame
 // buffer, reached through segment 3: in VR the scene seen through the lens
@@ -2159,6 +2161,7 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
     }
 
     uint32_t cursor = list_vaddr & 0x00FFFFFFu;
+    bool backdrop_called = false;
     for (uint32_t steps = 0; steps < kMaxCommands && !w.overflow; ++steps) {
         const uint32_t* c = w.words(cursor);
         const uint32_t w0 = c[0];
@@ -2167,6 +2170,17 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
         cursor += 8;
         if (op == kOpDisplayList && w1 == kBackdropSetupList && wr64::vr::enabled() && wr64::water::full_grid_screen(state)) {
             w.backdrop_next = true;
+        }
+        // A screen not yet known to be one of these that draws the same way
+        // (the backdrop's list, then the full grid's) is learnt, for its
+        // next frames.
+        if (op == kOpDisplayList && wr64::vr::enabled() && !racing(state)) {
+            if (w1 == kBackdropSetupList) backdrop_called = true;
+            if (w1 == kFullGridList && backdrop_called && wr64::water::learn_full_grid_screen(state)) {
+                std::fprintf(stderr, "[wr64-vr] state 0x%02X draws over the full grid of waves; treated as such from now on\n",
+                             state);
+                std::fflush(stderr);
+            }
         }
         if (op == kOpTexRect || op == kOpFillRect) draw_water_fog(w, state);
 
