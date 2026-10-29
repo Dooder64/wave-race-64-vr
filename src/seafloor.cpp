@@ -76,11 +76,18 @@ namespace {
 constexpr uint32_t kBase = 0x500000;
 constexpr uint32_t kTriangles = kBase + 0x100;
 constexpr uint32_t kState = kBase + 0x400;
+constexpr uint32_t kSecondState = kBase + 0x600;
 constexpr uint32_t kMadeSand = kBase + 0x800;
 constexpr uint32_t kFrameLists = kBase + 0x1000, kFrameListSize = 0x8000;
 constexpr uint32_t kBaseEnd = kFrameLists + 2 * kFrameListSize;
 constexpr uint32_t kVertices = 0x400000;
 constexpr uint32_t kVerticesEnd = 0x500000;
+// A two-textured floor's chunks' triangle lists, two each (32 triangles and
+// the end at most), above the frame lists and below the companion at 0x53F000.
+constexpr uint32_t kCellLists = 0x512000, kCellListsEnd = 0x53E000, kCellListStride = 0x110;
+constexpr uint32_t cell_list(int chunk, int texture) {
+    return kCellLists + uint32_t(chunk * 2 + texture) * kCellListStride;
+}
 constexpr uint32_t kMarker = 0x53454146u;       // "SEAF", at kBase
 constexpr uint32_t kFrameBuffers[2] = { 0x11F8E8, 0x1388D0 };
 
@@ -1038,6 +1045,442 @@ float southern_depth(float x, float z) {
     return std::max(sea, start * std::exp(-d / 400.0f));
 }
 
+// Twilight City (course 6): a city's canals walled in concrete and stone,
+// and two beaches. By the beaches the floor is sand dropping steeply away;
+// in the canals it is the course's own laid stone (the blocks lining its
+// tunnels), level with the walls' feet. The course's few floors of its own
+// under the water are kept as they are, and made solid.
+// Twilight City (course 6), from the course's own triangles (scratchpad tw/gen_tables.py):
+// the beaches' waterlines, where their sand crosses the water's level.
+constexpr Edge kTwilightSand[] = {
+    { 2583, -1582, 2583, -1848 },
+    { 2417, -1416, 2583, -1582 },
+    { 1583, -582, 1583, -281 },
+    { 1735, 3840, 2073, 4479 },
+    { 1879, 4673, 1027, 4335 },
+    { 2583, -1848, 2583, -2583 },
+    { 1583, -582, 2417, -1416 },
+    { 1583, -281, 1583, 983 },
+    { 2150, 4750, 1879, 4673 },
+    { 2073, 4479, 2150, 4750 },
+};
+// The walls standing in the water, each at the waterline with its foot's depth.
+constexpr FootedEdge kTwilightWalls[] = {
+    { -1000, -8900, -950, -8950, 350 },
+    { 600, -8900, 600, -8550, 350 },
+    { -1000, -6900, -1000, -7900, 350 },
+    { -900, -9000, -200, -9000, 350 },
+    { 500, -9000, 550, -8950, 350 },
+    { 850, -8700, 1000, -8850, 350 },
+    { 800, -8200, 825, -8225, 350 },
+    { 850, -8250, 850, -8475, 350 },
+    { -3250, -4900, -2175, -4900, 350 },
+    { -1100, -4900, -1050, -4950, 350 },
+    { -1000, -5100, -1000, -6000, 350 },
+    { 3000, -9000, 4000, -9000, 350 },
+    { 1150, -9000, 2075, -9000, 350 },
+    { 7100, -6900, 7100, -5900, 350 },
+    { 7100, -8900, 7100, -7900, 350 },
+    { 5000, -9000, 6000, -9000, 350 },
+    { 7100, -4900, 7150, -4850, 350 },
+    { 7200, -4800, 9200, -4800, 350 },
+    { 7000, -9000, 7050, -8950, 350 },
+    { 600, -8200, 700, -8200, 325 },
+    { 500, -900, 529, -871, 100 },
+    { 600, 600, 571, 629, 100 },
+    { 600, -800, 600, -400, 100 },
+    { 600, -7500, 550, -7450, 150 },
+    { 1350, -7500, 1150, -7500, 150 },
+    { 950, -7500, 775, -7500, 150 },
+    { 1650, -7500, 1500, -7500, 150 },
+    { 500, -7400, 500, -6325, 150 },
+    { 500, -4850, 500, -4125, 150 },
+    { 500, -5250, 500, -5050, 150 },
+    { -1000, -5000, -1000, -5050, 150 },
+    { 500, -3400, 500, -2600, 150 },
+    { 2900, -7500, 2275, -7500, 150 },
+    { 5900, -7500, 5150, -7500, 150 },
+    { 4400, -7500, 3650, -7500, 150 },
+    { 6000, -6000, 6000, -6700, 150 },
+    { 5293, -5293, 5646, -5646, 150 },
+    { 6000, -7400, 5950, -7450, 150 },
+    { 3879, -3879, 4586, -4586, 150 },
+    { 2712, -2712, 3296, -3296, 150 },
+    { 2300, -2300, 2506, -2506, 150 },
+    { 3350, 2450, 3100, 2700, 150 },
+    { 3350, 3950, 3600, 3950, 150 },
+    { 4350, 3200, 4350, 2950, 150 },
+    { 4100, 2700, 3850, 2450, 150 },
+    { 2850, 3450, 2888, 3488, 150 },
+    { 2850, 2950, 2850, 3200, 150 },
+    { 3850, 2450, 3600, 2450, 150 },
+    { 3275, 3875, 3312, 3912, 150 },
+    { 2050, 1450, 1675, 1075, 150 },
+    { 2950, 3550, 2925, 3525, 150 },
+    { 3221, 3821, 3248, 3848, 150 },
+    { 2050, 1700, 2050, 1575, 150 },
+    { 1300, 4400, 1550, 4150, 150 },
+    { 1800, 1950, 1800, 2925, 150 },
+    { 1800, 1950, 1925, 1825, 150 },
+    { -800, 4900, -550, 4900, 150 },
+    { -300, 4900, -300, 4650, 150 },
+    { -1800, 1200, -1800, 2550, 150 },
+    { -1800, 3900, -1300, 4400, 150 },
+    { -1300, 700, -1550, 950, 150 },
+    { 1400, -7950, 1400, -7500, 100 },
+    { 1500, -8400, 1400, -8400, 100 },
+    { 1600, -7950, 1600, -8400, 100 },
+    { -2800, -1300, -2500, -800, 100 },
+    { -2500, 200, -3000, 350, 100 },
+    { -3600, -1100, -3200, -1200, 100 },
+    { -2200, -300, -2350, -50, 100 },
+    { 2750, -950, 3050, -950, 100 },
+    { 2000, -100, 2000, -200, 100 },
+    { 2000, -200, 2375, -575, 100 },
+    { 2325, 325, 2000, 0, 100 },
+    { 2650, 1750, 2650, 1200, 100 },
+    { 2950, 2050, 2800, 1900, 100 },
+    { 3350, -950, 3500, -800, 100 },
+    { 3650, 550, 3650, 1750, 100 },
+    { 3350, 2050, 3150, 2050, 100 },
+    { -3800, 1000, -3400, 1600, 100 },
+    { -3000, 2200, -3000, 2500, 100 },
+    { -4300, 1000, -4050, 1000, 100 },
+    { -3500, 4200, -3700, 4200, 100 },
+    { -3000, 2800, -3250, 3500, 100 },
+    { -600, -1000, -475, -1000, 100 },
+    { 600, -900, 800, -900, 100 },
+    { -550, -850, -600, -800, 100 },
+    { 500, -1100, 450, -1050, 100 },
+    { 500, -1800, 500, -1450, 100 },
+    { -600, -1000, -650, -950, 100 },
+    { 2974, 3574, 3098, 3698, 100 },
+    { -700, -900, -1000, -100, 100 },
+    { -600, -100, -600, 600, 100 },
+    { -550, 650, -500, 700, 100 },
+    { 588, 4400, 1300, 4400, 150 },
+    { -800, 700, -300, 700, 100 },
+    { 300, 700, 800, 700, 100 },
+    { -100, 115, -100, -359, 100 },
+    { -100, -359, 20, -359, 100 },
+    { 100, -359, 100, 115, 100 },
+    { -200, 115, -200, -359, 100 },
+    { 200, -359, 200, 115, 100 },
+    { -475, -1000, -392, -1000, 100 },
+    { 467, -900, 600, -900, 100 },
+    { -375, -900, -500, -900, 100 },
+    { 529, -871, 600, -800, 100 },
+    { 571, 629, 500, 700, 100 },
+    { 600, -400, 600, 600, 100 },
+    { 300, 700, 300, 1367, 50 },
+    { 300, 1700, 300, 2367, 50 },
+    { -300, 1033, -300, 1700, 50 },
+    { -300, 3267, -300, 4400, 50 },
+    { 300, 2700, 300, 3800, 50 },
+    { 300, 4350, 333, 4383, 50 },
+    { -300, 2033, -300, 2700, 50 },
+    { -1429, -3879, -1099, -4741, 30 },
+    { -1859, -2759, -1528, -3621, 30 },
+    { -2566, -911, -2352, -1470, 30 },
+    { -3146, 603, -3077, 421, 30 },
+    { -2288, -1638, -1958, -2500, 30 },
+    { 2950, 2665, 2950, 2050, 30 },
+    { 3350, 4873, 3350, 3950, 30 },
+    { 1603, 5400, 2755, 5400, 30 },
+    { 3804, 2288, 3650, 1750, 30 },
+    { 3292, 5208, 3100, 5400, 30 },
+    { 228, 5400, 1286, 5400, 30 },
+    { -641, 5400, -122, 5400, 30 },
+    { -3308, 4089, -3394, 4003, 30 },
+    { -2353, 5044, -1997, 5400, 30 },
+    { -1720, 5400, -797, 5400, 30 },
+    { -3482, 1478, -3224, 805, 30 },
+    { -2460, 4937, -3112, 4285, 30 },
+    { 7200, -3700, 4912, -1412, 50 },
+    { 7200, -4800, 7200, -3975, 50 },
+    { 3775, -650, 4150, -650, 50 },
+    { -225, -1000, 400, -1000, 20 },
+    { -158, -900, 467, -900, 20 },
+    { -122, 5417, -122, 5500, 30 },
+    { 228, 5400, 228, 5483, 30 },
+    { -122, 5400, 170, 5400, 30 },
+    { 1400, -8400, 1400, -7950, 100 },
+    { 1600, -8400, 1500, -8400, 100 },
+    { 1600, -7500, 1600, -7950, 100 },
+    { -2500, -800, -2200, -300, 100 },
+    { -3000, 350, -3500, 500, 100 },
+    { -3200, -1200, -2800, -1300, 100 },
+    { -2350, -50, -2500, 200, 100 },
+    { 3050, -950, 3350, -950, 100 },
+    { 2000, 0, 2000, -100, 100 },
+    { 2375, -575, 2750, -950, 100 },
+    { 2650, 650, 2325, 325, 100 },
+    { 2650, 1200, 2650, 650, 100 },
+    { 2800, 1900, 2650, 1750, 100 },
+    { 3500, -800, 3650, -650, 100 },
+    { 3650, -650, 3650, 550, 100 },
+    { 3150, 2050, 2950, 2050, 100 },
+    { -3400, 1600, -3000, 2200, 100 },
+    { -3000, 2500, -3000, 2800, 100 },
+    { -4050, 1000, -3800, 1000, 100 },
+    { -3700, 4200, -3900, 4200, 100 },
+    { -3250, 3500, -3500, 4200, 100 },
+    { -500, -900, -550, -850, 100 },
+    { 450, -1050, 400, -1000, 100 },
+    { 500, -1450, 500, -1100, 100 },
+    { -650, -950, -700, -900, 100 },
+    { 3098, 3698, 3221, 3821, 100 },
+    { -1000, -100, -1300, 700, 100 },
+    { -600, -800, -600, -100, 100 },
+    { -600, 600, -550, 650, 100 },
+    { 550, -7450, 500, -7400, 150 },
+    { 1150, -7500, 950, -7500, 150 },
+    { 775, -7500, 600, -7500, 150 },
+    { 1500, -7500, 1350, -7500, 150 },
+    { 500, -6325, 500, -5250, 150 },
+    { 500, -4125, 500, -3400, 150 },
+    { 500, -5050, 500, -4850, 150 },
+    { -1000, -5050, -1000, -5100, 150 },
+    { 500, -2600, 500, -1800, 150 },
+    { 2275, -7500, 1650, -7500, 150 },
+    { 5150, -7500, 4400, -7500, 150 },
+    { 3650, -7500, 2900, -7500, 150 },
+    { 6000, -6700, 6000, -7400, 150 },
+    { 5646, -5646, 6000, -6000, 150 },
+    { 5950, -7450, 5900, -7500, 150 },
+    { 4586, -4586, 5293, -5293, 150 },
+    { 3296, -3296, 3879, -3879, 150 },
+    { 2506, -2506, 2712, -2712, 150 },
+    { 3100, 2700, 2850, 2950, 150 },
+    { 3600, 3950, 3850, 3950, 150 },
+    { 4350, 3450, 4350, 3200, 150 },
+    { 4350, 2950, 4100, 2700, 150 },
+    { 2888, 3488, 2925, 3525, 150 },
+    { 2850, 3200, 2850, 3450, 150 },
+    { 3600, 2450, 3350, 2450, 150 },
+    { 3312, 3912, 3350, 3950, 150 },
+    { 1675, 1075, 1300, 700, 150 },
+    { 2974, 3574, 2950, 3550, 150 },
+    { 3248, 3848, 3275, 3875, 150 },
+    { 2050, 1575, 2050, 1450, 150 },
+    { 1550, 4150, 1800, 3900, 150 },
+    { 1800, 2925, 1800, 3900, 150 },
+    { 1925, 1825, 2050, 1700, 150 },
+    { 300, 1367, 300, 1700, 50 },
+    { 300, 2367, 300, 2700, 50 },
+    { -300, 700, -300, 1033, 50 },
+    { -300, 2700, -300, 3267, 50 },
+    { 300, 3800, 300, 4350, 50 },
+    { 333, 4383, 350, 4400, 50 },
+    { -300, 1700, -300, 2033, 50 },
+    { -800, 700, -910, 700, 100 },
+    { -550, 4900, -300, 4900, 150 },
+    { -300, 4650, -300, 4400, 150 },
+    { 910, 700, 800, 700, 100 },
+    { -1800, 2550, -1800, 3900, 150 },
+    { -1300, 4400, -800, 4900, 150 },
+    { -1550, 950, -1800, 1200, 150 },
+    { -1099, -4741, -1000, -5000, 30 },
+    { -1528, -3621, -1429, -3879, 30 },
+    { -2352, -1470, -2288, -1638, 30 },
+    { -3077, 421, -3056, 367, 30 },
+    { -1958, -2500, -1859, -2759, 30 },
+    { 2950, 2850, 2950, 2665, 30 },
+    { 3350, 5150, 3350, 4873, 30 },
+    { 2755, 5400, 3100, 5400, 30 },
+    { 3850, 2450, 3804, 2288, 30 },
+    { 3350, 5150, 3292, 5208, 30 },
+    { 1286, 5400, 1603, 5400, 30 },
+    { -797, 5400, -641, 5400, 30 },
+    { -3394, 4003, -3420, 3977, 30 },
+    { -2460, 4937, -2353, 5044, 30 },
+    { -1997, 5400, -1720, 5400, 30 },
+    { -3224, 805, -3146, 603, 30 },
+    { -3112, 4285, -3308, 4089, 30 },
+    { -392, -1000, -225, -1000, 20 },
+    { -375, -900, -158, -900, 20 },
+    { 350, 4400, 588, 4400, 50 },
+    { -910, 700, -1300, 700, 100 },
+    { 1300, 700, 910, 700, 100 },
+    { 20, -359, 100, -359, 100 },
+    { 3400, 4775, 3400, 4460, 30 },
+    { 3490, 4775, 3400, 4775, 30 },
+    { 3400, 4425, 3490, 4425, 30 },
+    { -3001, 4595, -2937, 4531, 30 },
+    { -2689, 4778, -2753, 4842, 30 },
+    { -2937, 4531, -2714, 4753, 30 },
+    { 4912, -1412, 4150, -650, 50 },
+    { 7200, -3975, 7200, -3700, 50 },
+    { 3650, -650, 3775, -650, 50 },
+    { -122, 5400, -122, 5417, 30 },
+    { 228, 5483, 228, 5500, 30 },
+    { 170, 5400, 228, 5400, 30 },
+    { 700, -8200, 800, -8200, 325 },
+    { -950, -8950, -900, -9000, 350 },
+    { 600, -8550, 600, -8200, 350 },
+    { -1000, -7900, -1000, -8900, 350 },
+    { -200, -9000, 500, -9000, 350 },
+    { 550, -8950, 600, -8900, 350 },
+    { 1000, -8850, 1150, -9000, 350 },
+    { 825, -8225, 850, -8250, 350 },
+    { 850, -8475, 850, -8700, 350 },
+    { -2175, -4900, -1100, -4900, 350 },
+    { -1050, -4950, -1000, -5000, 350 },
+    { -1000, -6000, -1000, -6900, 350 },
+    { 4000, -9000, 5000, -9000, 350 },
+    { 2075, -9000, 3000, -9000, 350 },
+    { 7100, -5900, 7100, -4900, 350 },
+    { 7100, -7900, 7100, -6900, 350 },
+    { 6000, -9000, 7000, -9000, 350 },
+    { 7150, -4850, 7200, -4800, 350 },
+    { 9200, -4800, 11200, -4800, 350 },
+    { 7050, -8950, 7100, -8900, 350 },
+    { 3400, 4460, 3400, 4425, 30 },
+    { 3500, 4775, 3490, 4775, 30 },
+    { 3490, 4425, 3500, 4425, 30 },
+    { -3008, 4602, -3001, 4595, 30 },
+    { -2753, 4842, -2760, 4849, 30 },
+    { -2714, 4753, -2689, 4778, 30 },
+};
+// The course's own floors under the water (kept, and made solid), and the
+// beaches' sand (walked on), as triangles: x, y, z three times.
+struct Triangle { float x[3], y[3], z[3]; };
+constexpr Triangle kTwilightFloors[] = {
+    { { -350, -350, 400 }, { -100, -100, -100 }, { -1000, -900, -900 } },
+    { { -350, 400, 400 }, { -100, -100, -100 }, { -1000, -900, -1000 } },
+    { { -300, 300, 300 }, { -50, -50, -50 }, { 2700, 2700, 1700 } },
+    { { -300, 300, -300 }, { -50, -50, -50 }, { 2700, 1700, 1700 } },
+    { { -300, 300, 300 }, { -50, -50, -50 }, { 1700, 1700, 700 } },
+    { { -300, 300, -300 }, { -50, -50, -50 }, { 1700, 700, 700 } },
+    { { 350, 300, -300 }, { -50, -50, -50 }, { 4400, 4350, 4400 } },
+    { { -300, -300, 300 }, { -50, -50, -50 }, { 2700, 4400, 4350 } },
+    { { -300, 300, 300 }, { -50, -50, -50 }, { 2700, 4350, 2700 } },
+    { { -100, 100, 100 }, { -40, -40, -40 }, { 1300, 1300, 800 } },
+    { { -100, 100, -100 }, { -40, -40, -40 }, { 1300, 800, 800 } },
+    { { -100, 100, 100 }, { -40, -40, -40 }, { 2200, 2200, 1700 } },
+    { { -100, 100, -100 }, { -40, -40, -40 }, { 2200, 1700, 1700 } },
+};
+constexpr Triangle kTwilightBeach[] = {
+    { { 2500, 3000, 3000 }, { 20, -100, -100 }, { -1617, -1410, -3000 } },
+    { { 2500, 2000, 3000 }, { 20, -100, -100 }, { -1617, -410, -1410 } },
+    { { 2000, 2000, 1500 }, { -100, -100, 20 }, { 1400, -410, -617 } },
+    { { 2750, 1800, 1700 }, { -100, -100, 55 }, { 5350, 3550, 4000 } },
+    { { 350, 2750, 1400 }, { -100, -100, 55 }, { 4400, 5350, 4300 } },
+    { { 2500, 3000, 2500 }, { 20, -100, 20 }, { -1617, -3000, -2500 } },
+    { { 2500, 1500, 2000 }, { 20, 20, -100 }, { -1617, -617, -410 } },
+    { { 2000, 1500, 1500 }, { -100, 20, 20 }, { 1400, -617, 900 } },
+    { { 2750, 1550, 1400 }, { -100, 100, 55 }, { 5350, 4150, 4300 } },
+    { { 2750, 1700, 1550 }, { -100, 55, 100 }, { 5350, 4000, 4150 } },
+    { { 500, 600, 900 }, { 40, 40, 40 }, { -900, -800, -900 } },
+    { { 900, 600, 600 }, { 40, 40, 40 }, { -900, -800, 600 } },
+    { { 900, 600, 900 }, { 40, 40, 40 }, { -900, 600, 700 } },
+    { { 900, 600, 500 }, { 40, 40, 40 }, { 700, 600, 700 } },
+    { { 2300, 2500, 2500 }, { 100, 20, 20 }, { -2300, -1617, -2500 } },
+    { { 2300, 1500, 2500 }, { 100, 20, 20 }, { -1700, -617, -1617 } },
+    { { 1300, 1500, 1500 }, { 100, 20, 20 }, { 700, 900, -617 } },
+    { { 2300, 2300, 2500 }, { 100, 100, 20 }, { -2300, -1700, -1617 } },
+    { { 2300, 1300, 1500 }, { 100, 100, 20 }, { -1700, -700, -617 } },
+    { { 1300, 1500, 1300 }, { 100, 20, 100 }, { 700, -617, -700 } },
+    { { -700, -600, -500 }, { 100, 100, 100 }, { -900, -800, -900 } },
+    { { -700, -500, -600 }, { 100, 100, 100 }, { -900, -900, -1000 } },
+    { { 500, 500, 800 }, { 100, 100, 100 }, { -1800, -1100, -900 } },
+    { { 800, 500, 400 }, { 100, 100, 100 }, { -900, -1100, -1000 } },
+    { { -600, -500, 800 }, { 100, 100, 100 }, { -1000, -900, -900 } },
+    { { -600, 800, 400 }, { 100, 100, 100 }, { -1000, -900, -1000 } },
+    { { 2300, 800, 900 }, { 100, 100, 100 }, { -1700, -900, -800 } },
+    { { 2300, 900, 1300 }, { 100, 100, 100 }, { -1700, -800, -700 } },
+    { { 2300, 2300, 500 }, { 100, 100, 100 }, { -1700, -2300, -1800 } },
+    { { 2300, 500, 800 }, { 100, 100, 100 }, { -1700, -1800, -900 } },
+    { { 1300, 900, 900 }, { 100, 100, 100 }, { -700, -800, 600 } },
+    { { 1300, 900, 1300 }, { 100, 100, 100 }, { -700, 600, 700 } },
+    { { 900, 800, 1300 }, { 100, 100, 100 }, { 600, 700, 700 } },
+    { { -600, -1300, -500 }, { 100, 100, 100 }, { 600, 700, 700 } },
+    { { -1300, -600, -600 }, { 100, 100, 100 }, { 700, 600, -800 } },
+    { { -1300, -600, -700 }, { 100, 100, 100 }, { 700, -800, -900 } },
+};
+
+// The distance from (x, z) to the segment a -> b.
+float segment_distance(float ax, float az, float bx, float bz, float x, float z) {
+    const float ex = bx - ax, ez = bz - az;
+    const float t = std::clamp(((x - ax) * ex + (z - az) * ez) / std::max(ex * ex + ez * ez, 1e-3f), 0.0f, 1.0f);
+    return std::hypot(x - ax - t * ex, z - az - t * ez);
+}
+
+// Whether (x, z) lies over triangle `t`, and if so its height there.
+bool over(const Triangle& t, float x, float z, float* y) {
+    const float d = (t.z[1] - t.z[2]) * (t.x[0] - t.x[2]) + (t.x[2] - t.x[1]) * (t.z[0] - t.z[2]);
+    if (std::fabs(d) < 1e-3f) return false;
+    const float a = ((t.z[1] - t.z[2]) * (x - t.x[2]) + (t.x[2] - t.x[1]) * (z - t.z[2])) / d;
+    const float b = ((t.z[2] - t.z[0]) * (x - t.x[2]) + (t.x[0] - t.x[2]) * (z - t.z[2])) / d;
+    const float c = 1.0f - a - b;
+    if (a < 0.0f || b < 0.0f || c < 0.0f) return false;
+    *y = a * t.y[0] + b * t.y[1] + c * t.y[2];
+    return true;
+}
+
+// A canal's floor lies at the foot of the walls round it -- each wall's foot
+// weighted by how near it is, and the course's own floors' depths the same
+// way, so the floor meets both as if built with them. The edges of decks,
+// reaching less than 90 units down, are passed over: the water goes on under
+// the decks.
+constexpr float kTwilightShallowest = 90.0f;
+float twilight_canal(float x, float z) {
+    float sum = 0.0f, weight = 0.0f;
+    const auto add = [&](float d, float foot) {
+        const float w = 1.0f / ((d + 100.0f) * (d + 100.0f));
+        sum += w * foot;
+        weight += w;
+    };
+    for (const FootedEdge& e : kTwilightWalls) {
+        if (e.foot >= kTwilightShallowest) add(segment_distance(e.ax, e.az, e.bx, e.bz, x, z), e.foot);
+    }
+    for (const Triangle& t : kTwilightFloors) {
+        for (int i = 0; i < 3; ++i) {
+            const int j = (i + 1) % 3;
+            add(segment_distance(t.x[i], t.z[i], t.x[j], t.z[j], x, z), -t.y[i]);
+        }
+    }
+    return weight > 0.0f ? sum / weight : kTwilightShallowest;
+}
+
+// By the beaches, sand: just under the waterline, dropping steeply (0.8 down
+// for each unit out) until it meets the canal's floor, which carries on in
+// the course's laid stone.
+constexpr float kTwilightBeachStart = 15.0f, kTwilightBeachSlope = 0.8f;
+float twilight_beach(float x, float z) {
+    return kTwilightBeachStart +
+           kTwilightBeachSlope * edge_distance(kTwilightSand, sizeof(kTwilightSand) / sizeof(kTwilightSand[0]), x, z);
+}
+
+float twilight_depth(float x, float z) {
+    return std::min(twilight_beach(x, z), twilight_canal(x, z));
+}
+
+// How far (x, z) is from the nearest wall standing in the water; with
+// `deep`, only walls reaching at least kTwilightShallowest down.
+float twilight_walls(float x, float z, bool deep = false) {
+    float nearest = 1e9f;
+    for (const FootedEdge& e : kTwilightWalls) {
+        if (!deep || e.foot >= kTwilightShallowest) nearest = std::min(nearest, segment_distance(e.ax, e.az, e.bx, e.bz, x, z));
+    }
+    return nearest;
+}
+
+// Which texture a piece of Twilight City's floor takes: 0 the stone, 1 the
+// sand, or -1 none, under one of the course's own floors, which stay. Sand
+// wherever the water is nearer a beach than a wall, out to kTwilightSandReach
+// (its bed carrying on in sand at the canal's depth once down); stone in the
+// canals.
+constexpr float kTwilightSandReach = 1200.0f;
+int twilight_zone(float x, float z) {
+    float y = 0.0f;
+    for (const Triangle& t : kTwilightFloors) {
+        if (over(t, x, z, &y)) return -1;
+    }
+    const float beach = edge_distance(kTwilightSand, sizeof(kTwilightSand) / sizeof(kTwilightSand[0]), x, z);
+    return beach < kTwilightSandReach && beach < twilight_walls(x, z, true) ? 1 : 0;
+}
+
 // A course's floor: where its grid lies (its corner and its chunks each
 // way), its sand (an RGBA16 block in one of the course's segments, or made
 // here, kMade: its width and height in texels, each a power of two, and
@@ -1047,6 +1490,8 @@ float southern_depth(float x, float z) {
 // came out in stripes, alternate rows from either half.
 constexpr bool kWrapped = false, kMirrored = true;
 constexpr int kMade = -1;
+// A floor may have a second texture, given the same way, with `zone` saying
+// which a piece of floor takes (0 the first, 1 the second, -1 none).
 struct Floor {
     uint32_t course;
     float x0, z0;
@@ -1056,6 +1501,11 @@ struct Floor {
     int width, height;
     bool mirrored;
     float (*depth)(float x, float z);
+    int second_segment = 0;
+    uint32_t second = 0;
+    int second_width = 0, second_height = 0;
+    bool second_mirrored = false;
+    int (*zone)(float x, float z) = nullptr;
 };
 constexpr Floor kFloors[] = {
     // The top 32 rows of Dolphin Park's 32x64 beach strip, whose lower rows
@@ -1079,6 +1529,10 @@ constexpr Floor kFloors[] = {
     { 8, -14336.0f, -14336.0f, 28, 28, 14, 0x3E00, 32, 32, kMirrored, glacier_depth },
     // Southern Island's beach sand, the top of its 32x64 strip.
     { 7, -12288.0f, -13312.0f, 24, 26, 14, 0x7000, 32, 32, kMirrored, southern_depth },
+    // Twilight City's laid stone (64x32, the blocks lining its tunnels), and
+    // by its beaches their sand.
+    { 6, -5120.0f, -10240.0f, 17, 16, 14, 0x9800, 64, 32, kWrapped, twilight_depth,
+      14, 0xB800, 32, 32, kWrapped, twilight_zone },
 };
 
 const Floor* floor_for(uint32_t course) {
@@ -1169,12 +1623,13 @@ void make_silt(uint8_t* rdram) {
     }
 }
 
-// Writes `floor`, its sand at physical `sand`; returns whether it fits and
-// the area was free.
-bool build(uint8_t* rdram, const Floor& floor, uint32_t sand) {
+// Writes `floor`, its sand at physical `sand` (and its second texture's at
+// `second_sand`); returns whether it fits and the area was free.
+bool build(uint8_t* rdram, const Floor& floor, uint32_t sand, uint32_t second_sand) {
     uint32_t* marker = reinterpret_cast<uint32_t*>(rdram + kBase);
     if (*marker != kMarker) {
-        for (const auto& [from, to] : { std::pair{ kBase, kBaseEnd }, std::pair{ kVertices, kVerticesEnd } }) {
+        for (const auto& [from, to] : { std::pair{ kBase, kBaseEnd }, std::pair{ kVertices, kVerticesEnd },
+                                        std::pair{ kCellLists, kCellListsEnd } }) {
             for (uint32_t a = from; a < to; a += 4) {
                 if (*reinterpret_cast<uint32_t*>(rdram + a) != 0) {
                     std::fprintf(stderr, "[seafloor] memory at 0x%06X is in use; no seafloor\n", a);
@@ -1221,21 +1676,59 @@ bool build(uint8_t* rdram, const Floor& floor, uint32_t sand) {
     list.command(0xB6000000u, 0x000F3001u);                // clear depth, cull, fog, lighting, texgen
     list.command(0xB7000000u, 0x00000205u);                // set depth, shade, smooth
     list.command(0xBB000001u, 0xFFFFFFFFu);                // texture on, full scale
-    list.command(0xFD100000u, sand);                       // 32x32 RGBA16 sand, loaded as a block
-    // Loaded as a block of width x height texels, a line of width / 4
-    // 64-bit words; the render tile repeats it, its masks the sizes' powers
-    // of two.
-    const auto log2 = [](int v) { uint32_t n = 0; while ((1 << (n + 1)) <= v) ++n; return n; };
-    const uint32_t texels = uint32_t(floor.width * floor.height), words = uint32_t(floor.width) / 4;
-    const uint32_t cm = floor.mirrored ? 1u : 0u;
-    list.command(0xF5100000u, 0x07000000u);
-    list.command(0xE6000000u, 0);
-    list.command(0xF3000000u, ((texels - 1) << 12) | ((2048u + words - 1) / words) | 0x07000000u);
-    list.command(0xE7000000u, 0);
-    list.command(0xF5100000u | (words << 9), (cm << 18) | (log2(floor.height) << 14) | (cm << 8) | (log2(floor.width) << 4));
-    list.command(0xF2000000u, (uint32_t(floor.width - 1) << 14) | (uint32_t(floor.height - 1) << 2));
+    // An RGBA16 texture loaded as a block of width x height texels, a line of
+    // width / 4 64-bit words; the render tile repeats it, its masks the
+    // sizes' powers of two.
+    const auto load = [](Builder& to, uint32_t address, int width, int height, bool mirrored) {
+        const auto log2 = [](int v) { uint32_t n = 0; while ((1 << (n + 1)) <= v) ++n; return n; };
+        const uint32_t texels = uint32_t(width * height), words = uint32_t(width) / 4;
+        const uint32_t cm = mirrored ? 1u : 0u;
+        to.command(0xFD100000u, address);
+        to.command(0xF5100000u, 0x07000000u);
+        to.command(0xE6000000u, 0);
+        to.command(0xF3000000u, ((texels - 1) << 12) | ((2048u + words - 1) / words) | 0x07000000u);
+        to.command(0xE7000000u, 0);
+        to.command(0xF5100000u | (words << 9), (cm << 18) | (log2(height) << 14) | (cm << 8) | (log2(width) << 4));
+        to.command(0xF2000000u, (uint32_t(width - 1) << 14) | (uint32_t(height - 1) << 2));
+    };
+    load(list, sand, floor.width, floor.height, floor.mirrored);
     list.command(0xB8000000u, 0);
     if (list.full || triangles.full) return false;
+
+    // A floor with a second texture: that texture's load, called between the
+    // two passes, and each chunk's triangles in two lists, those of either
+    // texture (or neither: none), each triangle by the zone at its middle.
+    if (floor.zone != nullptr) {
+        Builder second{ rdram, kSecondState, kMadeSand };
+        second.command(0xE7000000u, 0);
+        load(second, second_sand, floor.second_width, floor.second_height, floor.second_mirrored);
+        second.command(0xB8000000u, 0);
+        if (second.full || uint32_t(floor.across * floor.down) * 2 * kCellListStride > kCellListsEnd - kCellLists) return false;
+        for (int cz = 0; cz < floor.down; ++cz) {
+            for (int cx = 0; cx < floor.across; ++cx) {
+                const int chunk = cz * floor.across + cx;
+                const float x0 = floor.x0 + float(cx * kChunk), z0 = floor.z0 + float(cz * kChunk);
+                Builder lists[2] = { { rdram, cell_list(chunk, 0), cell_list(chunk, 0) + kCellListStride },
+                                     { rdram, cell_list(chunk, 1), cell_list(chunk, 1) + kCellListStride } };
+                for (int j = 0; j < kCells; ++j) {
+                    for (int i = 0; i < kCells; ++i) {
+                        const uint32_t a = uint32_t(j * (kCells + 1) + i), b = a + 1;
+                        const uint32_t c = a + (kCells + 1), d = c + 1;
+                        const float x = x0 + float(i) * kCell, z = z0 + float(j) * kCell;
+                        // a c d: its middle a third of the way along; a d b likewise.
+                        const int first = floor.zone(x + kCell / 3.0f, z + 2.0f * kCell / 3.0f);
+                        const int other = floor.zone(x + 2.0f * kCell / 3.0f, z + kCell / 3.0f);
+                        if (first >= 0) lists[first].command(0xBFu << 24, ((a * 5) << 16) | ((c * 5) << 8) | (d * 5));
+                        if (other >= 0) lists[other].command(0xBFu << 24, ((a * 5) << 16) | ((d * 5) << 8) | (b * 5));
+                    }
+                }
+                for (Builder& l : lists) {
+                    l.command(0xB8000000u, 0);
+                    if (l.full) return false;
+                }
+            }
+        }
+    }
 
     // The sun, high and off to one side, gives the ripples and the drop
     // some relief.
@@ -1283,15 +1776,27 @@ uint32_t frame_list(uint8_t* rdram, const Floor& floor, int b, float eye_x, floa
     const auto first = [](float at, float origin, int chunks) {
         return std::clamp(int(std::floor((at - origin) / kChunk)), 0, chunks - 1);
     };
-    for (int cz = first(eye_z - kDrawRadius, floor.z0, floor.down); cz <= first(eye_z + kDrawRadius, floor.z0, floor.down); ++cz) {
-        for (int cx = first(eye_x - kDrawRadius, floor.x0, floor.across); cx <= first(eye_x + kDrawRadius, floor.x0, floor.across); ++cx) {
-            const float x0 = floor.x0 + float(cx * kChunk), z0 = floor.z0 + float(cz * kChunk);
-            const float dx = std::max({ x0 - eye_x, 0.0f, eye_x - (x0 + kChunk) });
-            const float dz = std::max({ z0 - eye_z, 0.0f, eye_z - (z0 + kChunk) });
-            if (dx * dx + dz * dz > kDrawRadius * kDrawRadius) continue;
-            const uint32_t vertex = kVertices + uint32_t(cz * floor.across + cx) * kPerChunk * 16;
-            list.command((0x04u << 24) | (kPerChunk << 9) | (kPerChunk * 16 - 1), 0x80000000u | vertex);
-            list.command(0x06000000u, 0x80000000u | kTriangles);
+    // One pass, or for a floor with a second texture two: the first
+    // texture's triangles of each chunk, then the second's, the texture
+    // loaded between (a chunk without any of a texture's is passed over).
+    for (int pass = 0; pass < (floor.zone != nullptr ? 2 : 1); ++pass) {
+        if (pass == 1) list.command(0x06000000u, 0x80000000u | kSecondState);
+        for (int cz = first(eye_z - kDrawRadius, floor.z0, floor.down); cz <= first(eye_z + kDrawRadius, floor.z0, floor.down); ++cz) {
+            for (int cx = first(eye_x - kDrawRadius, floor.x0, floor.across); cx <= first(eye_x + kDrawRadius, floor.x0, floor.across); ++cx) {
+                const float x0 = floor.x0 + float(cx * kChunk), z0 = floor.z0 + float(cz * kChunk);
+                const float dx = std::max({ x0 - eye_x, 0.0f, eye_x - (x0 + kChunk) });
+                const float dz = std::max({ z0 - eye_z, 0.0f, eye_z - (z0 + kChunk) });
+                if (dx * dx + dz * dz > kDrawRadius * kDrawRadius) continue;
+                const int chunk = cz * floor.across + cx;
+                uint32_t triangles = kTriangles;
+                if (floor.zone != nullptr) {
+                    triangles = cell_list(chunk, pass);
+                    if (reinterpret_cast<const uint32_t*>(rdram + triangles)[0] == 0xB8000000u) continue;
+                }
+                const uint32_t vertex = kVertices + uint32_t(chunk) * kPerChunk * 16;
+                list.command((0x04u << 24) | (kPerChunk << 9) | (kPerChunk * 16 - 1), 0x80000000u | vertex);
+                list.command(0x06000000u, 0x80000000u | triangles);
+            }
         }
     }
     list.full = false;
@@ -1393,6 +1898,19 @@ bool seafloor_height_at(uint32_t course, float x, float z, float* height) {
         *height = -capped(floor->depth(x, z));
         return true;
     }
+    if (course == 6) {
+        // Twilight City: the floor, or the course's own where it has one
+        // (above it), or a beach's sand where that is higher.
+        *height = -capped(twilight_depth(x, z));
+        float y = 0.0f;
+        for (const Triangle& t : kTwilightFloors) {
+            if (over(t, x, z, &y)) *height = std::max(*height, y);
+        }
+        for (const Triangle& t : kTwilightBeach) {
+            if (over(t, x, z, &y)) *height = std::max(*height, y);
+        }
+        return true;
+    }
     if (course == 2 || course == 4 || course == 8) {
         // Sunset Bay, Drake Lake and Glacier Coast: the land rising from the
         // water, as far as a beach's height; Sunset Bay's banks going steeply
@@ -1422,7 +1940,7 @@ bool seafloor_height_at(uint32_t course, float x, float z, float* height) {
 // Whether what stands out of the water on course `course` is walls, too
 // tall to be flown over: Marine Fortress's and Port Blue's.
 bool course_has_walls(uint32_t course) {
-    return course == 3 || course == 5;
+    return course == 3 || course == 5 || course == 6;
 }
 
 // How far (x, z) is from anything solid standing out of the water on course
@@ -1451,6 +1969,8 @@ float course_clearance(uint32_t course, float x, float z) {
         return southern_edge(x, z, &foot);
     }
     if (course == 8) return glacier_shore(x, z) + kLandEdge;
+    // Twilight City's walls, gone round; its beaches are walked on.
+    if (course == 6) return twilight_walls(x, z);
     if (course != 0) return nearest;
     for (const Outline& o : kSolid) nearest = std::min(nearest, outside(o, x, z));
     for (size_t i = 1; i < sizeof(kShore) / sizeof(kShore[0]); ++i) {
@@ -1487,7 +2007,8 @@ uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[
     if (built_course != course || built_sand != sand) {
         built_course = course;
         built_sand = sand;
-        ok = build(rdram, *floor, sand);
+        const uint32_t second = floor->zone != nullptr ? segments[floor->second_segment] + floor->second : 0;
+        ok = build(rdram, *floor, sand, second);
         if (ok && made) make_silt(rdram);
     }
     if (!ok) return 0;

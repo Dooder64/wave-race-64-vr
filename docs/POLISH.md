@@ -62,7 +62,7 @@ A course of its own; needs the user's Hard run first.
 | 5.2 | Gaps in the walls, missing collision | open |
 | 5.3 | Extra ramp near the shortcut; beach ramp and spikes missing (probably the Normal vs Hard layout — confirm on Hard) | open |
 | 5.4 | Start line reported out of bounds; 3 laps driven, 2 counted | open |
-| 5.5 | Seafloor: give the existing floor collision rather than building a new one | open |
+| 5.5 | Seafloor (built 2026-10-29, flat-tested, awaiting headset): canals in the course's laid stone (0E009800) at the walls' feet (~4.5 m, deeper by the north walls; decks' shallow edges ignored); sand (0E00B800) aprons by both beaches, dropping steeply to canal depth; the course's own underwater floors kept and made solid; beaches walkable; walls gone round and stop thrown bodies. Tables from scratchpad tw/gen_tables.py; preview tw/floor_map.py. User confirmed in the headset 2026-10-29 | fixed |
 
 ## Round 6 — bigger polish
 
