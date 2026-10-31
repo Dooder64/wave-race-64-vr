@@ -41,7 +41,10 @@ work but haven't been tried.
 **Playing:** download the zip from
 [this fork's releases](https://github.com/Dooder64/wave-race-64-vr/releases),
 extract it, connect the headset, and run **`Play in VR.bat`**. Running
-`WaveRace64Recomp.exe` directly starts on the monitor.
+`WaveRace64Recomp.exe` directly starts on the monitor. Once your dump is set
+up, the game starts straight away (hold Shift while starting to see the
+launcher again). It checks GitHub once at start for a newer release and says
+so on the title screen; both can be turned off in Settings → General.
 
 ### In the headset
 
@@ -49,34 +52,43 @@ extract it, connect the headset, and run **`Play in VR.bat`**. Running
   the game's own chase camera. Menus, the HUD and the screens between races
   sit on a floating panel (its size is in Settings → VR).
 - **First person**, riding from the rider's eyes, leaning and rolling with
-  the body (how much is in Settings → VR). It works on a monitor too (F5).
+  the body (how much: OPTIONS → EXTRAS → TILT).
 - **Thrown off**, the view goes with you: tumbling, sinking under the water
   with bubbles and muffled, echoing sound, then swimming back to the jet ski
   or walking up the beach, and climbing back on.
 - **Seafloors** under every course, so there is something below you: sand,
   rock, canals and shallows, no deeper than about 15 m.
 - **Dolphin Park riders:** three other riders out on the water in the warm-up
-  park, doing laps, stunts and routines of their own (switch in Settings →
-  Free Roam).
+  park, doing laps, stunts and routines of their own.
 - **The whole scene drawn all round you**, rather than only what the
   monitor's camera would show.
 
-### Free Roam and course options (VR and monitor)
+### In the game's own menus (VR and monitor)
 
-Turn on **Settings → Free Roam**, then start a Time Trial or Stunt Mode on any
-course: no clock, no laps to finish, no missed-buoy disqualification, no
-COURSE OUT, and the land free to explore. Far from any land a gentle current
-eases you back. In Free Roam you can also choose:
+Everything you'd want to change is set on game-style screens, no settings
+menu needed:
 
-- **Buoys** and **Stunt rings** on or off, for open water.
-- **Waves**, from Stillest to Extreme.
-- **Sky and water** from any other course.
-- The far sides of Sunny Beach's island and Glacier Coast's walls are filled
-  in, so you can ride all the way round.
+- **FREE ROAM** on the main menu: a ride on any of the nine courses with no
+  clock, no laps, no buoys or rings, no COURSE OUT, and the land free to
+  explore; far from land a gentle current eases you back. After the course,
+  its own page: **WAVES** (still water up to far past the game's roughest),
+  **SKY** and water from any course, **MUSIC** (each track plays as you scroll
+  past it), **FOG**, the Dolphin Park **RIDERS**, and on Dolphin Park its
+  **LAYOUT**: Stunt Mode's, or the championship's Warm Up with the dolphin.
+- **WAVES** before every race: after the difficulty in Championship (once for
+  the whole championship), Time Trials and 2P VS, after the course in Stunt
+  Mode.
+- **MISSES and LAPS** in Championship, next to WAVES: up to 10 of each, for
+  Reverse too.
+- **OPTIONS → EXTRAS**: speed in KPH or MPH, chase camera or first person,
+  first-person tilt, controller feedback, textures, water quality and style,
+  ripples, spray, and unlock all.
 
-And for every race: **Speed units** (mph or km/h) and **Fog** on/off under
-Settings → Graphics, and **Race music** (any course's music, with the
-replacement soundtrack on) under Settings → Sound.
+**First person on a monitor:** click either stick (or F5) to switch views;
+the right stick looks around, up to 80 degrees either side and 30 up or down,
+and the view returns when you let go.
+
+Window, graphics, controls and volume are still under Settings (Esc).
 
 ### Touch controllers
 
@@ -103,10 +115,10 @@ A gamepad works too, as in the flat game.
 - Menus animate at the game's 20 frames a second on the panel.
 - Climbing back on after a fall, the view briefly looks into the jet ski.
 - At Dolphin Park, a swimmer diving by the piers can swim through the beach.
-- In Free Roam with Buoys off, passing where a hidden buoy is can still give
-  POWER UP or POWER DOWN; very far out, the water's physics get odd.
-- Race music needs the replacement soundtrack (Settings → Sound → Music);
-  with the original music each course keeps its own.
+- In Free Roam, passing where a hidden buoy is can still give POWER UP or
+  POWER DOWN; very far out, the water's physics get odd.
+- In races longer than 3 laps, the LAP message on crossing the line can show
+  the wrong number (the lap counter at the top is right).
 
 The full list is in [docs/POLISH.md](docs/POLISH.md).
 
