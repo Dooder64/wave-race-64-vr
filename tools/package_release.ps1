@@ -86,9 +86,9 @@ foreach ($dir in @(Get-ChildItem -Directory "lib/RT64/src/contrib", "lib/N64Mode
     $text = Get-ChildItem -File $dir.FullName | Where-Object { $_.Name -match '^(licen[cs]e|copying)' } | Select-Object -First 1
     if ($text -and -not $texts.Contains($dir.Name)) { $texts[$dir.Name] = $text.FullName }
 }
-foreach ($name in $texts.Keys) {
-    if (-not (Test-Path -LiteralPath $texts[$name])) { throw "missing license text $($texts[$name])" }
-    Copy-Item -LiteralPath $texts[$name] -Destination (Join-Path $licenses "$name.txt")
+foreach ($component in $texts.Keys) {
+    if (-not (Test-Path -LiteralPath $texts[$component])) { throw "missing license text $($texts[$component])" }
+    Copy-Item -LiteralPath $texts[$component] -Destination (Join-Path $licenses "$component.txt")
 }
 Copy-Item -Recurse "$BuildDir\assets" (Join-Path $stage "assets")
 & python "tools/bundled_assets.py" --assets (Join-Path $stage "assets") --reference "assets"
