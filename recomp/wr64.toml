@@ -261,8 +261,9 @@ func = "AudioGeneral_PlaySound"
 before_vram = 0x800C37F4
 text = '{ extern int wr64_sound_silenced(uint8_t* rdram, int sound); if (wr64_sound_silenced(rdram, (int)ctx->r4)) return; }'
 
-# Music select: on the way into func_800C1540 (a0 the sequence to start), a
-# course's music in a race becomes the chosen course's (patches/free_roam.cpp).
+# Music select: on the way into func_800C1540 (a0 the sequence to start), the
+# port notes which course's recording to play in its place; the game's own
+# sequence is kept, since another course's may not fit (patches/free_roam.cpp).
 [[patches.hook]]
 func = "func_800C1540"
 before_vram = 0x800C1540
