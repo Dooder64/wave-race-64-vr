@@ -9,7 +9,7 @@ only needed when investigating a crash.
 
 To play in VR, connect your PC VR headset first (Quest Link, Air Link,
 Virtual Desktop or SteamVR), then run `Play in VR.bat` instead. In the
-headset, the right thumbstick's click (or F5) switches first person on and off.
+headset, the left thumbstick's click (or F5) switches first person on and off.
 
 This is a native Windows x64 build with Direct3D 12 rendering. Supply your own
 **Wave Race 64 (USA) (Rev A / v1.1)** `.z64` in the launcher. Required SHA-1:

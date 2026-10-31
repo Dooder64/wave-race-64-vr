@@ -26,6 +26,90 @@ with [RT64](https://github.com/rt64/rt64) as the renderer and
 [RecompFrontend](https://github.com/N64Recomp/RecompFrontend) for the menus
 and controller support. It is unofficial and not affiliated with Nintendo.
 
+## PC VR edition
+
+This fork adds **seated PC VR** to the port, plus a set of ways to ride the
+game's courses that it never offered. VR is optional: the same download plays
+on a monitor as before, with every new option available there too.
+
+**What you need:** Windows 10 or 11 (x64), a Direct3D 12 graphics card, your
+own USA Rev A dump (above), and a PC VR headset whose OpenXR runtime is running
+before the game starts. It was built and played on a Meta Quest 3 through the
+Meta Quest Link app; other OpenXR runtimes (SteamVR, Virtual Desktop) should
+work but haven't been tried.
+
+**Playing:** download the zip from
+[this fork's releases](https://github.com/Dooder64/wave-race-64-vr/releases),
+extract it, connect the headset, and run **`Play in VR.bat`**. Running
+`WaveRace64Recomp.exe` directly starts on the monitor.
+
+### In the headset
+
+- **Seated stereo VR**, with the head tracked in all six directions around
+  the game's own chase camera. Menus, the HUD and the screens between races
+  sit on a floating panel (its size is in Settings → VR).
+- **First person**, riding from the rider's eyes, leaning and rolling with
+  the body (how much is in Settings → VR). It works on a monitor too (F5).
+- **Thrown off**, the view goes with you: tumbling, sinking under the water
+  with bubbles and muffled, echoing sound, then swimming back to the jet ski
+  or walking up the beach, and climbing back on.
+- **Seafloors** under every course, so there is something below you: sand,
+  rock, canals and shallows, no deeper than about 15 m.
+- **Dolphin Park riders:** three other riders out on the water in the warm-up
+  park, doing laps, stunts and routines of their own (switch in Settings →
+  Free Roam).
+- **The whole scene drawn all round you**, rather than only what the
+  monitor's camera would show.
+
+### Free Roam and course options (VR and monitor)
+
+Turn on **Settings → Free Roam**, then start a Time Trial or Stunt Mode on any
+course: no clock, no laps to finish, no missed-buoy disqualification, no
+COURSE OUT, and the land free to explore. Far from any land a gentle current
+eases you back. In Free Roam you can also choose:
+
+- **Buoys** and **Stunt rings** on or off, for open water.
+- **Waves**, from Stillest to Extreme.
+- **Sky and water** from any other course.
+- The far sides of Sunny Beach's island and Glacier Coast's walls are filled
+  in, so you can ride all the way round.
+
+And for every race: **Speed units** (mph or km/h) and **Fog** on/off under
+Settings → Graphics, and **Race music** (any course's music, with the
+replacement soundtrack on) under Settings → Sound.
+
+### Touch controllers
+
+| Control | Does |
+|---|---|
+| Left stick | steer (the N64 stick) |
+| Right trigger or A | throttle (A) |
+| B | B |
+| Left trigger | Z |
+| Left / right grip | L / R |
+| Right stick | C buttons (camera) |
+| Menu button | Start |
+| Left stick click (F5) | first person on/off |
+| Right stick click (F6) | recentre the view |
+| Y (F4) | after a fall, straight back onto the jet ski |
+| X (F3) | throw yourself off |
+
+A gamepad works too, as in the flat game.
+
+### Known issues
+
+- Brief flashes at some transitions between menus and races, and the
+  black screen-wipes look odd on the floating panel.
+- Menus animate at the game's 20 frames a second on the panel.
+- Climbing back on after a fall, the view briefly looks into the jet ski.
+- At Dolphin Park, a swimmer diving by the piers can swim through the beach.
+- In Free Roam with Buoys off, passing where a hidden buoy is can still give
+  POWER UP or POWER DOWN; very far out, the water's physics get odd.
+- Race music needs the replacement soundtrack (Settings → Sound → Music);
+  with the original music each course keeps its own.
+
+The full list is in [docs/POLISH.md](docs/POLISH.md).
+
 ## Getting it
 
 **Windows (x64).** Download `WaveRace64Recomp-0.4.0-windows-x64.zip` from
