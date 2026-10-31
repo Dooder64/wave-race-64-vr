@@ -3,8 +3,9 @@
 #   powershell -ExecutionPolicy Bypass -File tools/package_release.ps1 -BuildDir build-fe -Version 0.1.0
 #
 # What goes in: the executable, the three DLLs it cannot start without (SDL2,
-# dxcompiler, dxil), assets/ (menus, replacement music, HD textures), this project's
-# LICENSE, the third-party notices and the README. The debug symbols go into a
+# dxcompiler, dxil), "Play in VR.bat" (the executable with WR64_VR=1), assets/
+# (menus, replacement music, HD textures), this project's LICENSE, the
+# third-party notices and the README. The debug symbols go into a
 # second zip, which is only needed to investigate crash reports. Nothing here
 # is a ROM, and the script refuses to
 # continue if it finds one where it is staging.
@@ -53,7 +54,8 @@ $files = @(
     "$BuildDir\dxil.dll",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "README.md"
+    "README.md",
+    "tools\release\Play in VR.bat"
 )
 foreach ($f in $files) {
     if (-not (Test-Path $f)) { throw "missing $f" }

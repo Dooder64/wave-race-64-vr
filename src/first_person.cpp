@@ -1604,12 +1604,22 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
 
     // The view: the world turned into the eye's space, looking down -z with y
     // up, as the game's own camera is. Row vectors.
-    const Vec back = camera.ahead * -1.0f;
+    // On a monitor it is turned down 16.7 degrees: the game's projection
+    // (segment 3's 0xE008, [2][1] 0.3905 against [1][1] 1.3018) centres the
+    // screen that far above where the camera looks, for the chase camera's
+    // view down onto the rider, which left first person's horizon low and the
+    // screen mostly sky. In VR each eye is recentred instead.
+    Vec view_up = camera.up, back = camera.ahead * -1.0f;
+    if (!vr::enabled()) {
+        constexpr float kDown = 0.2915f;  // atan(0.3905 / 1.3018)
+        view_up = camera.up * std::cos(kDown) + camera.ahead * std::sin(kDown);
+        back = (camera.ahead * std::cos(kDown) - camera.up * std::sin(kDown)) * -1.0f;
+    }
     Matrix view{};
-    view.m[0][0] = camera.right.x; view.m[0][1] = camera.up.x; view.m[0][2] = back.x;
-    view.m[1][0] = camera.right.y; view.m[1][1] = camera.up.y; view.m[1][2] = back.y;
-    view.m[2][0] = camera.right.z; view.m[2][1] = camera.up.z; view.m[2][2] = back.z;
-    view.m[3][0] = -dot(eye, camera.right); view.m[3][1] = -dot(eye, camera.up); view.m[3][2] = -dot(eye, back);
+    view.m[0][0] = camera.right.x; view.m[0][1] = view_up.x; view.m[0][2] = back.x;
+    view.m[1][0] = camera.right.y; view.m[1][1] = view_up.y; view.m[1][2] = back.y;
+    view.m[2][0] = camera.right.z; view.m[2][1] = view_up.z; view.m[2][2] = back.z;
+    view.m[3][0] = -dot(eye, camera.right); view.m[3][1] = -dot(eye, view_up); view.m[3][2] = -dot(eye, back);
     view.m[3][3] = 1.0f;
     const uint32_t address = kView + uint32_t(b) * kViewStride;
     write_matrix(rdram, address, view);

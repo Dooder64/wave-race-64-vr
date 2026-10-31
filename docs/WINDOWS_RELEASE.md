@@ -7,6 +7,10 @@ Keep the three DLLs and `assets` folder beside the executable. Build tools and
 WSL are not required to play. The separate debug-symbols ZIP is optional and
 only needed when investigating a crash.
 
+To play in VR, connect your PC VR headset first (Quest Link, Air Link,
+Virtual Desktop or SteamVR), then run `Play in VR.bat` instead. In the
+headset, the right thumbstick's click (or F5) switches first person on and off.
+
 This is a native Windows x64 build with Direct3D 12 rendering. Supply your own
 **Wave Race 64 (USA) (Rev A / v1.1)** `.z64` in the launcher. Required SHA-1:
 `508dfc2d4caa42b6f6de5263d0aed5e44ac7966a`. Other revisions and regions are
