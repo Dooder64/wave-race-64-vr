@@ -235,3 +235,36 @@ text = '{ extern uint32_t wr64_vr_buoy_area(uint32_t, int, int); uint32_t area =
 func = "func_8006E674"
 before_vram = 0x8006EDFC
 text = '{ extern int wr64_vr_all_round(void); if (wr64_vr_all_round()) ctx->f4.fl = 2.0f; }'
+
+# Free Roam's wave intensity: the water is set up for a course by
+# func_8004F9E0 (a0 the water's height, a1 the wave level, D_800D49B0); on
+# its way in, the port may give another level (patches/free_roam.cpp).
+[[patches.hook]]
+func = "func_8004F9E0"
+before_vram = 0x8004F9E0
+text = '{ extern int wr64_wave_level(uint8_t* rdram, int level); ctx->r5 = (int32_t)wr64_wave_level(rdram, (int)ctx->r5); }'
+
+# Free Roam without the announcer: voice lines are queued by func_800C32A0
+# (a0 the line, a1 its priority, a2 how long it holds the channel), directly
+# or after a delay (func_800C338C, then func_800C3494); on its way in, the
+# port is asked whether to leave the line out (patches/free_roam.cpp).
+[[patches.hook]]
+func = "func_800C32A0"
+before_vram = 0x800C32A0
+text = '{ extern int wr64_voice_silenced(uint8_t* rdram, int line, int priority, uint32_t caller); if (wr64_voice_silenced(rdram, (int)ctx->r4, (int)ctx->r5, (uint32_t)ctx->r31)) { ctx->r2 = 0; return; } }'
+
+# Free Roam without the start's beeps: on the way into AudioGeneral_PlaySound
+# (a0 the sound), before anything is done, the port is asked whether to leave
+# it out (patches/free_roam.cpp).
+[[patches.hook]]
+func = "AudioGeneral_PlaySound"
+before_vram = 0x800C37F4
+text = '{ extern int wr64_sound_silenced(uint8_t* rdram, int sound); if (wr64_sound_silenced(rdram, (int)ctx->r4)) return; }'
+
+# Music select: on the way into func_800C1540 (a0 the sequence to start), a
+# course's music in a race becomes the chosen course's (patches/free_roam.cpp).
+[[patches.hook]]
+func = "func_800C1540"
+before_vram = 0x800C1540
+text = '{ extern int wr64_race_music(uint8_t* rdram, int sequence); ctx->r4 = (int32_t)wr64_race_music(rdram, (int)ctx->r4); }'
+

@@ -48,6 +48,13 @@ std::array<Voice, kPlayers> voices{};
 std::mutex control_mutex;
 std::atomic<bool> enabled{true};
 std::atomic<float> main_volume{1.0f}, replacement_volume{0.65f};
+std::atomic<int> race_sequence{-1};
+
+// The sequence whose recording is heard for `sequence` (see set_race_sequence).
+uint8_t heard(uint8_t sequence) {
+    const int race = race_sequence.load(std::memory_order_relaxed);
+    return race >= 0 && sequence >= 6 && sequence <= 14 ? uint8_t(race) : sequence;
+}
 
 const Track* find_track(uint8_t sequence) {
     // One optional recording fills the courses without a matching remix.
@@ -187,14 +194,16 @@ void initialize(const std::filesystem::path& directory, const std::filesystem::p
 }
 
 bool replacement_available(uint8_t sequence) {
-    return enabled.load(std::memory_order_relaxed) && find_track(sequence);
+    return enabled.load(std::memory_order_relaxed) && find_track(heard(sequence));
 }
+void set_race_sequence(int sequence) { race_sequence.store(sequence, std::memory_order_relaxed); }
 void set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 void set_volume(double percent) { main_volume.store(float(std::clamp(percent, 0.0, 100.0) / 100.0), std::memory_order_relaxed); }
 void set_replacement_volume(double percent) { replacement_volume.store(float(std::clamp(percent, 0.0, 100.0) / 100.0), std::memory_order_relaxed); }
 
 void sequence_started(unsigned player, uint8_t sequence) {
     if (player >= kPlayers) return;
+    sequence = heard(sequence);
     std::lock_guard lock(control_mutex);
     auto& control = controls[player];
     ++control.generation;
@@ -211,6 +220,7 @@ void sequence_stopped(unsigned player) {
 }
 void sequence_state(unsigned player, uint8_t sequence, float gain, bool paused) {
     if (player >= kPlayers) return;
+    sequence = heard(sequence);
     std::lock_guard lock(control_mutex);
     auto& control = controls[player];
     // Also catches sequences enabled by asynchronous DMA completion.

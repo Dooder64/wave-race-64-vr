@@ -1979,6 +1979,21 @@ float course_clearance(uint32_t course, float x, float z) {
     return nearest;
 }
 
+// How far (x, z) is from the nearest land or wall on course `course`, as the
+// shore tables know it (0 on land): for Free Roam's current, which leaves
+// alone anyone near land, however far from the race.
+float land_distance(uint32_t course, float x, float z) {
+    float d = 1e9f;
+    switch (course) {
+        case 1: d = sunny_shore(x, z).distance; break;
+        case 2: d = sunset_shore(x, z); break;
+        case 4: d = drake_shore(x, z); break;
+        case 8: d = glacier_shore(x, z); break;
+        default: d = course_clearance(course, x, z); break;
+    }
+    return std::max(d, 0.0f);
+}
+
 // Whether course `course`'s floor is drawn only with the eye below the
 // waves. Drake Lake's water mixes in what lies beneath it for the game's own
 // mirrored scenery (its authored reflection), and from above showed the bed

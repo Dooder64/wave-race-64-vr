@@ -204,6 +204,16 @@ void build_launcher(recompui::LauncherMenu* menu) {
 namespace wr64 {
 // patches/unlock_all.cpp: the Debug tab's switch.
 void set_unlock_all(bool on);
+// patches/free_roam.cpp and src/companions.cpp: the Free Roam tab's.
+void set_free_roam(bool on);
+void set_free_roam_buoys(bool on);
+void set_free_roam_rings(bool on);
+void set_free_roam_waves(int level);
+void set_free_roam_look(int course);
+void set_race_music(int course);
+void set_fog(bool on);
+namespace speed_units { void set_mph(bool on); }
+void set_companions(bool on);
 }
 
 namespace wr64::frontend {
@@ -280,6 +290,48 @@ void init(bool auto_start) {
         if (context != recomp::config::OptionChangeContext::Temporary)
             wr64::vr::set_panel_size(float(std::get<double>(value)) / 100.0f);
     });
+    auto &roam = recompui::config::create_config_tab("Free Roam", "free_roam", true);
+    roam.add_bool_option("free_roam", "Free Roam", "Time Trials and Stunt Mode become free roam on every course: no clock, no laps, no finish and no COURSE OUT. Far past the course a current carries you back. Pick the course in the game's own menus; pause and quit to leave.", false);
+    roam.add_option_change_callback("free_roam", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::set_free_roam(std::get<bool>(value));
+    });
+    roam.add_bool_option("free_roam_buoys", "Buoys", "Show the course buoys and the direction arrow in a Time Trials free roam. Off clears them from the water entirely.", true);
+    roam.add_option_change_callback("free_roam_buoys", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::set_free_roam_buoys(std::get<bool>(value));
+    });
+    roam.add_bool_option("free_roam_rings", "Stunt rings", "Show the rings in a Stunt Mode free roam.", true);
+    roam.add_option_change_callback("free_roam_rings", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::set_free_roam_rings(std::get<bool>(value));
+    });
+    roam.add_enum_option("free_roam_look", "Sky and water", "Ride a course under another course's sky: its light, fog, sky and water colours. Takes effect on the next course you start.",
+        {{0, "course", "Course's own"}, {1, "dolphin_park", "Dolphin Park"}, {2, "sunny_beach", "Sunny Beach"},
+         {3, "sunset_bay", "Sunset Bay"}, {4, "marine_fortress", "Marine Fortress"}, {5, "drake_lake", "Drake Lake"},
+         {6, "port_blue", "Port Blue"}, {7, "twilight_city", "Twilight City"}, {8, "southern_island", "Southern Island"},
+         {9, "glacier_coast", "Glacier Coast"}}, 0u);
+    roam.add_option_change_callback("free_roam_look", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::set_free_roam_look(int(std::get<uint32_t>(value)) - 1);
+    });
+    roam.add_enum_option("free_roam_waves", "Waves", "How rough the water is in a free roam, from the stillest the course allows up past the game's own Rough. Some courses, like Dolphin Park and Sunny Beach, keep a swell of their own even at the stillest setting. The roughest settings can throw the jet ski about in odd ways. Takes effect on the next course you start.",
+        {{0, "course", "Course's own"}, {1, "glass", "Stillest"}, {2, "calm", "Calm"}, {3, "gentle", "Gentle"},
+         {4, "choppy", "Choppy"}, {5, "rough", "Rough (the game's roughest)"}, {6, "stormy", "Stormy"}, {7, "wild", "Wild"},
+         {8, "extreme", "Extreme"}}, 0u);
+    roam.add_option_change_callback("free_roam_waves", [](auto value, auto, auto context) {
+        if (context == recomp::config::OptionChangeContext::Temporary) return;
+        // The game's wave levels: Drake Lake 10, the courses 20 to 40; past
+        // 40 the game never goes.
+        static constexpr int kLevels[] = { -1, 0, 10, 20, 30, 40, 60, 80, 100 };
+        const uint32_t choice = std::get<uint32_t>(value);
+        wr64::set_free_roam_waves(choice < 9 ? kLevels[choice] : -1);
+    });
+    roam.add_bool_option("dolphin_park_riders", "Dolphin Park riders", "Other riders out enjoying Dolphin Park: sightseeing, weaving and jumping the ramps. Applies whenever you ride Dolphin Park.", true);
+    roam.add_option_change_callback("dolphin_park_riders", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::set_companions(std::get<bool>(value));
+    });
     auto &debug = recompui::config::create_config_tab("Debug", "debug", true);
     debug.add_bool_option("debug_unlock_all", "Unlock all courses and difficulties", "Open every course in Time Trials and every Championship difficulty, whatever your save holds. The game may keep these in your save when it next saves.", false);
     debug.add_option_change_callback("debug_unlock_all", [](auto value, auto, auto context) {
@@ -287,6 +339,17 @@ void init(bool auto_start) {
             wr64::set_unlock_all(std::get<bool>(value));
     });
     auto &graphics = recompui::config::create_graphics_tab();
+    graphics.add_enum_option("speed_units", "Speed units", "Show the race's speed in kilometres or miles an hour.",
+        {{0, "kmh", "km/h"}, {1, "mph", "mph"}}, 0u);
+    graphics.add_option_change_callback("speed_units", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::speed_units::set_mph(std::get<uint32_t>(value) == 1);
+    });
+    graphics.add_bool_option("fog", "Fog", "The courses' own distance fog. Off gives every race a clear view to the horizon. Takes effect on the next race you start.", true);
+    graphics.add_option_change_callback("fog", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::set_fog(std::get<bool>(value));
+    });
     graphics.add_enum_option("texture_quality", "Textures", "Use the bundled HD texture pack or your installed replacement pack. Textures without a replacement keep their original appearance.",
         {{0, "original", "Original"}, {1, "hd", "HD"}}, 1u);
     graphics.add_option_change_callback("texture_quality", [](auto value, auto, auto context) {
@@ -350,6 +413,15 @@ void init(bool auto_start) {
         if (context != recomp::config::OptionChangeContext::Temporary) {
             wr64::music::set_enabled(std::get<uint32_t>(value) != 0);
         }
+    });
+    sound.add_enum_option("race_music", "Race music", "Play another course's music in every race, Free Roam included. Needs the replacement music; with the original music each course keeps its own. Takes effect on the next race you start.",
+        {{0, "course", "Course's own"}, {1, "dolphin_park", "Dolphin Park"}, {2, "sunny_beach", "Sunny Beach"},
+         {3, "sunset_bay", "Sunset Bay"}, {4, "marine_fortress", "Marine Fortress"}, {5, "drake_lake", "Drake Lake"},
+         {6, "port_blue", "Port Blue"}, {7, "twilight_city", "Twilight City"}, {8, "southern_island", "Southern Island"},
+         {9, "glacier_coast", "Glacier Coast"}}, 0u);
+    sound.add_option_change_callback("race_music", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::set_race_music(int(std::get<uint32_t>(value)) - 1);
     });
     sound.add_percent_number_option("replacement_music_volume", "Custom music volume", "Adjust the replacement recordings relative to engine sounds, splashes and the announcer.", 65.0);
     sound.add_option_change_callback("replacement_music_volume", [](auto value, auto, auto context) {

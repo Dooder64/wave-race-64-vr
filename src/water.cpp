@@ -17,6 +17,12 @@
 #include <vector>
 #include "json/json.hpp"
 
+namespace wr64 {
+// patches/free_roam.cpp: the course whose colours a course's water takes (a
+// free roam's chosen sky and water).
+uint32_t look_course(uint32_t course);
+}
+
 namespace wr64::water {
 namespace {
 std::atomic<uint32_t> selected{uint32_t(Quality::High)};
@@ -312,7 +318,7 @@ void publish_frame(const uint8_t *rdram, uint32_t display_list) {
         currentTime = float(double(visualTicks) / 60.0);
     }
     previousTick = tick; previousCourse = course;
-    interop::WaterMaterial frame = profiles[std::min(course,9u)];
+    interop::WaterMaterial frame = profiles[std::min(look_course(course),9u)];
     frame.animation.x = previousTime; frame.animation.y = currentTime;
     frame.identity = {float(uint32_t(quality())),float(debugView.load()),float(course),float(generation)};
     frame.surface.x = float(int32_t(word(rdram,0x80192458)));

@@ -172,10 +172,24 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
 void swim_frame(uint8_t* rdram);
 // patches/unlock_all.cpp: once a frame.
 void unlock_frame(uint8_t* rdram);
+// src/speed_units.cpp: the HUD's speed in miles an hour -- a race frame's
+// list scanned first, then each command's texture image and rectangle.
+namespace speed_units {
+void scan(uint8_t* rdram, uint32_t list);
+uint32_t image(uint32_t at, uint32_t image);
+bool dropped(uint32_t at);
+}
+// patches/free_roam.cpp: once a frame; whether a top-level call is left out;
+// and whether a rectangle of the race's HUD is (its corners in screen pixels).
+void free_roam_frame(uint8_t* rdram);
+bool free_roam_hides_rect(const uint8_t* rdram, uint32_t left, uint32_t top, uint32_t right, uint32_t bottom);
+bool free_roam_hides(const uint8_t* rdram, uint32_t list);
 // src/seafloor.cpp: the list drawing the course's seafloor, and an identity
 // matrix to draw it under; or 0.
 uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[16], uint32_t* identity);
 bool seafloor_only_below(uint32_t course);
+// src/land_backs.cpp: the backs of the course's land, drawn before its water.
+uint32_t land_backs_list(uint8_t* rdram, uint32_t course, const uint32_t segments[16], uint32_t* identity);
 }
 
 namespace {
@@ -2124,16 +2138,32 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
                 std::fclose(one);
             }
         }
-        if (ram_dump != nullptr && race_frames == 300) {
-            if (FILE* f = std::fopen(ram_dump, "wb")) {
+        // WR64_RAM_DUMP_AT=n,m,...: at those race frames instead, each to
+        // <file>.<frame>, for diffing what changes between them.
+        static const std::vector<int> dump_at = [] {
+            std::vector<int> frames;
+            const char* at = std::getenv("WR64_RAM_DUMP_AT");
+            for (const char* p = at; p != nullptr && *p != '\0';) {
+                frames.push_back(std::atoi(p));
+                p = std::strchr(p, ',');
+                if (p != nullptr) ++p;
+            }
+            return frames;
+        }();
+        const bool dump_now = dump_at.empty() ? race_frames == 300
+                                              : std::find(dump_at.begin(), dump_at.end(), race_frames) != dump_at.end();
+        if (ram_dump != nullptr && dump_now) {
+            const std::string name = dump_at.empty() ? std::string(ram_dump) : std::string(ram_dump) + "." + std::to_string(race_frames);
+            if (FILE* f = std::fopen(name.c_str(), "wb")) {
                 std::fwrite(rdram, 1, 0x800000, f);
                 std::fclose(f);
-                std::fprintf(stderr, "[wr64] RDRAM written to %s\n", ram_dump);
+                std::fprintf(stderr, "[wr64] RDRAM written to %s\n", name.c_str());
             }
         }
     }
     wr64::swim_frame(rdram);
     wr64::unlock_frame(rdram);
+    wr64::free_roam_frame(rdram);
 
     Walker w{};
     w.rdram = rdram;
@@ -2178,11 +2208,18 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
 
     uint32_t cursor = list_vaddr & 0x00FFFFFFu;
     bool backdrop_called = false;
+    // The HUD's speed, in miles an hour if chosen (src/speed_units.cpp).
+    if (racing(state)) wr64::speed_units::scan(rdram, cursor);
     for (uint32_t steps = 0; steps < kMaxCommands && !w.overflow; ++steps) {
         const uint32_t* c = w.words(cursor);
         const uint32_t w0 = c[0];
-        const uint32_t w1 = c[1];
+        uint32_t w1 = c[1];
         const uint8_t op = static_cast<uint8_t>(w0 >> 24);
+        if (op == kOpSetTextureImage) w1 = wr64::speed_units::image(cursor, w1);
+        if (op == kOpTexRect && wr64::speed_units::dropped(cursor)) {
+            cursor += 8;
+            continue;
+        }
         cursor += 8;
         if (op == kOpDisplayList && w1 == kBackdropSetupList && wr64::vr::enabled() && wr64::water::full_grid_screen(state)) {
             w.backdrop_next = true;
@@ -2204,6 +2241,14 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
         // the top).
         if (op == kOpTexRect && w.projection_is_perspective && wr64::vr::enabled() &&
             (w.texture == kLensFlareTexture || w.texture == kSunGlintTexture || w.texture == kSunGlareTexture)) {
+            continue;
+        }
+        // Free Roam: the race's HUD but for the speed (patches/free_roam.cpp);
+        // the sun's flare, glints and glare go their own way.
+        if (op == kOpTexRect && racing(state) && w.texture != kLensFlareTexture && w.texture != kSunGlintTexture &&
+            w.texture != kSunGlareTexture &&
+            wr64::free_roam_hides_rect(rdram, ((w1 >> 12) & 0xFFF) / 4, (w1 & 0xFFF) / 4, ((w0 >> 12) & 0xFFF) / 4,
+                                       (w0 & 0xFFF) / 4)) {
             continue;
         }
         // VR, the results and course select screens: the rectangle over the
@@ -2262,6 +2307,24 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             if (w.projection_is_perspective && w.replace_sky_call(w1)) {
                 continue;
             }
+            // WR64_DROP_LISTS=addr,addr,...: those lists' top-level calls are
+            // left out, for finding what draws what.
+            static const std::vector<uint32_t> dropped = [] {
+                std::vector<uint32_t> lists;
+                for (const char* p = std::getenv("WR64_DROP_LISTS"); p != nullptr && *p != '\0';) {
+                    lists.push_back(uint32_t(std::strtoul(p, nullptr, 16)));
+                    p = std::strchr(p, ',');
+                    if (p != nullptr) ++p;
+                }
+                return lists;
+            }();
+            if (!dropped.empty() && std::find(dropped.begin(), dropped.end(), w1) != dropped.end()) {
+                continue;
+            }
+            // Free Roam with the rings switched off.
+            if (wr64::free_roam_hides(rdram, w1)) {
+                continue;
+            }
             // VR, in a race and its finish: a call that loads a perspective
             // projection of its own -- not the game's camera's -- is given the
             // group a top-level one would get, before it, so that projection
@@ -2296,6 +2359,25 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             // the group goes around the call, since the transform inside it is
             // created at its first vertex rather than at its matrix load.
             const bool water = w.draws_water(w1);
+            // The backs of the course's land (src/land_backs.cpp), before its
+            // water: after the sky, which is drawn over whatever is there
+            // before it, in a state of their own that RT64 puts back after.
+            if (water && racing(state)) {
+                uint32_t identity = 0;
+                const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));
+                if (const uint32_t backs = wr64::land_backs_list(rdram, course, w.segments, &identity)) {
+                    const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
+                    w.emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
+                    w.emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
+                    w.emit(ex | G_EX_PUSHCOMBINE_V1, 0);
+                    w.emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, identity);
+                    w.emit(uint32_t(kOpDisplayList) << 24, backs);
+                    w.emit(0xBD000000u, 0);                             // pop the modelview
+                    w.emit(ex | G_EX_POPCOMBINE_V1, 0);
+                    w.emit(ex | G_EX_POPOTHERMODE_V1, 0);
+                    w.emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
+                }
+            }
             const bool modern_water = water && w.known_water_material(w1) && w.underside_list == 0;
             if (water && w.water_interp) w.vertex_interp_group(Walker::kWaterId);
             if (modern_water) w.water_material(true);

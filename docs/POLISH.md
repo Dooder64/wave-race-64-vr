@@ -54,14 +54,18 @@ together.
 
 ## Round 5 — Twilight City
 
-A course of its own; needs the user's Hard run first.
+Items 5.1–5.4 were all seen on the Normal layout, reached only through the
+Debug tab's "Unlock all courses" switch. Championship never races Twilight City
+on Normal, so the game was never meant to show that layout. Time Trials offers
+a difficulty only after you have raced the course at it in Championship (the
+user, 2026-10-29: Expert selectable after an Expert run, Hard not).
 
 | # | Item | Status |
 |---|------|--------|
-| 5.1 | Time Trials only offers Normal for Twilight City (Reverse greyed, Hard/Expert won't select) | open |
-| 5.2 | Gaps in the walls, missing collision | open |
-| 5.3 | Extra ramp near the shortcut; beach ramp and spikes missing (probably the Normal vs Hard layout — confirm on Hard) | open |
-| 5.4 | Start line reported out of bounds; 3 laps driven, 2 counted | open |
+| 5.1 | Time Trials only offers Normal for Twilight City — the game's own rule (difficulty unlocks per Championship run), not a bug | not a bug |
+| 5.2 | Gaps in the walls, missing collision — seen on the unreachable Normal layout; recheck on Expert | check |
+| 5.3 | Extra ramp near the shortcut; beach ramp and spikes missing — the Normal layout differs from Hard/Expert | not a bug |
+| 5.4 | Start line reported out of bounds; 3 laps driven, 2 counted — seen on the unreachable Normal layout; recheck on Expert | check |
 | 5.5 | Seafloor (built 2026-10-29, flat-tested, awaiting headset): canals in the course's laid stone (0E009800) at the walls' feet (~4.5 m, deeper by the north walls; decks' shallow edges ignored); sand (0E00B800) aprons by both beaches, dropping steeply to canal depth; the course's own underwater floors kept and made solid; beaches walkable; walls gone round and stop thrown bodies. Tables from scratchpad tw/gen_tables.py; preview tw/floor_map.py. User confirmed in the headset 2026-10-29 | fixed |
 
 ## Round 6 — bigger polish

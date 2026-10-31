@@ -17,4 +17,8 @@ bool replacement_available(uint8_t sequence);
 void sequence_started(unsigned player, uint8_t sequence);
 void sequence_stopped(unsigned player);
 void sequence_state(unsigned player, uint8_t sequence, float gain, bool paused);
+// The course music (sequences 6 to 14) heard in its place until the next is
+// set, or -1 for each course's own: the race music chosen, swapped here
+// rather than in the game, whose next course's instruments may not fit.
+void set_race_sequence(int sequence);
 }

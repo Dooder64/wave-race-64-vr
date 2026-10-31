@@ -50,6 +50,7 @@
 #include "recomp.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -105,6 +106,8 @@ constexpr uint32_t kPlayerParts = 0x227A60;
 constexpr int kCharacters = 4;
 constexpr uint32_t kRomBase = 0x10000000;
 constexpr int32_t kRiding = 22;
+// gGameModes, and Stunt Mode's.
+constexpr uint32_t kGameModes = 0x1CE620, kStuntMode = 11;
 
 // The run: the straights' ends and heights (z), the turns' radius, the speed
 // (units a second, about 110 km/h), the ramp.
@@ -177,12 +180,15 @@ Matrix inverse_affine(const Matrix& a) {
     return r;
 }
 
+// The settings' switch (Free Roam tab); WR64_COMPANIONS=0 overrides it.
+std::atomic<bool> g_wanted{true};
+
 bool enabled() {
     static const bool on = [] {
         const char* value = std::getenv("WR64_COMPANIONS");
         return value == nullptr || value[0] != '0';
     }();
-    return on;
+    return on && g_wanted.load(std::memory_order_relaxed);
 }
 
 // The player's rider's riding pose: each part relative to its hull, and the
@@ -364,7 +370,12 @@ float face_height(float x) {
 // time in five gets it wrong: three-quarters round, it lands badly, the
 // rider thrown off ahead, tumbling into the water and under, while the jet
 // ski slews to a stop; five seconds on, the rider is back on and away.
-enum class Routine { Stunts, Lap };
+//
+// In Stunt Mode the park is laid out for it -- rings, checkpoints, and four
+// ramps of its own, none where the stunt loop's is -- so it practises
+// instead, for as long as the player rides: laps of the stunt course, in its
+// checkpoints' order, through the rings and over every ramp (kPractice).
+enum class Routine { Stunts, Lap, Practice };
 enum class Crash { None, Thrown, Waiting };
 struct Drive {
     std::chrono::steady_clock::time_point last{}, change_at{}, crash_at{};
@@ -381,6 +392,34 @@ struct Drive {
 
 constexpr float kLookahead = 900.0f, kTurnRate = 1.1f, kAccel = 450.0f, kSample = 50.0f;
 constexpr float kLapRadius = 7000.0f;
+
+// Whether this outing is Stunt Mode's (gGameModes, 11), set as it starts.
+bool g_stunt = false;
+
+// A ramp as ridden: its crest's middle, the way over it, and how far either
+// side of its middle a jet ski is on it. All the park's ramps are one hump,
+// the same either way (kFaceX/kFaceY from the crest back), 1000 across.
+struct Ramp { float x, z, over_x, over_z, half_width; };
+// The stunt loop's ramp, ridden east.
+constexpr Ramp kLoopRamp[] = { { kRampCrest, (kRampNear + kRampFar) / 2.0f, 1.0f, 0.0f, (kRampFar - kRampNear) / 2.0f - 100.0f } };
+// Stunt Mode's (their matrices, from a frame of the game's), ridden as the
+// course goes: the three in a row along the south westward, the one in the
+// west northward.
+constexpr Ramp kStuntRamps[] = {
+    { 2500, -4952, -1.0f, 0.0f, 400 }, { 92, -4952, -1.0f, 0.0f, 400 }, { -2407, -4952, -1.0f, 0.0f, 400 },
+    { -6065, 664, 0.121f, 0.993f, 400 },
+};
+// The stunt course's lap, from the start (in the north-west, heading east):
+// its rings (all ten, at y 60) and checkpoints, in order, with the ramps'
+// lines run straight -- in along each before its face, out past it.
+constexpr float kPractice[][2] = {
+    { -2916, 3614 }, { -119, 2761 }, { 1133, 2348 }, { 2095, 2040 }, { 3670, 1478 },        // rings, checkpoint 1
+    { 5265, 688 }, { 5750, -183 }, { 5745, -1326 }, { 5163, -2438 }, { 4308, -4250 },       // rings, checkpoint 2
+    { 3500, -4952 }, { -3400, -4952 },                                                      // the three ramps
+    { -4123, -3724 }, { -5037, -2324 }, { -6066, -881 },                                    // checkpoint 3, rings
+    { -6138, 68 }, { -5956, 1558 },                                                         // the west ramp
+    { -4771, 3227 },                                                                        // the last ring
+};
 
 std::mt19937& chance() {
     static std::mt19937 engine{ std::random_device{}() };
@@ -435,6 +474,18 @@ const std::vector<std::pair<float, float>>& route(Routine r) {
         for (float s = 0.0f; s < loop; s += kSample) { const Track t = track(s); v.emplace_back(t.x, t.z); }
         return v;
     }();
+    static const std::vector<std::pair<float, float>> practice = [] {
+        std::vector<std::pair<float, float>> v;
+        const int n = int(sizeof(kPractice) / sizeof(kPractice[0]));
+        for (int i = 0; i < n; ++i) {
+            const float ax = kPractice[i][0], az = kPractice[i][1];
+            const float bx = kPractice[(i + 1) % n][0], bz = kPractice[(i + 1) % n][1];
+            const float length = std::hypot(bx - ax, bz - az);
+            for (float t = 0.0f; t < length; t += kSample) v.emplace_back(ax + (bx - ax) * t / length, az + (bz - az) * t / length);
+        }
+        return v;
+    }();
+    if (r == Routine::Practice) return practice;
     static const std::vector<std::pair<float, float>> lap = [] {
         std::vector<std::pair<float, float>> v;
         const int n = int(6.2831853f * kLapRadius / kSample);
@@ -451,8 +502,17 @@ void start_drive(std::chrono::steady_clock::time_point now) {
     Drive& d = g_drive;
     d = Drive{};
     d.last = now;
-    d.routine = Routine::Stunts;
+    d.routine = g_stunt ? Routine::Practice : Routine::Stunts;
     d.change_at = now + routine_length();
+    if (g_stunt) {
+        // A third of the way round the lap, out of the way of the player's start.
+        const auto& points = route(Routine::Practice);
+        const size_t at = points.size() / 3;
+        const auto& p = points[at];
+        const auto& q = points[(at + 1) % points.size()];
+        d.x = p.first; d.z = p.second; d.heading = std::atan2(q.second - p.second, q.first - p.first); d.speed = kSpeed;
+        return;
+    }
     const Track t = track(0.0f);
     d.x = t.x; d.z = t.z; d.heading = std::atan2(t.hz, t.hx); d.speed = kSpeed;
 }
@@ -488,7 +548,7 @@ void drive(uint32_t segment3, std::chrono::steady_clock::time_point now, float d
     const float water = water_height_at(segment3, d.x, d.z);
 
     // Time for the other routine: changed where the two meet.
-    if (!d.change && now >= d.change_at) d.change = true;
+    if (!d.change && now >= d.change_at && d.routine != Routine::Practice) d.change = true;
     if (d.change && !d.airborne && d.crash == Crash::None && d.x > 4300.0f && d.z > 3000.0f && d.z < 6300.0f) {
         d.change = false;
         d.routine = d.routine == Routine::Stunts ? Routine::Lap : Routine::Stunts;
@@ -603,16 +663,31 @@ void drive(uint32_t segment3, std::chrono::steady_clock::time_point now, float d
     d.bank = g_pose.x_right * kLean * std::clamp(d.turning / (kSpeed / kRadius), -1.0f, 1.0f);
     d.flip = 0.0f;
 
-    // The ramp: up its face, heading along it on the stunt run, and off the
-    // crest into the air with a stunt picked.
-    const bool along_ramp = d.routine == Routine::Stunts && std::cos(d.heading) > 0.95f &&
-                            d.z > kRampNear + 100.0f && d.z < kRampFar - 100.0f;
-    if (along_ramp && d.x >= kRampStart && d.x < kRampCrest) {
-        d.on_ramp = true;
-        d.y = std::max(water, face_height(d.x));
-        d.climb = (face_height(d.x + 10.0f) - face_height(d.x - 10.0f)) / 20.0f;
+    // A ramp: up its face, heading over it on a run that rides it, and off
+    // the crest into the air with a stunt picked. (`along`, how far past the
+    // crest, is measured as the stunt loop's ramp's x.)
+    bool on_face = false, past_crest = false;
+    float along = 0.0f;
+    const Ramp* ramps = d.routine == Routine::Stunts ? kLoopRamp : d.routine == Routine::Practice ? kStuntRamps : nullptr;
+    const int ramp_count = d.routine == Routine::Stunts ? 1 : d.routine == Routine::Practice ? 4 : 0;
+    for (int i = 0; i < ramp_count; ++i) {
+        const Ramp& r = ramps[i];
+        const float rx = d.x - r.x, rz = d.z - r.z;
+        const float s = rx * r.over_x + rz * r.over_z, across = rz * r.over_x - rx * r.over_z;
+        const bool lined_up = std::cos(d.heading) * r.over_x + std::sin(d.heading) * r.over_z > 0.95f &&
+                              std::fabs(across) < r.half_width;
+        if (!lined_up) continue;
+        along = kRampCrest + s;
+        if (along >= kRampStart && along < kRampCrest) on_face = true;
+        else if (s >= 0.0f && s < 200.0f) past_crest = true;
+        if (on_face || past_crest) break;
     }
-    else if (d.on_ramp && d.x >= kRampCrest) {
+    if (on_face) {
+        d.on_ramp = true;
+        d.y = std::max(water, face_height(along));
+        d.climb = (face_height(along + 10.0f) - face_height(along - 10.0f)) / 20.0f;
+    }
+    else if (d.on_ramp && past_crest) {
         d.on_ramp = false;
         d.airborne = true;
         d.air = 0.0f;
@@ -738,11 +813,11 @@ constexpr float kWeaveTurn = (kWeaveOut - kWeaveBack) / 2.0f, kWeaveMiddle = (kW
 constexpr float kWeaveWidth = 320.0f, kWeaveWave = 2400.0f, kWeaveTrail = 380.0f, kWeaveSpeed = 800.0f;
 constexpr float kWeaveLoop = 2.0f * (kWeaveEast - kWeaveWest) + 6.2831853f * kWeaveTurn;
 
-// What the pair keep clear of, standing in the water.
-const std::vector<Obstacle>& fixed_obstacles() {
+// What the pair keep clear of, standing in the water, but for the ramps:
+// rocks, island, wall and pillars.
+std::vector<Obstacle> fixed_obstacles_without_ramps() {
     static const std::vector<Obstacle> obstacles = [] {
         std::vector<Obstacle> v = {
-            { 1441, 3619, 800, true }, { -1142, 4199, 850, true },                         // the ramps
             { 3150, 3220, 370, true }, { 3290, 4000, 440, true }, { 3270, 4850, 460, true },  // the rocks
             { 60, 5220, 650, true },                                                        // the island
             { -110, -553, 560, true },                                                      // the wall
@@ -757,6 +832,22 @@ const std::vector<Obstacle>& fixed_obstacles() {
         return v;
     }();
     return obstacles;
+}
+
+// And with the ramps: in Stunt Mode its own instead of the park's two.
+const std::vector<Obstacle>& fixed_obstacles() {
+    static const std::vector<Obstacle> stunt = [] {
+        std::vector<Obstacle> v = fixed_obstacles_without_ramps();
+        for (const Ramp& r : kStuntRamps) v.push_back({ r.x, r.z, 800, true });
+        return v;
+    }();
+    static const std::vector<Obstacle> park = [] {
+        std::vector<Obstacle> v = fixed_obstacles_without_ramps();
+        v.push_back({ 1441, 3619, 800, true });
+        v.push_back({ -1142, 4199, 850, true });
+        return v;
+    }();
+    return g_stunt ? stunt : park;
 }
 
 // WR64_COMPANION_TEST_CHANGE, as for the first rider: each routine kept that
@@ -869,10 +960,15 @@ void head_for(Pair& p, int sight, std::chrono::steady_clock::time_point now) {
     p.side = (c.z - a.z) * wx - (c.x - a.x) * wz >= 0.0f ? 1.0f : -1.0f;
 }
 
+// Whether sight `sight` is there to see: in Stunt Mode the park's ramps are not.
+bool sight_there(int sight) { return !g_stunt || (sight != 3 && sight != 4); }
+
 // Off to a sight, by chance not the one they are at.
 void pick_sight(Pair& p, std::chrono::steady_clock::time_point now) {
     const int from = p.sight < kSightCount ? p.sight : 0;
-    head_for(p, (from + 1 + int(chance()() % uint32_t(kSightCount - 1))) % kSightCount, now);
+    int to = from;
+    while (to == from || !sight_there(to)) to = int(chance()() % uint32_t(kSightCount));
+    head_for(p, to, now);
     char what[96];
     std::snprintf(what, sizeof what, "off to see %s", kSights[p.sight].name);
     log_pair(what);
@@ -913,9 +1009,10 @@ void next_routine(Pair& p, std::chrono::steady_clock::time_point now) {
     PairRoutine next[2];
     int n = 0;
     for (PairRoutine r : { PairRoutine::Sights, PairRoutine::Weave, PairRoutine::Trick }) {
-        if (r != p.routine) next[n++] = r;
+        // (In Stunt Mode, no trick: its ramp is not there.)
+        if (r != p.routine && !(g_stunt && r == PairRoutine::Trick)) next[n++] = r;
     }
-    switch (next[chance()() % 2u]) {
+    switch (next[chance()() % uint32_t(n)]) {
     case PairRoutine::Sights:
         p.routine = PairRoutine::Sights;
         p.change_at = now + pair_routine_length();
@@ -961,6 +1058,7 @@ void start_pair(std::chrono::steady_clock::time_point now) {
         return value != nullptr && value[0] == 't' && std::getenv("WR64_INPUT_SCRIPT") != nullptr;
     }();
     p.sight = trick ? 3 : test_sight >= 0 ? test_sight : int(chance()() % uint32_t(kSightCount));
+    while (!sight_there(p.sight)) p.sight = int(chance()() % uint32_t(kSightCount));
     p.parked = true;
     p.leave_at = now + std::chrono::milliseconds(test_sight >= 0 ? 60000 : int(uniform(5.0f, 20.0f) * 1000.0f));
     for (int i = 0; i < 2; ++i) {
@@ -1310,6 +1408,9 @@ void ride_pair(uint32_t segment3, std::chrono::steady_clock::time_point now, flo
 
 }  // namespace
 
+// From the settings' Free Roam tab.
+void set_companions(bool on) { g_wanted.store(on, std::memory_order_relaxed); }
+
 // From src/first_person.cpp, at each race frame's view, before the body is
 // shrunk: the player's rider's parts (at physical `parts`, the hull first,
 // 0x100 apart), kept while it rides upright.
@@ -1374,7 +1475,11 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
     const float dt = std::clamp(std::chrono::duration<float>(now - last_ride).count(), 0.0f, 0.1f);
     last_ride = now;
     const Obstacle player{ g_pose.hull.m[3][0], g_pose.hull.m[3][2], 450.0f, true };
-    if (fresh) { start_drive(now); start_pair(now); }
+    if (fresh) {
+        g_stunt = word_at(rdram, kGameModes) == kStuntMode;
+        start_drive(now);
+        start_pair(now);
+    }
     if (first_ready) drive(segments[3], now, dt, { player });
     const Drive& d = g_drive;
     const Obstacle first{ d.x, d.z, 450.0f, true };
@@ -1439,7 +1544,8 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         }
         if (report) {
             std::fprintf(stderr, "[wr64-companion] at %.0f %.0f %.0f, %s, speed %.0f, heading %.2f\n", d.x, d.y, d.z,
-                         d.routine == Routine::Stunts ? "stunts" : "lap", d.speed, d.heading);
+                         d.routine == Routine::Stunts ? "stunts" : d.routine == Routine::Lap ? "lap" : "practising",
+                         d.speed, d.heading);
             std::fflush(stderr);
         }
         draw(0, hull, body, body_shown);

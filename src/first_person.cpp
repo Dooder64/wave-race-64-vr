@@ -104,6 +104,8 @@ void body_splash_note(bool riding, float hull_x, float hull_z, float hull_water,
 // src/seafloor.cpp: the seafloor's height, on a course with one; how far a
 // point is from anything solid standing out of the water.
 bool seafloor_height_at(uint32_t course, float x, float z, float* height);
+// src/land_backs.cpp: the height of the backs of the course's land.
+bool land_backs_ground(uint32_t course, float x, float z, float* height);
 float course_clearance(uint32_t course, float x, float z);
 bool course_has_walls(uint32_t course);
 // src/companions.cpp: the player's rider's riding pose, for the companions.
@@ -113,6 +115,9 @@ void swim_set_at_rest(bool at_rest);
 // patches/swim_back.cpp: whether the throw beginning was asked for as a
 // backwards dive (X at rest, the throttle off).
 bool swim_take_dive();
+// patches/free_roam.cpp: the course whose colours a course's water takes (a
+// free roam's chosen sky and water).
+uint32_t look_course(uint32_t course);
 namespace water {
 // src/water.cpp: the course's solid ground, and the skidding body's spray.
 bool ground_height_at(float x, float z, float below, float* height);
@@ -397,6 +402,7 @@ constexpr Water kWaters[] = {
     { 190, 225, 235, 1.0f, 1.0f },    // Glacier Coast
 };
 const Water& water_for(uint32_t course) {
+    course = look_course(course);
     return kWaters[course < sizeof(kWaters) / sizeof(kWaters[0]) ? course : 0];
 }
 Vec water_colour(uint32_t course) {
@@ -960,7 +966,10 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
     auto ground = [&](Vec p) {
         float best = -1e9f, y = 0.0f;
         if (water::ground_height_at(p.x, p.z, p.y + 30.0f, &y)) best = y;
-        if (seafloor_height_at(course, p.x, p.z, &y)) best = std::max(best, y);
+        // On the backs of the land, where there are some, their slope in
+        // place of the seafloor (whose shallows lie under it).
+        if (land_backs_ground(course, p.x, p.z, &y) || seafloor_height_at(course, p.x, p.z, &y))
+            best = std::max(best, y);
         return best;
     };
     // Turns the way the swimmer faces towards `towards`, as far as a frame
