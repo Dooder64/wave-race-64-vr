@@ -45,6 +45,16 @@ void water_view_hook(uint8_t* rdram, recomp_context* ctx);
 void water_update_hook(uint8_t* rdram, recomp_context* ctx);
 void swim_animation_hook(uint8_t* rdram, recomp_context* ctx);
 void free_roam_course_out_hook(uint8_t* rdram, recomp_context* ctx);
+#if WR64_WITH_FRONTEND
+void game_menus_draw_hook(uint8_t* rdram, recomp_context* ctx);
+void game_menus_input_hook(uint8_t* rdram, recomp_context* ctx);
+void game_menus_course_draw_hook(uint8_t* rdram, recomp_context* ctx);
+void game_menus_course_input_hook(uint8_t* rdram, recomp_context* ctx);
+void game_menus_course_exit_hook(uint8_t* rdram, recomp_context* ctx);
+void game_menus_course_init_hook(uint8_t* rdram, recomp_context* ctx);
+void game_menus_options_hook(uint8_t* rdram, recomp_context* ctx);
+void game_menus_options_draw_hook(uint8_t* rdram, recomp_context* ctx);
+#endif
 
 void register_overlays() {
     // Unlike main_segment's race initializer, the rider-select initializer is
@@ -58,6 +68,27 @@ void register_overlays() {
             if (section.ram_addr + function.offset == 0x801EBD28u) {
                 function.func = texture_capture_rider_select_hook;
             }
+#if WR64_WITH_FRONTEND
+            // The main menu's page draw and controls, and the course select's
+            // setup, frame, controls and way out, and the OPTIONS screen's frame
+            // and draw (src/game_menus.cpp). Every overlay
+            // loads at 0x802C5800, so the title's (ovl_i0) and the course
+            // select's (ovl_i4) are told apart by their ROM addresses.
+            if (section.rom_addr == 0x1B3EC0u) {
+                if (function.offset == 0x844u) function.func = game_menus_draw_hook;
+                if (function.offset == 0xBACu) function.func = game_menus_input_hook;
+            }
+            if (section.rom_addr == 0x1BE0B0u) {
+                if (function.offset == 0x0u) function.func = game_menus_course_init_hook;
+                if (function.offset == 0x378u) function.func = game_menus_course_draw_hook;
+                if (function.offset == 0x13ACu) function.func = game_menus_course_input_hook;
+                if (function.offset == 0x1C74u) function.func = game_menus_course_exit_hook;
+            }
+            if (section.rom_addr == 0x1C43F0u) {
+                if (function.offset == 0x0u) function.func = game_menus_options_hook;
+                if (function.offset == 0x218u) function.func = game_menus_options_draw_hook;
+            }
+#endif
         }
     }
     recomp::overlays::overlay_section_table_data_t sections{};

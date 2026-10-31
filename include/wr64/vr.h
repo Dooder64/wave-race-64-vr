@@ -48,6 +48,17 @@ void recenter();
 // a headset too. F5 switches it.
 bool first_person();
 void toggle_first_person();
+// The settings' view for this display (chase or first person), unless
+// WR64_VR_FIRST_PERSON says otherwise.
+void set_first_person(bool on);
+// The right stick, -1 to 1 (x to the right, y down), as the controller was
+// last read (src/callbacks.cpp). On a flat screen in first person it turns
+// the view: up to 80 degrees either side and 30 up or down, as far as the
+// stick is pushed, and back as it is let go.
+void set_look_stick(float x, float y);
+// Whether the right stick is looking round now -- a flat first-person view
+// drawn within the last quarter second -- and so not the C buttons.
+bool looking();
 // Y on the controllers, F4: in the middle of a fall in first person -- thrown,
 // skidding, sinking, swimming back -- straight to the jet ski's stern,
 // climbing back on as soon as the game lets it.
@@ -76,7 +87,8 @@ void set_controller_rumble(float left, float right);
 void set_panel_size(float size);
 
 // Whether the game draws objects all round its camera rather than only those
-// a flat screen would show: in VR mode, or with WR64_CULL_ALL_ROUND=1.
+// a flat screen would show: in VR mode, in first person (whose view can look
+// round), or with WR64_CULL_ALL_ROUND=1.
 bool all_round();
 
 // How many times farther than the course's own distances objects are drawn

@@ -94,7 +94,8 @@ void set_panel_size(float) {}
 #endif
 
 bool all_round() {
-    // VR mode, or WR64_CULL_ALL_ROUND=1 to see it without a headset.
+    // VR mode, or WR64_CULL_ALL_ROUND=1 to see it without a headset; and in
+    // first person on a monitor, whose view looks round with the right stick.
     static const bool on = [] {
         const char* value = std::getenv("WR64_CULL_ALL_ROUND");
         const bool forced = value != nullptr && std::strcmp(value, "1") == 0;
@@ -105,7 +106,7 @@ bool all_round() {
         }
         return result;
     }();
-    return on;
+    return on || first_person();
 }
 
 float draw_distance() {

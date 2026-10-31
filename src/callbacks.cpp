@@ -207,6 +207,7 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
     // closes a menu also reaches the game behind it -- Start to leave the
     // settings would pause the race underneath.
     if (wr64::frontend::capturing_input() && !wr64::input_script_exclusive()) {
+        wr64::vr::set_look_stick(0.0f, 0.0f);
         *buttons = 0;
         *x = 0.0f;
         *y = 0.0f;
@@ -240,13 +241,25 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
             pressed |= BTN_Z;
         }
         // The C buttons map to the right stick, which is how every other N64
-        // port does it and what players expect.
+        // port does it and what players expect -- but for first person on a
+        // monitor, where the right stick looks round instead
+        // (src/first_person.cpp).
         const Sint16 cx = SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_RIGHTX);
         const Sint16 cy = SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_RIGHTY);
-        if (cx < -16000) pressed |= BTN_CLEFT;
-        if (cx >  16000) pressed |= BTN_CRIGHT;
-        if (cy < -16000) pressed |= BTN_CUP;
-        if (cy >  16000) pressed |= BTN_CDOWN;
+        wr64::vr::set_look_stick(cx / 32767.0f, cy / 32767.0f);
+        // A click of either stick swaps the chase camera and first person, as
+        // the left thumbstick's click does on the Touch controllers.
+        static bool clicked = false;
+        const bool click = SDL_GameControllerGetButton(g_controller, SDL_CONTROLLER_BUTTON_LEFTSTICK) ||
+                           SDL_GameControllerGetButton(g_controller, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+        if (click && !clicked && !wr64::vr::enabled()) wr64::vr::toggle_first_person();
+        clicked = click;
+        if (!wr64::vr::looking()) {
+            if (cx < -16000) pressed |= BTN_CLEFT;
+            if (cx >  16000) pressed |= BTN_CRIGHT;
+            if (cy < -16000) pressed |= BTN_CUP;
+            if (cy >  16000) pressed |= BTN_CDOWN;
+        }
 
         stick_x = axis_to_n64(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_LEFTX));
         stick_y = -axis_to_n64(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_LEFTY));

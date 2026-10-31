@@ -9,10 +9,24 @@
 // open water past the buoys can be roamed freely. Being stranded on land
 // still counts as a course-out, as before.
 //
-// With the Free Roam switch on (settings, Free Roam tab), Time Trials and
-// Stunt Mode on every course are answered "inside" too, and the race never
-// ends: the laps it takes to finish (D_801CE728) are held out of reach, the
-// buoys missed are held at none, and Stunt Mode's clock is held.
+// A free roam is chosen in the game's main menu (FREE ROAM, src/game_menus.cpp)
+// and is a Stunt Mode run, on any of the nine courses. In one, every course
+// is answered "inside" too, and the race never ends: the laps it takes to
+// finish (D_801CE728) are held out of reach, the buoys missed are held at
+// none, and Stunt Mode's clock is held.
+//
+// On Dolphin Park it can be the championship's Warm Up instead (the Free Roam
+// options' LAYOUT): a Championship with one rider at Dolphin Park is the Warm
+// Up, which starts by the beach with a dolphin to follow and never ends. As
+// the free roam starts, the menus' choice (D_801CE608) is made that: mode 4,
+// one player, one rider, Normal, the Warm Up not skipped, and the race's mode
+// (gGameModes) with it; and Stunt Mode's
+// again as the course select sets up, should its pause menu go back there.
+// That pause menu (the table at 0x80226BD0: an action, an x offset and a
+// word each) offers START THE RACE, the championship; in a free roam its row
+// is COURSE SELECT, Stunt Mode's (action 5, word 0x2E), and the cursor starts
+// on CONTINUE rather than on it. The help ticker along the bottom, which
+// tells how to start racing, goes.
 //
 // Its waves can be chosen: the wave level (D_800D49B0) the game takes from
 // each course (D_800EABEC: Drake Lake 10, the calmest, to Marine Fortress
@@ -27,7 +41,8 @@
 // Mode run straight out of Dolphin Park ended about 15000 units out), and
 // the water gets odd long before that.
 //
-// Buoys off: each course buoy (kinds 0 and 1 in the buoy list, D_801AEE20,
+// A free roam has no buoys and no rings: they are what Time Trials and Stunt
+// Mode are for. Each course buoy (kinds 0 and 1 in the buoy list, D_801AEE20,
 // 0x104 bytes each; 3 is the start, 4 the invisible turn markers, 2 Stunt
 // Mode's checkpoints) has its +0xC4 cleared, which the collision and bobbing
 // loops (func_8007DF4C, func_8007DBC0) skip, and its lists' calls are left
@@ -35,7 +50,8 @@
 // chase camera follows the buoys, and clearing +0xC8 (not drawn) or moving
 // them sends it off to film from somewhere else. D_801CE638 is not the
 // arrow's switch but the play view's: 0 gives the replay cameras and no HUD.
-// The arrows over the buoys go with them. Rings off: their lists' calls are left out.
+// The arrows over the buoys go with them, and in Stunt Mode the CHECK POINT
+// gates and the buoy beside each. The rings' lists' calls are left out too.
 //
 // WR64_FREE_ROAM=0 leaves the game's course-out alone, even on Dolphin Park;
 // WR64_FREE_ROAM_LOG=1 logs the current.
@@ -69,7 +85,13 @@ constexpr uint32_t kCourse = 0x0D8170, kWaveLevel = 0x0D49B0, kGameMode = 0x1CE6
                    kHumanSlot = 0x0D48DC, kRiders = 0x192690, kRiderSize = 0x1718,
                    kBuoys = 0x1AEE20, kBuoySize = 0x104, kBuoyCount = 0x1BB120, kRaceRecords = 0x1C2938,
                    kRaceRecordSize = 0x378;
-constexpr int32_t kTimeTrials = 0, kStunt = 11;
+constexpr int32_t kTimeTrials = 0, kVersus = 1, kChampionship = 4, kStunt = 11;
+// The menus' choice (D_801CE608: the mode, then the players and riders as
+// halves), the difficulty, whether the Warm Up is skipped; the pause menu's
+// row, the choice made in it (D_801CE628), and the Warm Up's pause rows.
+constexpr uint32_t kChosenMode = 0x1CE608, kChosenPlayers = 0x1CE60C, kChosenRiders = 0x1CE60E,
+                   kDifficulty = 0x1CB338, kSkipWarmUp = 0x1CB334, kPauseRow = 0x1CE624, kPauseChoice = 0x1CE628,
+                   kWarmUpPauseRows = 0x226BD0;
 
 // The current starts once the jet ski is both this many units past the last
 // place inside the course (about 60 m at the VR scale) and kLandReach from
@@ -88,11 +110,15 @@ bool env_is(const char* name, char wanted) {
 }
 bool env_on(const char* name) { return env_is(name, '1'); }
 
-// The settings, overridden for scripted tests by WR64_FREE_ROAM_MODE=1,
-// WR64_FREE_ROAM_BUOYS=0 and WR64_FREE_ROAM_RINGS=0.
+// Whether the run is a free roam (set as the main menu ends; for scripted
+// tests, WR64_FREE_ROAM_MODE=1).
 std::atomic<bool> g_on{env_on("WR64_FREE_ROAM_MODE")};
-std::atomic<bool> g_buoys{!env_is("WR64_FREE_ROAM_BUOYS", '0')};
-std::atomic<bool> g_rings{!env_is("WR64_FREE_ROAM_RINGS", '0')};
+// The difficulty Stunt Mode had before a Warm Up, given back after it.
+int32_t g_stunt_difficulty = 0;
+
+// Whether a free roam rides in mode `mode`: Time Trials or Stunt Mode, or a
+// Championship, which in one is only ever Dolphin Park's Warm Up.
+bool roam_mode(int32_t mode) { return mode == kTimeTrials || mode == kStunt || mode == kChampionship; }
 // The course whose sky and water a free roam takes, or -1 for its own;
 // WR64_FREE_ROAM_LOOK=<course> for scripted tests.
 std::atomic<int> g_look{std::getenv("WR64_FREE_ROAM_LOOK") ? std::atoi(std::getenv("WR64_FREE_ROAM_LOOK")) : -1};
@@ -103,11 +129,19 @@ std::atomic<int> g_look_now{-1};
 // WR64_FREE_ROAM_WAVES=<level> for scripted tests.
 std::atomic<int> g_waves{std::getenv("WR64_FREE_ROAM_WAVES") ? std::atoi(std::getenv("WR64_FREE_ROAM_WAVES")) : -1};
 
-// Whether every race is ridden without fog (see free_roam_frame);
+// The wave level chosen for Championship, Time Trials, Stunt Mode and 2P VS
+// (their WAVES page, src/game_menus.cpp), or -1 for the course's own.
+std::atomic<int> g_race_waves{-1};
+
+// Whether a free roam is ridden without fog (see free_roam_frame);
 // WR64_FOG=0 for scripted tests.
 std::atomic<bool> g_no_fog{env_is("WR64_FOG", '0')};
 
-// The course whose music every race plays, or -1 for each course's own;
+// The sound left out once, the next time it is asked for, or -1: the game's
+// "start" chime as a menu page opens where the race would have started.
+std::atomic<int> g_swallow{-1};
+
+// The course whose music a free roam plays, or -1 for each course's own;
 // WR64_RACE_MUSIC=<course> for scripted tests.
 std::atomic<int> g_music{std::getenv("WR64_RACE_MUSIC") ? std::atoi(std::getenv("WR64_RACE_MUSIC")) : -1};
 
@@ -191,10 +225,14 @@ void current(uint8_t* rdram, int32_t course, float x, float z) {
 
 }  // namespace
 
-// From the settings' Free Roam tab.
+// From the game's main menu (src/game_menus.cpp): whether the run it starts
+// is a free roam.
 void set_free_roam(bool on) { g_on.store(on || env_on("WR64_FREE_ROAM_MODE"), std::memory_order_relaxed); }
-void set_free_roam_buoys(bool on) { g_buoys.store(on && !env_is("WR64_FREE_ROAM_BUOYS", '0'), std::memory_order_relaxed); }
-void set_free_roam_rings(bool on) { g_rings.store(on && !env_is("WR64_FREE_ROAM_RINGS", '0'), std::memory_order_relaxed); }
+bool free_roam_chosen() { return g_on.load(std::memory_order_relaxed); }
+// From src/game_menus.cpp: leaves `sound` out the next time it is asked for.
+void swallow_sound_once(int sound) { g_swallow.store(sound, std::memory_order_relaxed); }
+// From the settings (the WAVES pages and the Free Roam options).
+void set_race_waves(int level) { g_race_waves.store(level, std::memory_order_relaxed); }
 void set_free_roam_look(int course) {
     if (std::getenv("WR64_FREE_ROAM_LOOK") == nullptr) g_look.store(course, std::memory_order_relaxed);
 }
@@ -207,24 +245,50 @@ void set_race_music(int course) {
 void set_free_roam_waves(int level) {
     if (std::getenv("WR64_FREE_ROAM_WAVES") == nullptr) g_waves.store(level, std::memory_order_relaxed);
 }
+// From src/game_menus.cpp, as a free roam on Dolphin Park starts: its Warm Up.
+void start_warm_up(uint8_t* rdram) {
+    if (word(rdram, kChosenMode) != kStunt) return;
+    g_stunt_difficulty = word(rdram, kDifficulty);
+    set_word(rdram, kChosenMode, kChampionship);
+    // And the race's own (gGameModes), which the championship's way in sets
+    // from it but the course select's does not.
+    set_word(rdram, kGameMode, kChampionship);
+    *reinterpret_cast<int16_t*>(rdram + (kChosenPlayers ^ 2)) = 1;
+    *reinterpret_cast<int16_t*>(rdram + (kChosenRiders ^ 2)) = 1;
+    set_word(rdram, kDifficulty, 0);
+    set_word(rdram, kSkipWarmUp, 0);
+    std::fprintf(stderr, "[wr64] free roam: Dolphin Park's Warm Up\n");
+}
+// From src/game_menus.cpp, as the course select sets up: back from a Warm Up
+// to Stunt Mode.
+void leave_warm_up(uint8_t* rdram) {
+    if (!g_on.load(std::memory_order_relaxed) || word(rdram, kChosenMode) != kChampionship) return;
+    set_word(rdram, kChosenMode, kStunt);
+    set_word(rdram, kGameMode, kStunt);
+    set_word(rdram, kDifficulty, g_stunt_difficulty);
+}
 
 // Whether this race is a free roam: the switch on, in Time Trials or Stunt
 // Mode, racing (state 0x28: not the title's demo, a Time Trial of its own).
 bool free_roam_active(const uint8_t* rdram) {
     if (!g_on.load(std::memory_order_relaxed) || current_game_state() != 0x28) return false;
-    const int32_t mode = word(rdram, kGameMode);
-    return mode == kTimeTrials || mode == kStunt;
+    return roam_mode(word(rdram, kGameMode));
 }
 
-// The wave level a free roam is ridden at, or -1 for the course's own.
-// Asked as the course loads, before the race's state, so by the mode chosen
-// in the menus (D_801CE608.gameMode), as the sky's swap is, and never for the
+// The wave level a run is ridden at, or -1 for the course's own: a free
+// roam's from its options, any other mode's from its WAVES page. Asked as
+// the course loads, before the race's state, so by the mode chosen in the
+// menus (D_801CE608.gameMode), as the sky's swap is, and never for the
 // title's demo or the menus' backdrops.
 int free_roam_waves(const uint8_t* rdram) {
     const uint32_t state = current_game_state();
-    if (!g_on.load(std::memory_order_relaxed) || state == 0x02 || state == 0x03 || state == 0x05 || state == 0x07) return -1;
+    if (state == 0x02 || state == 0x03 || state == 0x05 || state == 0x07) return -1;
     const int32_t mode = word(rdram, 0x1CE608);
-    return mode == kTimeTrials || mode == kStunt ? g_waves.load(std::memory_order_relaxed) : -1;
+    if (g_on.load(std::memory_order_relaxed) && roam_mode(mode)) {
+        return g_waves.load(std::memory_order_relaxed);
+    }
+    return mode == kTimeTrials || mode == kStunt || mode == kVersus || mode == kChampionship
+               ? g_race_waves.load(std::memory_order_relaxed) : -1;
 }
 
 // Whether the race is paused (its pause menu's choice, -1 when not).
@@ -236,9 +300,13 @@ bool paused(const uint8_t* rdram) {
 // (left, top)-(right, bottom) in the game's 320x240 frame, is left out. In a
 // free roam, not paused, the HUD is the speed alone: its label, digits and
 // "km/h", top middle in Time Trials, top right in Stunt Mode (from frames of
-// each); the time, laps, best times, score, misses and power go.
+// each); the time, laps, best times, score, misses and power go. The Warm Up
+// shows only the speed already; its help ticker, along the bottom, goes,
+// paused or not (the pause menu's box ends above it).
 bool free_roam_hides_rect(const uint8_t* rdram, uint32_t left, uint32_t top, uint32_t right, uint32_t bottom) {
-    if (!free_roam_active(rdram) || paused(rdram)) return false;
+    if (!free_roam_active(rdram)) return false;
+    if (word(rdram, kGameMode) == kChampionship) return top >= 188;
+    if (paused(rdram)) return false;
     const bool stunt = word(rdram, kGameMode) == kStunt;
     const uint32_t speed_left = stunt ? 230 : 158, speed_right = stunt ? 300 : 236;
     const bool speed = left >= speed_left && right <= speed_right && top >= 18 && bottom <= 60;
@@ -258,7 +326,7 @@ bool free_roam_hides(const uint8_t* rdram, uint32_t list) {
         default: break;
     }
     if (list == 0x0101EA48 || list == 0x0101E620) {
-        return !g_rings.load(std::memory_order_relaxed) && free_roam_active(rdram) && word(rdram, kGameMode) == kStunt;
+        return free_roam_active(rdram);
     }
     // The buoys, one call each: the race buoys (0x0102CC58 and 0x0102CC70 on
     // some courses, 0x0102CCE8 and 0x0102CD00 on the others) and the rows
@@ -266,12 +334,16 @@ bool free_roam_hides(const uint8_t* rdram, uint32_t list) {
     // 0x0102CE20), from a frame's trace of each course; the race buoys' striped
     // tails and L or R letters (0x01029BE0 and 0x01029C88 for the buoys passed
     // on one side, 0x0102AD90 and 0x0102AE38 for the other); and the arrows
-    // over the next buoys (0x0102CE78, a sprite each).
+    // over the next buoys (0x0102CE78, a sprite each). Stunt Mode's CHECK
+    // POINT gates (0x01018AA8 and 0x01018D58, the banner and its posts) and
+    // the buoy by each (0x0102CB78), from a Sunny Beach frame's trace and
+    // leaving them out of a scripted run.
     switch (list) {
         case 0x0102CC58: case 0x0102CC70: case 0x0102CCE8: case 0x0102CD00:
         case 0x0102CD78: case 0x0102CD90: case 0x0102CE08: case 0x0102CE20: case 0x0102CE78:
         case 0x01029BE0: case 0x01029C88: case 0x0102AD90: case 0x0102AE38:
-            return !g_buoys.load(std::memory_order_relaxed) && free_roam_active(rdram) && word(rdram, kGameMode) == kTimeTrials;
+        case 0x01018AA8: case 0x01018D58: case 0x0102CB78:
+            return free_roam_active(rdram);
         default: return false;
     }
 }
@@ -279,7 +351,7 @@ bool free_roam_hides(const uint8_t* rdram, uint32_t list) {
 namespace {
 
 // A free roam's race, once a frame: no finish, no disqualification, no
-// clock, no wrong way, no stranding, and the buoys as switched.
+// clock, no wrong way, no stranding, and no buoys.
 void race_rules_off(uint8_t* rdram, uint32_t slot) {
     set_word(rdram, kLapsToFinish, 99);
     // The buoys missed, in the human's race record: +0x134 counts toward
@@ -302,7 +374,6 @@ void race_rules_off(uint8_t* rdram, uint32_t slot) {
     set_word(rdram, record + 0x328, 0);
     set_word(rdram, kRiders + slot * kRiderSize + 0x16D0, 0);
 
-    if (g_buoys.load(std::memory_order_relaxed)) return;
     const int32_t count = word(rdram, kBuoyCount);
     for (int32_t i = 0; i < count && i < 256; ++i) {
         const uint32_t b = kBuoys + uint32_t(i) * kBuoySize;
@@ -312,6 +383,21 @@ void race_rules_off(uint8_t* rdram, uint32_t slot) {
 }
 
 }  // namespace
+
+// Whether a free roam's Warm Up has started its music yet. The championship's
+// way in starts it from the course's overview, which a free roam passes by:
+// so its first race frame starts it as the go's sound would (see
+// wr64_sound_silenced), once the sound driver is racing.
+std::atomic<bool> g_music_started{false};
+void start_music(uint8_t* rdram) {
+    if (g_music_started.load(std::memory_order_relaxed)) return;
+    if (int8_t(rdram[0x0E7C94 ^ 3]) != 7 || word(rdram, 0x800E7CB8) != 0) return;
+    set_word(rdram, 0x800E7CD8, 10);
+    set_word(rdram, 0x800E7CD4, 0xB4);
+    set_word(rdram, 0x800E7CA0, 1);
+    set_word(rdram, 0x800E7CE8, 0x140);
+    g_music_started.store(true, std::memory_order_relaxed);
+}
 
 // func_80074264: whether a point is outside the course. Asked each frame of
 // a race for each human, on the game's own thread: where a free roam's
@@ -324,6 +410,13 @@ void free_roam_course_out_hook(uint8_t* rdram, recomp_context* ctx) {
     const int32_t course = word(rdram, kCourse);
     const bool roam = free_roam_active(rdram);
     if (roam) race_rules_off(rdram, uint32_t(word(rdram, kHumanSlot)));
+    if (roam && word(rdram, kGameMode) == kChampionship) start_music(rdram);
+    // A race's chosen waves, held as a free roam's are: the race overlay
+    // sets the level again as the race goes on. Not in the title's demo.
+    if (!roam && current_game_state() != 0x07) {
+        const int waves = free_roam_waves(rdram);
+        if (waves >= 0) set_word(rdram, kWaveLevel, waves);
+    }
     if (off || (course != 0 && !roam)) {
         func_80074264(rdram, ctx);
         return;
@@ -422,6 +515,22 @@ void test_place(uint8_t* rdram) {
     }
 }
 
+// A free roam's Warm Up's pause menu (see the top): COURSE SELECT for START
+// THE RACE, the cursor on CONTINUE as it opens; the game's own otherwise.
+void warm_up_pause(uint8_t* rdram) {
+    const bool roam = free_roam_active(rdram) && word(rdram, kGameMode) == kChampionship;
+    const uint32_t row = kWarmUpPauseRows + 8;
+    const uint32_t want[2] = { roam ? 0x0005FFEAu : 0x0006FFE8u, roam ? 0x2Eu : 0x45u };
+    for (uint32_t i = 0; i < 2; ++i) {
+        if (uint32_t(word(rdram, row + i * 4)) != want[i]) set_word(rdram, row + i * 4, int32_t(want[i]));
+    }
+    int16_t& at = *reinterpret_cast<int16_t*>(rdram + (kPauseRow ^ 2));
+    const int16_t choice = *reinterpret_cast<const int16_t*>(rdram + (kPauseChoice ^ 2));
+    static int16_t last = -1;
+    if (roam && last == -1 && at == 1 && choice == 0) at = 0;
+    last = at;
+}
+
 // The sky and water another course's. Each course's look -- its light, fog
 // and sky colours, fog distances and light's direction, 0x110 bytes -- sits
 // in a table (0x800D9964), and as a course loads the game copies its own into
@@ -439,7 +548,7 @@ void test_place(uint8_t* rdram) {
 // Trials by default), their own. Both are read only as a course loads, so
 // they are kept so from any thread, once a frame.
 //
-// The fog too (settings, Graphics tab): off, in any race but the front's,
+// The fog too (the Free Roam options): off, in a free roam's race,
 // where a look's fog begins and where it is whole (+0x78, +0x7C, which the
 // scene's fog is set up from through D_801C0C80, the race's look; +0x98,
 // +0x9C for Drake Lake's water) are moved past the far plane (1000 on the
@@ -464,13 +573,13 @@ void free_roam_frame(uint8_t* rdram) {
     // course loads; gGameModes is set from it as it does.
     const int32_t mode = word(rdram, 0x1CE608);
     const int chosen = g_look.load(std::memory_order_relaxed);
-    const bool swap = !front && g_on.load(std::memory_order_relaxed) && (mode == kTimeTrials || mode == kStunt) &&
+    const bool swap = !front && g_on.load(std::memory_order_relaxed) && roam_mode(mode) &&
                       chosen >= 0 && chosen < kCourses;
     for (int c = 0; c < kCourses; ++c) {
         uint8_t look[kLookSize];
         std::memcpy(look, original[swap ? chosen : c], kLookSize);
         std::memcpy(look + 0xA0, original[c] + 0xA0, 8);
-        if (g_no_fog.load(std::memory_order_relaxed) && !front) {
+        if (g_no_fog.load(std::memory_order_relaxed) && g_on.load(std::memory_order_relaxed) && !front) {
             constexpr int32_t kPast[2] = { 1000, 1100 };
             std::memcpy(look + 0x78, kPast, sizeof kPast);
             std::memcpy(look + 0x98, kPast, sizeof kPast);
@@ -482,6 +591,8 @@ void free_roam_frame(uint8_t* rdram) {
     }
     g_look_now.store(swap && course >= 0 && course < kCourses ? chosen : -1, std::memory_order_relaxed);
     if (state == 0x28) test_place(rdram);
+    warm_up_pause(rdram);
+    if (state != 0x28) g_music_started.store(false, std::memory_order_relaxed);
 }
 
 // The course whose colours the port's own water and haze take for course
@@ -497,6 +608,9 @@ uint32_t look_course(uint32_t course) {
 // course's water is set up with -- in a free roam, the one chosen, if any.
 extern "C" int wr64_wave_level(uint8_t* rdram, int level) {
     const int chosen = wr64::free_roam_waves(rdram);
+    if (chosen >= 0 && chosen != level) {
+        std::fprintf(stderr, "[wr64] waves: level %d chosen (the course's own %d)\n", chosen, level);
+    }
     return chosen >= 0 ? chosen : level;
 }
 // From the hook on func_800C32A0 (recomp/wr64.toml): whether voice line
@@ -517,6 +631,8 @@ extern "C" int wr64_voice_silenced(uint8_t* rdram, int line, int priority, uint3
 // `sound` is left out. In a free roam, the start's countdown beeps (0x22, once
 // for each light) and the one for the go (0x23), the lights being hidden.
 extern "C" int wr64_sound_silenced(uint8_t* rdram, int sound) {
+    int swallowed = sound;
+    if (sound >= 0 && wr64::g_swallow.compare_exchange_strong(swallowed, -1, std::memory_order_relaxed)) return 1;
     if ((sound != 0x22 && sound != 0x23) || !wr64::free_roam_active(rdram)) return 0;
     static const bool log = wr64::env_on("WR64_FREE_ROAM_LOG");
     if (log) std::fprintf(stderr, "[wr64-free-roam] sound 0x%02X left out\n", sound);
@@ -535,8 +651,8 @@ extern "C" int wr64_sound_silenced(uint8_t* rdram, int sound) {
 }
 
 // From the hook on func_800C1540 (recomp/wr64.toml), which starts a piece of
-// music (a0, the sequence): in a race, a course's music (course + 6, as the
-// game picks it) is heard as the chosen course's, if one is. The game still
+// music (a0, the sequence): in a free roam's race, a course's music (course
+// + 6, as the game picks it) is heard as the chosen course's, if one is. The game still
 // plays its own: another course's instruments are loaded into this course's
 // room for them, and some don't fit (Twilight City's on Marine Fortress
 // crashed in Audio_PatchBank). So the swap is the recordings' alone, and
@@ -544,7 +660,8 @@ extern "C" int wr64_sound_silenced(uint8_t* rdram, int sound) {
 extern "C" int wr64_race_music(uint8_t* rdram, int sequence) {
     (void)rdram;
     const int chosen = wr64::g_music.load(std::memory_order_relaxed);
-    const bool swap = chosen >= 0 && sequence >= 6 && sequence <= 14 && wr64::current_game_state() == 0x28;
+    const bool swap = chosen >= 0 && wr64::g_on.load(std::memory_order_relaxed) && sequence >= 6 && sequence <= 14 &&
+                      wr64::current_game_state() == 0x28;
     wr64::music::set_race_sequence(-1);
     if (swap && wr64::music::replacement_available(uint8_t(chosen + 6))) wr64::music::set_race_sequence(chosen + 6);
     return sequence;

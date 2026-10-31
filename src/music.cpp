@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,7 @@ struct Track {
     const char* name;
     std::vector<int16_t> pcm;
     double start = 0, end = 0, crossfade = 0;
+    double preview = 0;   // where a preview starts (see preview_start)
     float gain = 1;
     Track(uint8_t id, const char* filename) : sequence(id), name(filename) {}
 };
@@ -49,6 +51,13 @@ std::mutex control_mutex;
 std::atomic<bool> enabled{true};
 std::atomic<float> main_volume{1.0f}, replacement_volume{0.65f};
 std::atomic<int> race_sequence{-1};
+// The previewed sequence, and until when (steady clock ticks) it is wanted.
+std::atomic<int> preview_sequence{-1};
+std::atomic<int64_t> preview_until{0};
+Voice preview_voice;
+float preview_duck = 0;   // how far the game's music is faded under it, 0 to 1
+
+int64_t now_ticks() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
 
 // The sequence whose recording is heard for `sequence` (see set_race_sequence).
 uint8_t heard(uint8_t sequence) {
@@ -80,6 +89,27 @@ nlohmann::json read_loop_config(const std::filesystem::path& directory) {
                      (directory / "loops.json").string().c_str(), error.what());
     }
     return nlohmann::json::object();
+}
+
+// Where a preview of a recording starts: past the quiet it opens with, where
+// the race's countdown and the announcer would be (Sunny Beach's is near
+// silent for four seconds and more). The first quarter second within 15 dB of
+// the loudest of its first 20 seconds.
+double preview_start(const std::vector<int16_t>& pcm) {
+    constexpr size_t kWindow = kRate / 4;
+    const size_t frames = std::min(pcm.size() / 2, size_t(kRate) * 20);
+    std::vector<double> level;
+    for (size_t at = 0; at + kWindow <= frames; at += kWindow) {
+        double sum = 0;
+        for (size_t i = at; i < at + kWindow; i += 4) sum += double(pcm[i * 2]) * pcm[i * 2] + double(pcm[i * 2 + 1]) * pcm[i * 2 + 1];
+        level.push_back(sum / (kWindow / 2));
+    }
+    if (level.empty()) return 0;
+    const double loudest = *std::max_element(level.begin(), level.end());
+    for (size_t w = 0; w < level.size(); ++w) {
+        if (level[w] >= loudest * 0.0316) return double(w * kWindow);   // -15 dB in power
+    }
+    return 0;
 }
 
 float sample(const Track& track, double position, size_t channel) {
@@ -170,6 +200,7 @@ void initialize(const std::filesystem::path& directory, const std::filesystem::p
         track.start = 0;
         track.end = track.pcm.size() / 2;
         track.crossfade = std::min(double(kRate), track.end / 4);
+        track.preview = preview_start(track.pcm);
         try {
             if (config.contains(track.name)) {
                 const auto& loop = config.at(track.name);
@@ -197,6 +228,11 @@ bool replacement_available(uint8_t sequence) {
     return enabled.load(std::memory_order_relaxed) && find_track(heard(sequence));
 }
 void set_race_sequence(int sequence) { race_sequence.store(sequence, std::memory_order_relaxed); }
+void preview(int sequence) {
+    const auto hold = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(250));
+    preview_sequence.store(sequence, std::memory_order_relaxed);
+    preview_until.store(now_ticks() + hold.count(), std::memory_order_relaxed);
+}
 void set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 void set_volume(double percent) { main_volume.store(float(std::clamp(percent, 0.0, 100.0) / 100.0), std::memory_order_relaxed); }
 void set_replacement_volume(double percent) { replacement_volume.store(float(std::clamp(percent, 0.0, 100.0) / 100.0), std::memory_order_relaxed); }
@@ -241,6 +277,12 @@ void mix(int16_t* samples, size_t sample_count, uint32_t sample_rate) {
     const double step = double(kRate) / sample_rate;
     // Ten-millisecond ramps suppress clicks at cue changes and mute/unmute.
     const float ramp = std::min(1.0f, 1.0f / (0.010f * sample_rate));
+    // A preview fades in and out over a quarter of a second, the game's
+    // music the other way; a change of preview fades the last one out first.
+    const float fade = std::min(1.0f, 1.0f / (0.25f * sample_rate));
+    const int previewed = now_ticks() < preview_until.load(std::memory_order_relaxed)
+                              ? preview_sequence.load(std::memory_order_relaxed) : -1;
+    const Track* wanted = use_replacements && previewed >= 0 ? find_track(uint8_t(previewed)) : nullptr;
     static Capture capture;
     static std::vector<int16_t> evidence;
     const bool capturing = capture.active(sample_rate);
@@ -255,12 +297,32 @@ void mix(int16_t* samples, size_t sample_count, uint32_t sample_rate) {
     }
     for (size_t frame = 0; frame < sample_count / 2; ++frame) {
         float left = 0, right = 0;
+        preview_duck = std::clamp(preview_duck + (wanted ? fade : -fade), 0.0f, 1.0f);
+        auto& pv = preview_voice;
+        if (pv.track != wanted && pv.gain <= 0) {
+            pv.track = wanted; pv.position = wanted ? wanted->preview : 0;
+            std::fprintf(stderr, "[music] preview: %s from %.2f seconds\n", wanted ? wanted->name : "ended",
+                         wanted ? wanted->preview / kRate : 0.0);
+        }
+        if (pv.track) {
+            const float target = pv.track == wanted ? music * pv.track->gain : 0;
+            pv.gain += std::clamp(target - pv.gain, -fade, fade);
+            if (pv.gain > 0) {
+                left += loop_sample(*pv.track, pv.position, 0) * pv.gain;
+                right += loop_sample(*pv.track, pv.position, 1) * pv.gain;
+            }
+            pv.position += step;
+            if (pv.position >= pv.track->end) {
+                const double restart = pv.track->start + pv.track->crossfade;
+                pv.position = restart + std::fmod(pv.position - pv.track->end, pv.track->end - restart);
+            }
+        }
         for (size_t p = 0; p < kPlayers; ++p) {
             auto& voice = voices[p];
             const auto& control = snapshot[p];
             if (!voice.track) continue;
             const bool audible = use_replacements && control.playing && !control.paused;
-            const float target = audible ? control.gain * music * voice.track->gain : 0;
+            const float target = audible ? control.gain * music * voice.track->gain * (1 - preview_duck) : 0;
             voice.gain += std::clamp(target - voice.gain, -ramp, ramp);
             if (voice.gain > 0) {
                 left += loop_sample(*voice.track, voice.position, 0) * voice.gain;

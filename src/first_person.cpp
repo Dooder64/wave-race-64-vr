@@ -80,6 +80,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -345,6 +346,11 @@ std::atomic<float> g_intensity{ std::clamp(float(std::atof(std::getenv("WR64_FP_
 // Asked to recover from a fall (Y, F4), not yet acted on.
 std::atomic<bool> g_recover{ false };
 
+// The right stick (see vr::set_look_stick), and when a flat first-person
+// view was last drawn (steady clock ticks).
+std::atomic<float> g_look_x{ 0.0f }, g_look_y{ 0.0f };
+std::atomic<int64_t> g_looked_at{ 0 };
+
 }  // namespace
 
 namespace vr {
@@ -358,6 +364,22 @@ bool first_person() {
         g_on.compare_exchange_strong(expected, on ? 1 : 0, std::memory_order_relaxed);
     }
     return g_on.load(std::memory_order_relaxed) == 1;
+}
+
+void set_first_person(bool on) {
+    if (std::getenv("WR64_VR_FIRST_PERSON") != nullptr) return;
+    g_on.store(on ? 1 : 0, std::memory_order_relaxed);
+}
+
+void set_look_stick(float x, float y) {
+    g_look_x.store(x, std::memory_order_relaxed);
+    g_look_y.store(y, std::memory_order_relaxed);
+}
+
+bool looking() {
+    const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto quarter = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(250));
+    return now - g_looked_at.load(std::memory_order_relaxed) < quarter.count();
 }
 
 void toggle_first_person() {
@@ -1517,6 +1539,44 @@ Camera swim_step(uint32_t segment3, uint32_t course, int32_t animation, const Ca
 // identity matrix to draw it with and `underside` the list drawing the
 // waves' underside in place of the water, and `bubbles` the list drawing the
 // rider's breath's bubbles (or 0, none just now); otherwise all three are 0.
+// On a monitor, the right stick turns the view (see vr::set_look_stick):
+// round the view's up by up to kLookYaw either way, then up or down by up to
+// kLookPitch, in proportion to how far the stick is pushed past a small dead
+// zone, closing on that eased (kEase seconds a step, whatever the frame
+// rate) and back as the stick is let go.
+// WR64_FP_LOOK_TEST=<x>,<y> holds the stick there in a scripted run.
+Camera looked(const Camera& camera) {
+    constexpr float kLookYaw = 80.0f * 3.14159265f / 180.0f, kLookPitch = 30.0f * 3.14159265f / 180.0f;
+    constexpr float kDeadZone = 0.12f, kEase = 0.07f;
+    static float yaw = 0.0f, pitch = 0.0f;
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::clamp(std::chrono::duration<float>(now - last).count(), 0.0f, 0.1f);
+    last = now;
+    g_looked_at.store(now.time_since_epoch().count(), std::memory_order_relaxed);
+
+    float x = g_look_x.load(std::memory_order_relaxed), y = g_look_y.load(std::memory_order_relaxed);
+    static float test[2] = { 0.0f, 0.0f };
+    static const bool testing = [] {
+        const char* value = std::getenv("WR64_FP_LOOK_TEST");
+        return value != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr &&
+               std::sscanf(value, "%f,%f", &test[0], &test[1]) == 2;
+    }();
+    if (testing) { x = test[0]; y = test[1]; }
+    const auto shaped = [](float v) {
+        const float a = std::fabs(v);
+        return a <= kDeadZone ? 0.0f : std::copysign(std::min(1.0f, (a - kDeadZone) / (1.0f - kDeadZone)), v);
+    };
+    const float k = 1.0f - std::exp(-dt / kEase);
+    yaw += (shaped(x) * kLookYaw - yaw) * k;
+    pitch += (-shaped(y) * kLookPitch - pitch) * k;
+    if (std::fabs(yaw) < 1e-4f && std::fabs(pitch) < 1e-4f) return camera;
+    const Vec ahead = camera.ahead * std::cos(yaw) + camera.right * std::sin(yaw);
+    const Vec right = camera.right * std::cos(yaw) - camera.ahead * std::sin(yaw);
+    return { camera.eye, right, camera.up * std::cos(pitch) - ahead * std::sin(pitch),
+             ahead * std::cos(pitch) + camera.up * std::sin(pitch) };
+}
+
 uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, uint32_t* identity, uint32_t* underside,
                            uint32_t* bubbles) {
     *haze = 0;
@@ -1583,7 +1643,8 @@ uint32_t first_person_view(uint8_t* rdram, uint32_t segment3, uint32_t* haze, ui
     const float intensity = g_intensity.load(std::memory_order_relaxed);
     const Camera ridden = intensity >= 1.0f ? body : blend(level_camera(chest_eye, ahead), body, intensity);
     const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + 0xD8170);
-    const Camera camera = swim_step(segment3, course, animation, ridden, hull);
+    Camera camera = swim_step(segment3, course, animation, ridden, hull);
+    if (!vr::enabled()) camera = looked(camera);
     const Vec eye = camera.eye;
     static const bool fog_trace = std::getenv("WR64_FOG_TRACE") != nullptr;
     if (fog_trace) {

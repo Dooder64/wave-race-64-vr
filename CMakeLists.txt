@@ -230,7 +230,7 @@ if(WR64_WITH_RUNTIME AND WR64_WITH_RECOMPILED)
         list(APPEND WR64_SOURCES src/vr_openxr.cpp)
     endif()
     if(WR64_WITH_FRONTEND)
-        list(APPEND WR64_SOURCES src/frontend.cpp)
+        list(APPEND WR64_SOURCES src/frontend.cpp src/game_menus.cpp)
     endif()
     # Patches replacing recompiled functions. RECOMP_FUNC is weak under Clang,
     # so these strong definitions win at link time without regenerating anything.

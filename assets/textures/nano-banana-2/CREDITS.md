@@ -18,7 +18,7 @@ fitted to their original texture regions. No ownership of the underlying logo
 is claimed by this project.
 
 Some glyph and number refinements were rendered using locally installed
-Helvetica, Arial Narrow, and Courier New fonts. Font files from that workflow
+Helvetica, Arial, Arial Narrow, and Courier New fonts. Font files from that workflow
 are not distributed in this pack. The game's original lettering identities,
 colors, placement, and texture mappings were used as references.
 
