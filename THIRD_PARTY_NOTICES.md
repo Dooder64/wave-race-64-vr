@@ -3,37 +3,37 @@
 This project's own code (`src/`, `include/`, `patches/`, `tools/`, `recomp/`,
 `assets/icons/`, `assets/recomp.rcss`) is under the MIT License in `LICENSE`.
 A built executable also contains the following, under their own terms. License
-texts are in the named files inside the submodules under `lib/`.
+texts are in the named files inside the submodules under `lib/`, and a
+release's `licenses` folder carries a copy of each.
 
 | Component | Role | License | Text |
 |---|---|---|---|
 | [N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime) (librecomp, ultramodern) | the runtime the recompiled game runs on | **GPL-3.0** | `lib/N64ModernRuntime/COPYING` |
 | [N64Recomp](https://github.com/N64Recomp/N64Recomp), RSPRecomp | the recompiler (build-time; its headers are compiled in) | MIT | `lib/N64ModernRuntime/N64Recomp/LICENSE` |
 | [RT64](https://github.com/rt64/rt64) | the renderer | MIT | `lib/RT64/LICENSE` |
-| [RecompFrontend](https://github.com/N64Recomp/RecompFrontend) (recompui, recompinput) | menus, controller mapping | **no license published** as of this release | -- |
+| [RecompFrontend](https://github.com/N64Recomp/RecompFrontend) (recompui, recompinput) | menus, controller mapping | **GPL-3.0** (published 2026-10-16, commit 2ddbfc8, which this project pins) | `lib/RecompFrontend/COPYING` |
+| [OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK) loader (release-1.1.63) | VR mode: the link to the headset's OpenXR runtime, linked statically | Apache-2.0 OR MIT (the loader and headers); jsoncpp inside it, MIT | `lib/OpenXR-SDK/LICENSES/`, `lib/OpenXR-SDK/COPYING.adoc` |
 | [RmlUi](https://github.com/mikke89/RmlUi) | the UI toolkit recompui is built on | MIT | `lib/RecompFrontend/recompui/lib/RmlUi/LICENSE.txt` |
 | [lunasvg](https://github.com/sammycage/lunasvg) | SVG icons in the menus | MIT | `lib/RecompFrontend/recompui/lib/lunasvg/LICENSE` |
 | GamepadMotionHelpers | gyro handling in recompinput | MIT | `lib/RecompFrontend/lib/GamepadMotionHelpers/LICENSE` |
 | SDL2 | window, input, audio | zlib | `lib/RT64/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/` |
-| DirectX Shader Compiler (dxcompiler.dll, dxil.dll) | shader compilation | LLVM Release License / Microsoft | `lib/RT64/src/contrib/dxc/` |
+| DirectX Shader Compiler (dxcompiler.dll, dxil.dll) | shader compilation | University of Illinois/NCSA (LLVM) / Microsoft | not in RT64's copy; see [DirectXShaderCompiler's LICENSE.TXT](https://github.com/microsoft/DirectXShaderCompiler/blob/main/LICENSE.TXT) |
 | plume, hlsl++, Dear ImGui, nativefiledialog-extended, xxHash, zstd, miniz, o1heap | RT64 and runtime dependencies | MIT / BSD / zlib | under `lib/RT64/src/contrib/` and `lib/N64ModernRuntime/thirdparty/` |
 | Lato, Noto Emoji | menu fonts, copied from RmlUi's samples at build time | SIL Open Font License 1.1 | `lib/RecompFrontend/recompui/lib/RmlUi/Samples/assets/LICENSE.txt` |
 | PromptFont | controller and keyboard glyphs in the menus | see `assets/promptfont/LICENSE.txt` | `assets/promptfont/LICENSE.txt` |
 
 ## What this means for a built executable
 
-The runtime is GPL-3.0 and is linked statically, so **any executable built from
+The runtime and the menus (RecompFrontend) are GPL-3.0 and are linked statically, so **any executable built from
 this project is a combined work distributed under the GNU General Public
 License, version 3**, whatever the license of the project's own files. Anyone
 who distributes such a binary must make its complete corresponding source
 available under the GPL's terms; this repository, at the commit the binary was
 built from, together with the submodules it pins, is that source.
 
-RecompFrontend publishes no license. Without one, no permission to copy or
-redistribute it exists beyond what its authors grant; this project uses it as a
-submodule, as the other N64: Recompiled projects do, and does not vendor a copy.
-Anyone intending to distribute a built executable should resolve this with the
-RecompFrontend authors first.
+RecompFrontend published no license until 2026-10-16, when its authors added
+the GPL-3.0 (commit 2ddbfc8, "Added GPL3 license"). This project pins that
+commit, so the menus are distributed under the same GPL-3.0 as the runtime.
 
 ## The reference decompilation
 

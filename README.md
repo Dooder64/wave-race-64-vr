@@ -218,8 +218,8 @@ and N64ModernRuntime is **GPL-3.0**, so the executable as a whole is a
 GPL-3.0 combined work: anyone who distributes one must provide its complete
 source under the GPL's terms, and this repository at the tagged commit,
 with the submodules it pins, is that source. RecompFrontend, which supplies
-the menus, has published **no license** at the time of this release. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full list.
+the menus, is GPL-3.0 too, and VR mode's OpenXR loader is Apache-2.0 or MIT.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full list.
 
 ## How this was made
 
@@ -234,6 +234,12 @@ generated with Claude as well. The work was done in phases (see
 This fork adds native macOS support, modern water, replacement music and HD textures,
 developed with Codex under Brian Tate's direction and validated through native
 playtesting and deterministic replays.
+
+The PC VR edition -- seated stereo VR through OpenXR, first person with the
+swim back after a fall, seafloors, Dolphin Park's riders, Free Roam and its
+course options -- was written by Claude in Claude Code under the direction of
+Dooder, who set the goals, made the decisions and play-tested every build in
+the headset and on the monitor.
 
 ## Credits
 
