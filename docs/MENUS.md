@@ -450,6 +450,58 @@ Mind `a0`: a hook that plays a sound (a call of the game's) before drawing
 must keep the display list pointer first, or the draw writes through the
 sound's number (this crashed in testing).
 
+### MISSES and LAPS (Championship)
+
+The game's own OPTIONS -> CHANGE CONDITIONS (state `0x44`, `ovl_i10`) keeps,
+per difficulty, wave conditions, misses allowed and laps:
+`D_801CB308[difficulty][3]` (words at `0x801CB308`, 12 bytes a difficulty),
+saved with the game. Its page allows misses 1-5 and laps 3-9 (a min/max
+table at `D_i10_802C6AF8`). As the main menu ends a Championship it copies
+that difficulty's misses and laps into `D_801CE608 + 0xC / + 0x10` and sets
+`D_801CE6F8`; each race's setup (`0x800933C4` on) reads them into
+`gBuoyMisses` (`0x800D8174`, compared with the race record's `+0x134`) and the
+laps to finish. REVERSE uses a fixed 5 and 3.
+
+The Championship WAVES page shows MISSES (1-10) and LAPS (3-10) for the
+chosen difficulty (the choice's `+0x14`), writing those values directly. The
+numbers are drawn as that page draws them: `func_801E9858(gfx, 2, string, x,
+y)`, the scale `D_80226E24 = 1.0` and `D_80226E28 = 0` set first.
+
+REVERSE has its own MISSES and LAPS (the Races tab's `reverse_misses`,
+`reverse_laps`, defaults 5 and 3), held each frame of a Reverse race
+(`D_800DAB68` set): `gBuoyMisses` and the laps to finish
+(`patches/free_roam.cpp`).
+
+The HUD's MISS row draws one 12-pixel marker per miss allowed (up to 28),
+14 pixels apart from `D_80228B54 + 0x38` at y `0xCD` (the race overlay from
+`0x801F74A0`). Past 6 they ran under POWER, so the display-list rewriter
+moves each marker's rectangle into the room 6 take (`squeeze_misses` in
+`src/dlrewrite.cpp`). Verified: a Reverse race with 10 misses shows all ten,
+the miss taken crossed out.
+
+### The version on the title
+
+The title's frame in state `0x03` is `func_i0_802C5A7C` (offset `0x27C`); its
+big logo is up while `D_i0_802C6BE0` is 0 (then the menu). Under "(C) 1996
+Nintendo" the mod draws "VERSION 1.1.0: LATEST VERSION" or "...: NEWER
+VERSION AVAILABLE" with `func_801E9858`'s font 1, which has capitals, digits
+and full stops but no lowercase or colon (unknown characters draw as 0). At
+six tenths size (`D_80226E24 = 0.6`, `D_80226E28 = 1` to scale; with it 0
+the font draws at full size) the game's own spacing squeezes the letters,
+so each character is drawn on its own at an even step; the colon is two
+full stops. Colour comes from `func_801E946C`'s style: 0 white, 3 and 5
+yellow, 4 red, 6 green, 7 grey (its 12 tint values don't tint this
+lettering). Scaled, a string's y is about 17 pixels above where it lands.
+
+### Lap message past 3 laps (known issue)
+
+With more laps than 3, the message on crossing the line ("LAP n", from the
+lap counter at race record `+0x0`, drawn by `func_801FAEB8` with font 0) was
+seen in play showing the wrong number (LAP 8 on lap 4 of a 10-lap Reverse
+race). Forced tests show the counter and its digits drawn correctly, so the
+cause is still unknown. `WR64_LAP_TEST=<lap>,<laps>` (scripted runs) forces
+a race's lap counter and shows the message.
+
 ### Still to find (later steps, not menus)
 
 - Custom lap count: laps to finish are `0x801CE728` (Free Roam holds it at 99);

@@ -54,6 +54,7 @@ void game_menus_course_exit_hook(uint8_t* rdram, recomp_context* ctx);
 void game_menus_course_init_hook(uint8_t* rdram, recomp_context* ctx);
 void game_menus_options_hook(uint8_t* rdram, recomp_context* ctx);
 void game_menus_options_draw_hook(uint8_t* rdram, recomp_context* ctx);
+void game_menus_title_hook(uint8_t* rdram, recomp_context* ctx);
 #endif
 
 void register_overlays() {
@@ -75,6 +76,7 @@ void register_overlays() {
             // loads at 0x802C5800, so the title's (ovl_i0) and the course
             // select's (ovl_i4) are told apart by their ROM addresses.
             if (section.rom_addr == 0x1B3EC0u) {
+                if (function.offset == 0x27Cu) function.func = game_menus_title_hook;
                 if (function.offset == 0x844u) function.func = game_menus_draw_hook;
                 if (function.offset == 0xBACu) function.func = game_menus_input_hook;
             }

@@ -279,6 +279,25 @@ bool racing(uint32_t state) {
     return state == 0x07 || state == 0x28;
 }
 
+// The HUD's MISS row, one 12-pixel marker a miss allowed, 14 apart from the
+// HUD's left (D_80228B54) + 0x38, at y 0xCD, for one player (the race
+// overlay's 0x801F74A0 on). Past 6 -- the Championship's MISSES go to 10
+// (src/game_menus.cpp) -- they would run under POWER, so they are drawn
+// closer, in the room 6 take. A marker's texture coordinates are its own top
+// left's, so moving the rectangle moves the picture with it.
+void squeeze_misses(const uint8_t* rdram, uint32_t& w0, uint32_t& w1) {
+    const auto word = [rdram](uint32_t at) { return *reinterpret_cast<const int32_t*>(rdram + at); };
+    const int32_t limit = word(0x0D8174);
+    if (limit <= 6 || word(0x0DAB28) != 1) return;
+    const uint32_t left = (w1 >> 12) & 0xFFF, top = w1 & 0xFFF, right = (w0 >> 12) & 0xFFF, bottom = w0 & 0xFFF;
+    if (top != 0xCD * 4 || bottom != (0xCD + 12) * 4 || right != left + 12 * 4) return;
+    const int32_t first = (word(0x228B54) + 0x38) * 4, from = int32_t(left) - first;
+    if (from < 0 || from % (14 * 4) != 0 || from / (14 * 4) >= limit) return;
+    const int32_t at = first + (from / (14 * 4)) * (5 * 14 * 4) / (std::min(limit, 28) - 1);
+    w1 = (w1 & ~(0xFFFu << 12)) | (uint32_t(at) << 12);
+    w0 = (w0 & ~(0xFFFu << 12)) | (uint32_t(at + 12 * 4) << 12);
+}
+
 // Whether the frame is a race, read from the frame itself rather than from
 // the game's state variable.
 //
@@ -2212,10 +2231,11 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
     if (racing(state)) wr64::speed_units::scan(rdram, cursor);
     for (uint32_t steps = 0; steps < kMaxCommands && !w.overflow; ++steps) {
         const uint32_t* c = w.words(cursor);
-        const uint32_t w0 = c[0];
+        uint32_t w0 = c[0];
         uint32_t w1 = c[1];
         const uint8_t op = static_cast<uint8_t>(w0 >> 24);
         if (op == kOpSetTextureImage) w1 = wr64::speed_units::image(cursor, w1);
+        if (op == kOpTexRect && state == 0x28) squeeze_misses(rdram, w0, w1);
         if (op == kOpTexRect && wr64::speed_units::dropped(cursor)) {
             cursor += 8;
             continue;

@@ -230,7 +230,7 @@ if(WR64_WITH_RUNTIME AND WR64_WITH_RECOMPILED)
         list(APPEND WR64_SOURCES src/vr_openxr.cpp)
     endif()
     if(WR64_WITH_FRONTEND)
-        list(APPEND WR64_SOURCES src/frontend.cpp src/game_menus.cpp)
+        list(APPEND WR64_SOURCES src/frontend.cpp src/game_menus.cpp src/updates.cpp)
     endif()
     # Patches replacing recompiled functions. RECOMP_FUNC is weak under Clang,
     # so these strong definitions win at link time without regenerating anything.
@@ -298,6 +298,8 @@ if(WR64_WITH_RUNTIME)
     if(WIN32)
         # dbghelp resolves the crash handler's addresses to function names.
         target_link_libraries(WaveRace64Recomp PRIVATE dbghelp)
+        # winhttp asks GitHub for the latest release (src/updates.cpp).
+        target_link_libraries(WaveRace64Recomp PRIVATE winhttp)
     endif()
     target_compile_definitions(WaveRace64Recomp PRIVATE WR64_WITH_RUNTIME=1)
 

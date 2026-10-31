@@ -2985,6 +2985,12 @@
     },
     {
       "hashes": {
+        "rt64": "42551c7a5aa5f3b3"
+      },
+      "path": "textures/4b02c652a595f776ed0b5d222289bc802b736c9c9d2d8bf5d522c1de0ae5db4b.png"
+    },
+    {
+      "hashes": {
         "rt64": "429dd060d759f9d7"
       },
       "path": "textures/8de485839b6b875869636d77d363cc264d7f2a226161c14d0fa37d52ac7f5d19.dds"
@@ -6273,6 +6279,12 @@
     },
     {
       "hashes": {
+        "rt64": "897bf26cf13a9695"
+      },
+      "path": "textures/863399c301d1d3461534e6b86d988dc7cf177e26cc17f03eb460db8ad23df80e.png"
+    },
+    {
+      "hashes": {
         "rt64": "899900971984b88e"
       },
       "path": "textures/88bd0c3d533af833a128247f2e87f5bb2fe05e2308e7f663bd85156acc82482e.dds"
@@ -8178,6 +8190,12 @@
         "rt64": "b565edb87e1bd087"
       },
       "path": "textures/041bb95de79c7a597b5a6218c526647b25e64df62cb64451e1aeb08856eab8bd.dds"
+    },
+    {
+      "hashes": {
+        "rt64": "b56b3270160abd24"
+      },
+      "path": "textures/1c68e5bb0ec4368ac6aa1962ec0962adba9e074a61cb868fd08c3acc1a61d3ef.png"
     },
     {
       "hashes": {

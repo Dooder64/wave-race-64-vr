@@ -3,10 +3,10 @@
   "name": "Wave Race 64 HD texture pack",
   "pack_id": "nano-banana-2",
   "hash_version": 5,
-  "mapping_count": 1884,
-  "image_count": 1862,
-  "database_sha256": "9d17c1b46493ae926df1bc4cc5ebcf43b456de26a0ce836090d655dc53d0cf58",
-  "total_image_bytes": 130556352,
+  "mapping_count": 1887,
+  "image_count": 1865,
+  "database_sha256": "0eaf41e838796ddf7c200b1952f11cf0024dc79cb9465893896faa37338bdae8",
+  "total_image_bytes": 130572498,
   "credits_file": "CREDITS.md",
   "summary": [
     "Reviewed Nano Banana 2 texture replacements with source-preserving fallbacks for rejected candidates.",
@@ -14,7 +14,7 @@
     "Eight user-selected dark-visor helmet portraits and the rank arrow at 8x native dimensions.",
     "Four ramp-wood and four island-material refinements at 8x; world textures carry full mip chains.",
     "32 craft side-panel replacements cover primary/opponent models and normal/alternate palettes. Other craft materials keep their earlier reviewed replacements.",
-    "56 more texts at 4x: the mod's menu words, OFF, REVERSE, RESTART, BEST SCORE, COURSE SELECT and the Warm Up help ticker redrawn in Arial Bold; the HUD's mph, SCORE and two place digits refined from source."
+    "59 more texts at 4x: the mod's menu words (MISSES, LAPS, UPDATE AVAILABLE among them), OFF, REVERSE, RESTART, BEST SCORE, COURSE SELECT and the Warm Up help ticker redrawn in Arial Bold; the HUD's mph, SCORE and two place digits refined from source."
   ],
   "files": [
     {
@@ -1616,6 +1616,14 @@
       "width": 64,
       "height": 192,
       "mip_levels": 8
+    },
+    {
+      "path": "textures/1c68e5bb0ec4368ac6aa1962ec0962adba9e074a61cb868fd08c3acc1a61d3ef.png",
+      "sha256": "1c68e5bb0ec4368ac6aa1962ec0962adba9e074a61cb868fd08c3acc1a61d3ef",
+      "bytes": 8129,
+      "width": 480,
+      "height": 40,
+      "mip_levels": 1
     },
     {
       "path": "textures/1c76bfc9703d6dc8f8a5a14be97cc8f5e9bfc1b3ef28eaf818f22c24fbf71faf.dds",
@@ -4448,6 +4456,14 @@
       "width": 32,
       "height": 32,
       "mip_levels": 6
+    },
+    {
+      "path": "textures/4b02c652a595f776ed0b5d222289bc802b736c9c9d2d8bf5d522c1de0ae5db4b.png",
+      "sha256": "4b02c652a595f776ed0b5d222289bc802b736c9c9d2d8bf5d522c1de0ae5db4b",
+      "bytes": 4956,
+      "width": 224,
+      "height": 40,
+      "mip_levels": 1
     },
     {
       "path": "textures/4b281e7305c7dee2b715e54eed1338a77c1273f23776a36ff5ee86d3db66936d.png",
@@ -7544,6 +7560,14 @@
       "width": 128,
       "height": 128,
       "mip_levels": 8
+    },
+    {
+      "path": "textures/863399c301d1d3461534e6b86d988dc7cf177e26cc17f03eb460db8ad23df80e.png",
+      "sha256": "863399c301d1d3461534e6b86d988dc7cf177e26cc17f03eb460db8ad23df80e",
+      "bytes": 3061,
+      "width": 160,
+      "height": 40,
+      "mip_levels": 1
     },
     {
       "path": "textures/8642377ac5fc5894d404e9d28367eaf51a9755f537bde4329c67110a9852ad84.dds",

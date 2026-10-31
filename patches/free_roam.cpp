@@ -132,6 +132,9 @@ std::atomic<int> g_waves{std::getenv("WR64_FREE_ROAM_WAVES") ? std::atoi(std::ge
 // The wave level chosen for Championship, Time Trials, Stunt Mode and 2P VS
 // (their WAVES page, src/game_menus.cpp), or -1 for the course's own.
 std::atomic<int> g_race_waves{-1};
+// REVERSE's misses and laps (the Races tab), held in its races: the game
+// sets 5 and 3 for it, whatever its CHANGE CONDITIONS say.
+std::atomic<int> g_reverse_misses{5}, g_reverse_laps{3};
 
 // Whether a free roam is ridden without fog (see free_roam_frame);
 // WR64_FOG=0 for scripted tests.
@@ -233,6 +236,10 @@ bool free_roam_chosen() { return g_on.load(std::memory_order_relaxed); }
 void swallow_sound_once(int sound) { g_swallow.store(sound, std::memory_order_relaxed); }
 // From the settings (the WAVES pages and the Free Roam options).
 void set_race_waves(int level) { g_race_waves.store(level, std::memory_order_relaxed); }
+void set_reverse_conditions(int misses, int laps) {
+    g_reverse_misses.store(misses, std::memory_order_relaxed);
+    g_reverse_laps.store(laps, std::memory_order_relaxed);
+}
 void set_free_roam_look(int course) {
     if (std::getenv("WR64_FREE_ROAM_LOOK") == nullptr) g_look.store(course, std::memory_order_relaxed);
 }
@@ -416,6 +423,27 @@ void free_roam_course_out_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!roam && current_game_state() != 0x07) {
         const int waves = free_roam_waves(rdram);
         if (waves >= 0) set_word(rdram, kWaveLevel, waves);
+    }
+    // WR64_LAP_TEST=<lap>,<laps> (scripted runs): a race's first frames on
+    // that lap of that many, the lap message shown.
+    {
+        static int test[2] = { 0, 0 };
+        static const bool testing = std::getenv("WR64_LAP_TEST") && std::getenv("WR64_INPUT_SCRIPT") &&
+                                    std::sscanf(std::getenv("WR64_LAP_TEST"), "%d,%d", &test[0], &test[1]) == 2;
+        static int frames = 0;
+        if (testing && current_game_state() == 0x28 && frames < 400) {
+            ++frames;
+            const uint32_t record = kRaceRecords + uint32_t(word(rdram, kHumanSlot)) * kRaceRecordSize;
+            set_word(rdram, kLapsToFinish, test[1]);
+            if (frames % 100 == 1) { set_word(rdram, record, test[0] + frames / 100); set_word(rdram, record + 0x308, 60); }
+        }
+    }
+    // A REVERSE championship's race (the flag D_800DAB68): its chosen misses
+    // allowed (gBuoyMisses, 0x800D8174) and laps to finish.
+    if (!roam && current_game_state() == 0x28 && word(rdram, kGameMode) == kChampionship &&
+        *reinterpret_cast<const int16_t*>(rdram + (0x0DAB68 ^ 2)) != 0) {
+        set_word(rdram, 0x0D8174, g_reverse_misses.load(std::memory_order_relaxed));
+        set_word(rdram, kLapsToFinish, g_reverse_laps.load(std::memory_order_relaxed));
     }
     if (off || (course != 0 && !roam)) {
         func_80074264(rdram, ctx);

@@ -35,6 +35,12 @@
 #include "wr64/haptics.h"
 #include "wr64/rom.h"
 #include "wr64/vr.h"
+#include "wr64/updates.h"
+
+#if defined(_WIN32)
+// user32's, declared here rather than through windows.h and its macros.
+extern "C" __declspec(dllimport) short __stdcall GetAsyncKeyState(int key);
+#endif
 
 // The two globals recompui expects the port to define. It declares them extern
 // in its own translation units and links against whatever the port provides:
@@ -208,6 +214,7 @@ namespace wr64 {
 void set_unlock_all(bool on);
 // patches/free_roam.cpp and src/companions.cpp: the Races and Free Roam tabs'.
 void set_race_waves(int level);
+void set_reverse_conditions(int misses, int laps);
 void set_free_roam_waves(int level);
 void set_free_roam_look(int course);
 void set_race_music(int course);
@@ -270,17 +277,27 @@ void init(bool auto_start) {
     recompui::register_primary_font("LatoLatin-Regular.ttf", "LatoLatin");
 
     recompui::register_launcher_init_callback(build_launcher);
-    if (auto_start) {
-        // Start after the launcher exists, on its UI update boundary. Starting
-        // before context creation leaves an invisible menu capturing the pad.
-        recompui::register_launcher_update_callback([pending = true](auto *) mutable {
-            if (!pending) return;
-            pending = false;
-            recompui::update_game_mod_id(wr64::kModGameId);
-            recomp::start_game(std::u8string{wr64::kGameId}, {});
-            recompui::hide_all_contexts();
-        });
-    }
+    // Straight into the game: given a ROM to start, or -- the General tab's
+    // "Start straight into the game", on by default -- once one has been set
+    // up, unless Shift is held as the program starts (the launcher is all but
+    // invisible in a headset). Start after the launcher exists, on its UI
+    // update boundary: starting before context creation leaves an invisible
+    // menu capturing the pad.
+#if defined(_WIN32)
+    const bool shift = (GetAsyncKeyState(0x10 /* VK_SHIFT */) & 0x8000) != 0;
+#else
+    const bool shift = (SDL_GetModState() & KMOD_SHIFT) != 0;
+#endif
+    recompui::register_launcher_update_callback([pending = true, auto_start, shift](auto *) mutable {
+        if (!pending) return;
+        pending = false;
+        const auto straight = recompui::config::get_config(recompui::config::general::id).get_option_value("start_straight");
+        const bool chosen = std::holds_alternative<bool>(straight) && std::get<bool>(straight);
+        if (!auto_start && (shift || !chosen || !recomp::is_rom_valid(std::u8string{wr64::kGameId}))) return;
+        recompui::update_game_mod_id(wr64::kModGameId);
+        recomp::start_game(std::u8string{wr64::kGameId}, {});
+        recompui::hide_all_contexts();
+    });
 
     // Host haptics use a dedicated tab; the original game's boolean Rumble
     // Pak option does not describe the independent two-motor effects.
@@ -289,7 +306,18 @@ void init(bool auto_start) {
     general.has_gyro_sensitivity = false;
     general.has_mouse_sensitivity = false;
 
-    recompui::config::create_general_tab(general);
+    auto &general_tab = recompui::config::create_general_tab(general);
+    general_tab.add_bool_option("start_straight", "Start straight into the game", "Skip this launcher once your ROM is set up. Hold Shift while starting the game to see the launcher again.", true);
+    general_tab.add_bool_option("check_updates", "Check for updates", std::string("Ask GitHub once at start whether a newer release of the VR edition is out, and say so on the main menu. This is version ") + wr64::updates::kVersion + ".", true);
+    // A switch that acts at once: opens the page, then turns itself back off.
+    general_tab.add_bool_option("open_download_page", "Open the download page", "Opens the VR edition's latest release on GitHub in your browser.", false);
+    general_tab.add_option_change_callback("open_download_page", [](auto value, auto, auto context) {
+        if (context == recomp::config::OptionChangeContext::Temporary || !std::get<bool>(value)) return;
+        wr64::updates::open_page();
+        auto& config = recompui::config::get_config(recompui::config::general::id);
+        config.set_option_value("open_download_page", false);
+        config.save_config_json(config.get_json_config());
+    });
     auto &haptics = recompui::config::create_config_tab("Haptics", "haptics", true);
     haptics.add_enum_option("haptics_mode", "Controller feedback", "Feel wave landings, collisions, buoys, power gains and race milestones. Full adds a subtle engine and water feel. Events only removes the continuous feedback.",
         {{0, "off", "Off"}, {1, "events", "Events only"}, {2, "full", "Full"}}, 1u);
@@ -358,6 +386,23 @@ void init(bool auto_start) {
         const uint32_t choice = std::get<uint32_t>(value);
         wr64::set_race_waves(choice < 9 ? kWaveLevels[choice] : -1);
     });
+    // REVERSE's misses and laps: the game races it with 5 and 3 whatever its
+    // CHANGE CONDITIONS say; these are held in its races (patches/free_roam.cpp).
+    // Chosen on the Championship page after REVERSE (src/game_menus.cpp).
+    std::vector<recomp::config::ConfigOptionEnumOption> miss_choices, lap_choices;
+    for (uint32_t n = 1; n <= 10; ++n) miss_choices.push_back({n - 1, std::to_string(n), std::to_string(n)});
+    for (uint32_t n = 3; n <= 10; ++n) lap_choices.push_back({n - 3, std::to_string(n), std::to_string(n)});
+    races.add_enum_option("reverse_misses", "Reverse: misses", "Buoys you may miss in a REVERSE championship before you're out (the game's own is 5).", miss_choices, 4u);
+    races.add_enum_option("reverse_laps", "Reverse: laps", "Laps of each REVERSE championship race (the game's own is 3).", lap_choices, 0u);
+    const auto reverse_changed = [](auto, auto, auto context) {
+        if (context == recomp::config::OptionChangeContext::Temporary) return;
+        auto& config = recompui::config::get_config("races");
+        const auto misses = config.get_option_value("reverse_misses"), laps = config.get_option_value("reverse_laps");
+        if (std::holds_alternative<uint32_t>(misses) && std::holds_alternative<uint32_t>(laps))
+            wr64::set_reverse_conditions(int(std::get<uint32_t>(misses)) + 1, int(std::get<uint32_t>(laps)) + 3);
+    };
+    races.add_option_change_callback("reverse_misses", reverse_changed);
+    races.add_option_change_callback("reverse_laps", reverse_changed);
     auto &roam = recompui::config::create_config_tab("Free Roam", "free_roam", true);
     // Free Roam itself is chosen in the game's own main menu (FREE ROAM, above
     // OPTIONS: src/game_menus.cpp), always without buoys or rings; these are
@@ -479,6 +524,9 @@ void init(bool auto_start) {
 
     // Loads the player's saved settings from disk. Must come after every tab.
     recompui::config::finalize();
+    // (Looked up again: the tab's own reference doesn't outlive the others' creation.)
+    const auto check_updates = recompui::config::get_config(recompui::config::general::id).get_option_value("check_updates");
+    if (std::holds_alternative<bool>(check_updates) && std::get<bool>(check_updates)) wr64::updates::check();
 
     // Play fullscreen at the display's own resolution and aspect ratio.
     //

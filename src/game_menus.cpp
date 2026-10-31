@@ -13,7 +13,14 @@
 //
 //   - Championship: after the difficulty (or WARM UP / START THE RACE), on the
 //     main menu, before the choice ends it -- WAVES, once for the whole
-//     championship.
+//     championship, and MISSES and LAPS: the game's own CHANGE CONDITIONS
+//     values for that difficulty (D_801CB308[difficulty]: wave conditions,
+//     misses 1-10, laps 3-10: the game's own page allows 1-5 and 3-9), which
+//     each race reads as it sets up; drawn with
+//     the game's number lettering (func_801E9858, font 2, as that page does).
+//     REVERSE, which the game races with 5 and 3 whatever its CHANGE
+//     CONDITIONS say, has its own, in the Races tab (patches/free_roam.cpp
+//     holds them in its races).
 //   - Time Trials, Stunt Mode and 2P VS: after the course (and, but for Stunt
 //     Mode, its difficulty) on the course select screen (state 0x14, overlay
 //     ovl_i4), where the race would start -- WAVES.
@@ -64,14 +71,18 @@
 
 #include "recomp.h"
 #include "wr64/music.h"
+#include "wr64/updates.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
+#include <string>
 #include <vector>
 
+extern "C" void func_i0_802C5A7C(uint8_t*, recomp_context*);
 extern "C" void func_i0_802C6044(uint8_t*, recomp_context*);
 extern "C" void func_i0_802C63AC(uint8_t*, recomp_context*);
 extern "C" void func_i4_802C5800(uint8_t*, recomp_context*);
@@ -83,6 +94,7 @@ extern "C" void func_i4_802C7474(uint8_t*, recomp_context*);
 extern "C" void func_80094338(uint8_t*, recomp_context*);
 extern "C" void func_801E946C(uint8_t*, recomp_context*);
 extern "C" void func_801E3EE0(uint8_t*, recomp_context*);
+extern "C" void func_801E9858(uint8_t*, recomp_context*);
 extern "C" void func_801E5554(uint8_t*, recomp_context*);
 extern "C" void func_801E7C58(uint8_t*, recomp_context*);
 extern "C" void AudioGeneral_PlaySound(uint8_t*, recomp_context*);
@@ -204,14 +216,15 @@ enum Word { kFreeRoam, kRiders, kWaves, kSky, kMusic, kFog,
             kLayout, kStuntMode, kWarmUp,
             kExtras, kSpeed, kView, kTilt, kFeedback, kTextures, kWater, kStyle, kRipples, kSpray, kUnlockAll,
             kKph, kMph, kChase, kFirstPerson, kNone, kHalf, kFull, kEvents, kOriginal, kHd, kModern, kHigh,
-            kClassic, kAqua, kSoft, kStrong, kWordCount };
+            kClassic, kAqua, kSoft, kStrong, kMisses, kLaps, kUpdateAvailable, kWordCount };
 constexpr const char* kTexts[kWordCount] = { "FREE ROAM", "RIDERS", "WAVES", "SKY", "MUSIC", "FOG",
                                              "STILL", "CALM", "GENTLE", "CHOPPY", "ROUGH", "STORMY", "WILD", "EXTREME",
                                              "LAYOUT", "STUNT MODE", "WARM UP",
                                              "EXTRAS", "SPEED", "VIEW", "TILT", "FEEDBACK", "TEXTURES", "WATER", "STYLE",
                                              "RIPPLES", "SPRAY", "UNLOCK ALL",
                                              "KPH", "MPH", "CHASE", "FIRST PERSON", "NONE", "HALF", "FULL", "EVENTS",
-                                             "ORIGINAL", "HD", "MODERN", "HIGH", "CLASSIC", "AQUA", "SOFT", "STRONG" };
+                                             "ORIGINAL", "HD", "MODERN", "HIGH", "CLASSIC", "AQUA", "SOFT", "STRONG",
+                                             "MISSES", "LAPS", "UPDATE AVAILABLE" };
 // FREE ROAM's own id, and the one every other made word is drawn through:
 // empty in the font 1 table.
 constexpr int kFreeRoamId = 0x28, kScratchId = 0x2B;
@@ -335,16 +348,37 @@ void place_pictures(uint8_t* rdram) {
     store32(rdram, kFont1Table + uint32_t(kFreeRoamId) * 8 + 4, uint32_t(g_pictures[kFreeRoam].width));
 }
 
-// A word to draw: the game's own font 1 id, or one of the made words.
-struct Text { bool made; int id; };
+// A word to draw: the game's own font 1 id, one of the made words, or a
+// number in the game's number lettering.
+struct Text { bool made; int id; int number = -1; };
 constexpr Text game(int id) { return { false, id }; }
 constexpr Text made(Word w) { return { true, int(w) }; }
+constexpr Text number(int n) { return { false, 0, n }; }
+
+// The title's version line's steps: a letter or digit, an I, a space, a
+// full stop or colon (font 1 at six tenths size).
+constexpr int kTitleAdvance = 6, kTitleNarrow = 3, kTitleSpace = 4, kTitleStop = 3;
+
+// Where a number's text is written for the game to draw: past the pictures.
+constexpr uint32_t kNumberText = 0x6F6F00;
+// The number lettering's advance (font 2's digits, measured from frames).
+constexpr int kDigitWidth = 9;
 
 int width_of(const uint8_t* rdram, Text t) {
+    if (t.number >= 0) return kDigitWidth * (t.number >= 10 ? 2 : 1);
     return t.made ? g_pictures[t.id].ink : load32(rdram, kFont1Table + uint32_t(t.id) * 8 + 4);
 }
 
 uint32_t draw_text(uint8_t* rdram, recomp_context* ctx, uint32_t gfx, Text t, int x, int y) {
+    if (t.number >= 0) {
+        char text[8];
+        std::snprintf(text, sizeof text, "%d", t.number);
+        for (size_t i = 0; i <= std::strlen(text); ++i) rdram[(kNumberText + uint32_t(i)) ^ 3] = uint8_t(text[i]);
+        // Its scale and spacing, as the game's own callers set them first.
+        store32(rdram, 0x226E24, 0x3F800000u);
+        *reinterpret_cast<int16_t*>(rdram + (0x226E28 ^ 2)) = 0;
+        return call(rdram, ctx, func_801E9858, { gfx, 2, 0x80000000u | kNumberText, uint32_t(x), uint32_t(y - 3) });
+    }
     int id = t.id;
     if (t.made) {
         const Picture& p = g_pictures[t.id];
@@ -405,6 +439,39 @@ const std::vector<Text> kCourseValues = { game(kWordNormal), game(kWordCourses +
                                           game(kWordCourses + 8) };
 const std::vector<Text> kSwitchValues = { game(kWordOff), game(kWordOn) };
 
+// The game's CHANGE CONDITIONS for the Championship's difficulty (see the top),
+// for the WAVES page's MISSES and LAPS; set as the page opens.
+uint8_t* g_ram = nullptr;
+int g_difficulty = 0;
+constexpr uint32_t kConditions = 0x1CB308;   // [difficulty][wave conditions, misses, laps], words
+uint32_t condition(int which, int least) {
+    const int32_t v = load32(g_ram, kConditions + uint32_t(g_difficulty * 12 + which * 4));
+    return uint32_t(std::max(0, v - least));
+}
+void set_condition(int which, int least, uint32_t to) { store32(g_ram, kConditions + uint32_t(g_difficulty * 12 + which * 4), to + uint32_t(least)); }
+uint32_t misses_setting() { return condition(1, 1); }
+void set_misses_setting(uint32_t to) { set_condition(1, 1, to); }
+uint32_t laps_setting() { return condition(2, 3); }
+void set_laps_setting(uint32_t to) { set_condition(2, 3, to); }
+std::vector<Text> numbers(int from, int to) {
+    std::vector<Text> v;
+    for (int n = from; n <= to; ++n) v.push_back(number(n));
+    return v;
+}
+bool g_reverse = false;   // the Championship chosen is REVERSE
+
+const std::vector<Option> kChampionshipOptions = {
+    { kWaves, "races", "race_waves", kWaveValues },
+    { kMisses, nullptr, nullptr, numbers(1, 10), misses_setting, set_misses_setting },
+    { kLaps, nullptr, nullptr, numbers(3, 10), laps_setting, set_laps_setting },
+};
+
+const std::vector<Option> kReverseOptions = {
+    { kWaves, "races", "race_waves", kWaveValues },
+    { kMisses, "races", "reverse_misses", numbers(1, 10) },
+    { kLaps, "races", "reverse_laps", numbers(3, 10) },
+};
+
 const std::vector<Option> kRaceOptions = {
     { kWaves, "races", "race_waves", kWaveValues },
 };
@@ -448,6 +515,7 @@ bool g_dolphin_park = false; // the course select's page is for Dolphin Park
 
 const std::vector<Option>& options_of(Page page) {
     if (page == Page::Extras) return kExtrasOptions;
+    if (page == Page::ChampionshipWaves) return g_reverse ? kReverseOptions : kChampionshipOptions;
     if (page != Page::FreeRoam) return kRaceOptions;
     return g_dolphin_park ? kDolphinParkOptions : kFreeRoamOptions;
 }
@@ -571,9 +639,13 @@ void game_controls(uint8_t* rdram, recomp_context* ctx) {
 
 // Whether choosing the main menu's current row would end it on a
 // Championship: the page's choice opens no other page and is Championship's.
-bool ends_championship(const uint8_t* rdram) {
+// The choice there (physical).
+uint32_t main_choice(const uint8_t* rdram) {
     const uint32_t items = phys(gpr(int64_t(load32(rdram, kPages + uint32_t(load32(rdram, kPage)) * 0x18))));
-    const uint32_t choice = items + uint32_t(load32(rdram, kCursor)) * kChoiceSize;
+    return items + uint32_t(load32(rdram, kCursor)) * kChoiceSize;
+}
+bool ends_championship(const uint8_t* rdram) {
+    const uint32_t choice = main_choice(rdram);
     const int16_t next = int16_t(uint32_t(load32(rdram, choice)) >> 16);
     return next == -1 && load32(rdram, choice + 4) == kChampionship;
 }
@@ -673,12 +745,72 @@ void game_menus_course_init_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 
 // func_i0_802C6044 in its section's table: the main menu's page draw.
+// func_i0_802C5A7C in its section's table: the title's frame (state 0x03).
+// While its logo is up (D_i0_802C6BE0 0, before the menu), the edition's
+// version goes under "(C) 1996 Nintendo", in the game's menu lettering
+// (func_801E9858, font 1: capitals, digits and full stops) at six tenths
+// size: "VERSION 1.1.0: LATEST VERSION", the status in green (style 6), or
+// "...: NEWER VERSION AVAILABLE" in red (style 4) (src/updates.cpp); the
+// version alone while that isn't known.
+void game_menus_title_hook(uint8_t* rdram, recomp_context* ctx) {
+    func_i0_802C5A7C(rdram, ctx);
+    if (!enabled() || load32(rdram, kGameState) != 0x03 || load32(rdram, 0x2C6BE0) != 0) return;
+    std::string version = "VERSION ";
+    for (const char* c = updates::kVersion; *c && *c != '-'; ++c) version += *c;
+    const bool known = updates::known(), newer = known && updates::available();
+    const std::string status = !known ? "" : newer ? "NEWER VERSION AVAILABLE" : "LATEST VERSION";
+    // Each character on its own, an even step apart (the game's own spacing
+    // squeezes the letters together at this size); font 1 has no colon, so
+    // two of its full stops, one above the other.
+    constexpr float kScale = 0.6f;
+    uint32_t scale;
+    std::memcpy(&scale, &kScale, 4);
+    const std::string line = version + (known ? ": " + status : "");
+    int width = 0;
+    const auto step = [](char c) { return c == ' ' ? kTitleSpace : c == '.' || c == ':' ? kTitleStop : c == 'I' ? kTitleNarrow : kTitleAdvance; };
+    for (char c : line) width += step(c);
+    int x = 160 - width / 2;
+    const int y = 200;
+    uint32_t gfx = uint32_t(ctx->r2);
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char c = line[i];
+        if (c != ' ') {
+            const int style = known && i > version.size() ? (newer ? 4 : kStyleChosen) : kStyleNormal;
+            gfx = call(rdram, ctx, func_801E946C, { gfx, uint32_t(style), 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF });
+            for (int dot = 0; dot < (c == ':' ? 2 : 1); ++dot) {
+                rdram[kNumberText ^ 3] = uint8_t(c == ':' ? '.' : c);
+                rdram[(kNumberText + 1) ^ 3] = 0;
+                store32(rdram, 0x226E24, scale);
+                *reinterpret_cast<int16_t*>(rdram + (0x226E28 ^ 2)) = 1;
+                gfx = call(rdram, ctx, func_801E9858, { gfx, 1, 0x80000000u | kNumberText, uint32_t(x), uint32_t(y - dot * 3) });
+            }
+        }
+        x += step(c);
+    }
+    store32(rdram, 0x226E24, 0x3F800000u);
+    *reinterpret_cast<int16_t*>(rdram + (0x226E28 ^ 2)) = 0;
+    gfx = call(rdram, ctx, func_801E5554, { gfx });
+    ctx->r2 = gpr(int64_t(int32_t(gfx)));
+}
+
+// A newer release out (src/updates.cpp) is said under the main menu's rows.
 void game_menus_draw_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!enabled()) { func_i0_802C6044(rdram, ctx); return; }
     place_pictures(rdram);
     place_main_rows(rdram);
-    if (g_page != Page::ChampionshipWaves) { func_i0_802C6044(rdram, ctx); return; }
-    ctx->r2 = gpr(int64_t(int32_t(draw_page(rdram, ctx, uint32_t(ctx->r4)))));
+    uint32_t gfx;
+    if (g_page != Page::ChampionshipWaves) {
+        func_i0_802C6044(rdram, ctx);
+        gfx = uint32_t(ctx->r2);
+    } else {
+        gfx = draw_page(rdram, ctx, uint32_t(ctx->r4));
+    }
+    if (updates::available()) {
+        gfx = colour(rdram, ctx, gfx, kStyleChosen);
+        gfx = draw_text(rdram, ctx, gfx, made(kUpdateAvailable), 160 - g_pictures[kUpdateAvailable].ink / 2, 200);
+        gfx = call(rdram, ctx, func_801E5554, { gfx });
+    }
+    ctx->r2 = gpr(int64_t(int32_t(gfx)));
 }
 
 // func_i0_802C63AC in its section's table: the main menu's controls.
@@ -689,6 +821,11 @@ void game_menus_input_hook(uint8_t* rdram, recomp_context* ctx) {
         g_page = Page::None;
         if ((buttons & (kA | kZ | kStart)) != 0 && ends_championship(rdram)) {
             g_saved_cursor = load32(rdram, kCursor);
+            // The choice's difficulty (+0x14) and special (+0x16; 4 REVERSE).
+            const uint32_t choice = main_choice(rdram);
+            g_ram = rdram;
+            g_difficulty = std::clamp<int>(int16_t(load16(rdram, choice + 0x14)), 0, 2);
+            g_reverse = int16_t(load16(rdram, choice + 0x16)) == 4;
             open(rdram, ctx, Page::ChampionshipWaves);
             return;
         }
