@@ -57,10 +57,13 @@
 // WR64_FREE_ROAM_LOG=1 logs the current.
 
 #include "recomp.h"
+#include "wr64/day_night.h"
 #include "wr64/music.h"
 #include "wr64/testdrive.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -135,6 +138,10 @@ std::atomic<int> g_race_waves{-1};
 // REVERSE's misses and laps (the Races tab), held in its races: the game
 // sets 5 and 3 for it, whatever its CHANGE CONDITIONS say.
 std::atomic<int> g_reverse_misses{5}, g_reverse_laps{3};
+// The most laps a race may have: the game keeps nine laps' times (its own
+// CHANGE CONDITIONS goes to 9), and a tenth ran its lap count ahead and
+// ended a ten-lap race after seven or eight.
+constexpr int kMostLaps = 9;
 
 // Whether a free roam is ridden without fog (see free_roam_frame);
 // WR64_FOG=0 for scripted tests.
@@ -238,7 +245,7 @@ void swallow_sound_once(int sound) { g_swallow.store(sound, std::memory_order_re
 void set_race_waves(int level) { g_race_waves.store(level, std::memory_order_relaxed); }
 void set_reverse_conditions(int misses, int laps) {
     g_reverse_misses.store(misses, std::memory_order_relaxed);
-    g_reverse_laps.store(laps, std::memory_order_relaxed);
+    g_reverse_laps.store(std::min(laps, kMostLaps), std::memory_order_relaxed);
 }
 void set_free_roam_look(int course) {
     if (std::getenv("WR64_FREE_ROAM_LOOK") == nullptr) g_look.store(course, std::memory_order_relaxed);
@@ -438,6 +445,9 @@ void free_roam_course_out_hook(uint8_t* rdram, recomp_context* ctx) {
             if (frames % 100 == 1) { set_word(rdram, record, test[0] + frames / 100); set_word(rdram, record + 0x308, 60); }
         }
     }
+    // Any other race: never more than kMostLaps (a CHANGE CONDITIONS of 10
+    // saved before they went to 9).
+    if (!roam && current_game_state() == 0x28 && word(rdram, kLapsToFinish) > kMostLaps) set_word(rdram, kLapsToFinish, kMostLaps);
     // A REVERSE championship's race (the flag D_800DAB68): its chosen misses
     // allowed (gBuoyMisses, 0x800D8174) and laps to finish.
     if (!roam && current_game_state() == 0x28 && word(rdram, kGameMode) == kChampionship &&
@@ -505,8 +515,8 @@ void free_roam_course_out_hook(uint8_t* rdram, recomp_context* ctx) {
 void test_place(uint8_t* rdram) {
     // WR64_FREE_ROAM_TEST_AT=<x>,<z>,<degrees>, in a scripted run only: the
     // jet ski moved there, turned to face that way (0 along +x, 90 along
-    // +z), for the first frames of a free roam -- for seeing a course's far
-    // parts in a test.
+    // +z), for the first frames of a race or free roam -- for seeing a
+    // course's far parts, or riding the same stretch in both, in a test.
     static float test_at[3] = { 0.0f, 0.0f, 0.0f };
     static const bool test = [] {
         const char* value = std::getenv("WR64_FREE_ROAM_TEST_AT");
@@ -514,7 +524,7 @@ void test_place(uint8_t* rdram) {
                std::sscanf(value, "%f,%f,%f", &test_at[0], &test_at[1], &test_at[2]) == 3;
     }();
     static int test_frames = 0;
-    if (test && free_roam_active(rdram) && test_frames < 90) {
+    if (test && current_game_state() == 0x28 && test_frames < 90) {
         ++test_frames;
         const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
         // The hull's heading from its points (the first three the bow's, the
@@ -559,6 +569,47 @@ void warm_up_pause(uint8_t* rdram) {
     last = at;
 }
 
+// Day and night (src/day_night.cpp): the race's look (0x801CB058, one for
+// each player's view), which the game reads every frame, blended between the
+// two looks either side of the hour: colours and fog distances mixed,
+// the two lights' directions turned from one to the other. The course's own
+// draw distances (+0xA0, +0xA4) are kept, and what isn't known yet (+0xA8,
+// +0xC4, +0xC8, +0x108, +0x10C) is the look's that the ride opened with,
+// whose sky was loaded.
+constexpr uint32_t kLookSize = 0x110;
+void day_frame(uint8_t* rdram, const uint8_t* original, int32_t course) {
+    constexpr uint32_t kRaceLook = 0x1CB058;
+    const day::Blend b = day::now();
+    const uint8_t* a = original + b.from * kLookSize;
+    const uint8_t* z = original + b.to * kLookSize;
+    const uint8_t* opened = original + day::start_look(course) * kLookSize;
+    uint8_t look[kLookSize];
+    for (uint32_t at = 0; at < kLookSize; at += 4) {
+        const bool real_number = (at >= 0xAC && at <= 0xB4) || (at >= 0xFC && at <= 0x104);
+        if (real_number) {
+            float p, q;
+            std::memcpy(&p, a + at, 4);
+            std::memcpy(&q, z + at, 4);
+            const float v = p + (q - p) * b.t;
+            std::memcpy(look + at, &v, 4);
+        } else {
+            int32_t p, q;
+            std::memcpy(&p, a + at, 4);
+            std::memcpy(&q, z + at, 4);
+            const int32_t v = int32_t(std::lround(p + (q - p) * double(b.t)));
+            std::memcpy(look + at, &v, 4);
+        }
+    }
+    std::memcpy(look + 0xA0, original + course * kLookSize + 0xA0, 8);
+    for (uint32_t at : { 0xA8u, 0xC4u, 0xC8u, 0x108u, 0x10Cu }) std::memcpy(look + at, opened + at, 4);
+    if (g_no_fog.load(std::memory_order_relaxed)) {
+        constexpr int32_t kPast[2] = { 1000, 1100 };
+        std::memcpy(look + 0x78, kPast, sizeof kPast);
+        std::memcpy(look + 0x98, kPast, sizeof kPast);
+    }
+    for (uint32_t view = 0; view < 2; ++view) std::memcpy(rdram + kRaceLook + view * kLookSize, look, kLookSize);
+}
+
 // The sky and water another course's. Each course's look -- its light, fog
 // and sky colours, fog distances and light's direction, 0x110 bytes -- sits
 // in a table (0x800D9964), and as a course loads the game copies its own into
@@ -584,7 +635,7 @@ void warm_up_pause(uint8_t* rdram) {
 // factor (0x1F400 over the span) is a 16-bit number, so the span is kept
 // wide.
 void free_roam_frame(uint8_t* rdram) {
-    constexpr uint32_t kLooks = 0x0D9964, kLookSize = 0x110, kSkies = 0x0DC0E4;
+    constexpr uint32_t kLooks = 0x0D9964, kSkies = 0x0DC0E4;
     constexpr int kCourses = 9;
     static uint8_t original[kCourses][kLookSize];
     static int32_t sky[kCourses];
@@ -601,11 +652,15 @@ void free_roam_frame(uint8_t* rdram) {
     // course loads; gGameModes is set from it as it does.
     const int32_t mode = word(rdram, 0x1CE608);
     const int chosen = g_look.load(std::memory_order_relaxed);
-    const bool swap = !front && g_on.load(std::memory_order_relaxed) && roam_mode(mode) &&
-                      chosen >= 0 && chosen < kCourses;
+    const bool roaming = !front && g_on.load(std::memory_order_relaxed) && roam_mode(mode);
+    const bool swap = roaming && chosen >= 0 && chosen < kCourses;
+    // Day and night: each course opens with its hour's look (and that look's
+    // sky), and the race's own copy is blended each frame (day_frame).
+    const bool day = roaming && day::enabled();
     for (int c = 0; c < kCourses; ++c) {
         uint8_t look[kLookSize];
-        std::memcpy(look, original[swap ? chosen : c], kLookSize);
+        const int from = day ? day::start_look(c) : swap ? chosen : c;
+        std::memcpy(look, original[from], kLookSize);
         std::memcpy(look + 0xA0, original[c] + 0xA0, 8);
         if (g_no_fog.load(std::memory_order_relaxed) && g_on.load(std::memory_order_relaxed) && !front) {
             constexpr int32_t kPast[2] = { 1000, 1100 };
@@ -615,10 +670,90 @@ void free_roam_frame(uint8_t* rdram) {
         if (std::memcmp(rdram + kLooks + uint32_t(c) * kLookSize, look, kLookSize) != 0) {
             std::memcpy(rdram + kLooks + uint32_t(c) * kLookSize, look, kLookSize);
         }
-        set_word(rdram, kSkies + uint32_t(c) * 4, sky[swap ? chosen : c]);
+        set_word(rdram, kSkies + uint32_t(c) * 4, sky[from]);
     }
-    g_look_now.store(swap && course >= 0 && course < kCourses ? chosen : -1, std::memory_order_relaxed);
+    g_look_now.store(swap && !day && course >= 0 && course < kCourses ? chosen : -1, std::memory_order_relaxed);
+    const bool paused = *reinterpret_cast<const int16_t*>(rdram + ((kPauseRow ^ 2) & 0x7FFFFF)) != -1;
+    day::frame(day && state == 0x28 && course >= 0 && course < kCourses, paused, course);
+    if (day::active()) {
+        day_frame(rdram, &original[0][0], course);
+        day::sky_frame(rdram, sky, day::start_look(course));
+    }
     if (state == 0x28) test_place(rdram);
+    // WR64_LAP_LOG=1: each rider's lap (race record +0) and the HUD's lap
+    // (+0x320) whenever either changes, with the laps to finish, the buoy the
+    // arrow points at next (+0x0C), the line-side flag (+0x324) and where the
+    // rider is.
+    static const bool lap_log = env_on("WR64_LAP_LOG");
+    static bool lap_log_racing = false;
+    static int lap_log_frames = 0;
+    if (lap_log && state != 0x28 && lap_log_racing) {
+        lap_log_racing = false;
+        lap_log_frames = 0;
+        std::fprintf(stderr, "[wr64] laps: the race is over\n");
+    }
+    if (lap_log && state == 0x28) {
+        lap_log_racing = true;
+        // Once a race: how laps are counted (D_800D8178 chooses between the
+        // game's two ways), the mode and course; then each time the human's
+        // line-side flag (+0x324) flips, where.
+        const uint32_t human = kRaceRecords + uint32_t(word(rdram, kHumanSlot)) * kRaceRecordSize;
+        static int32_t flag = -2;
+        if (lap_log_frames++ == 0) {
+            flag = -2;
+            std::fprintf(stderr, "[wr64] laps: a race on course %d, mode %d, difficulty %d, counting %d, laps %d\n", word(rdram, kCourse),
+                         word(rdram, kGameMode), word(rdram, kDifficulty), word(rdram, 0x0D8178), word(rdram, kLapsToFinish));
+            std::fprintf(stderr, "[wr64] laps: conditions %d %d %d / %d %d %d / %d %d %d\n", word(rdram, 0x1CB308),
+                         word(rdram, 0x1CB30C), word(rdram, 0x1CB310), word(rdram, 0x1CB314), word(rdram, 0x1CB318),
+                         word(rdram, 0x1CB31C), word(rdram, 0x1CB320), word(rdram, 0x1CB324), word(rdram, 0x1CB328));
+        }
+        if (word(rdram, human + 0x324) != flag) {
+            flag = word(rdram, human + 0x324);
+            const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
+            std::fprintf(stderr, "[wr64] laps: the human's line flag %d at %.0f %.0f, lap %d, HUD %d, next buoy %d\n", flag,
+                         real(rdram, rider + 0x44), real(rdram, rider + 0x4C), word(rdram, human), word(rdram, human + 0x320),
+                         word(rdram, human + 0x0C));
+        }
+        static int32_t seen[4][2] = {};
+        for (uint32_t slot = 0; slot < 4; ++slot) {
+            const uint32_t record = kRaceRecords + slot * kRaceRecordSize;
+            const int32_t lap = word(rdram, record), hud = word(rdram, record + 0x320);
+            if (lap != seen[slot][0] || hud != seen[slot][1]) {
+                seen[slot][0] = lap;
+                seen[slot][1] = hud;
+                const uint32_t rider = kRiders + slot * kRiderSize;
+                std::fprintf(stderr, "[wr64] laps: rider %u lap %d, HUD %d, of %d, next buoy %d, flag %d, at %.0f %.0f (human slot %d)\n",
+                             slot, lap, hud, word(rdram, kLapsToFinish), word(rdram, record + 0x0C),
+                             word(rdram, record + 0x324), real(rdram, rider + 0x44), real(rdram, rider + 0x4C),
+                             word(rdram, kHumanSlot));
+            }
+        }
+    }
+    // WR64_POSITION_LOG=1: the human's jet ski five times a second in a race
+    // -- the clock time (to the millisecond, to match screenshots by), the
+    // course, where, how high, its speed (+0x68) and which way its velocity
+    // goes -- for finding, from a play-test, what it ran into.
+    static const bool position_log = env_on("WR64_POSITION_LOG");
+    if (position_log && state == 0x28) {
+        static int frames = 0;
+        if (frames++ % 6 == 0) {
+            const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
+            const auto now = std::chrono::system_clock::now().time_since_epoch();
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+            const float vx = real(rdram, rider + 0x50), vz = real(rdram, rider + 0x58);
+            std::fprintf(stderr, "[wr64] position: %lld course %d at %.0f %.0f %.0f, speed %.1f, heading %.0f\n", ms,
+                         word(rdram, kCourse), real(rdram, rider + 0x44), real(rdram, rider + 0x48), real(rdram, rider + 0x4C),
+                         real(rdram, rider + 0x68), std::atan2(vz, vx) * 57.29578f);
+        }
+    }
+    // WR64_TEST_AUTOPILOT=1, in a scripted run only: the human's rider driven
+    // by the game's computer (its +0x1446 negative, as a computer's rider's:
+    // func_80061708), everything else about it still the human's.
+    static const bool autopilot = env_on("WR64_TEST_AUTOPILOT") && std::getenv("WR64_INPUT_SCRIPT") != nullptr;
+    if (autopilot && state == 0x28) {
+        const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
+        *reinterpret_cast<int16_t*>(rdram + ((rider + 0x1446) ^ 2)) = -1;
+    }
     warm_up_pause(rdram);
     if (state != 0x28) g_music_started.store(false, std::memory_order_relaxed);
 }

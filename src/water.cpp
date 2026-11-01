@@ -1,4 +1,5 @@
 #include "wr64/water.h"
+#include "wr64/day_night.h"
 #include "wr64/water_shore.h"
 #include "wr64/vr.h"
 #include <atomic>
@@ -319,6 +320,20 @@ void publish_frame(const uint8_t *rdram, uint32_t display_list) {
     }
     previousTick = tick; previousCourse = course;
     interop::WaterMaterial frame = profiles[std::min(look_course(course),9u)];
+    // Day and night in a free roam: the two looks either side of the hour, blended.
+    if (wr64::day::active()) {
+        const wr64::day::Blend b=wr64::day::now();
+        const interop::WaterMaterial& from=profiles[std::min(uint32_t(b.from),9u)];
+        const interop::WaterMaterial& to=profiles[std::min(uint32_t(b.to),9u)];
+        frame=from;
+        auto mix=[&](interop::float4 interop::WaterMaterial::*part) {
+            const interop::float4 &p=from.*part, &q=to.*part;
+            frame.*part={p.x+(q.x-p.x)*b.t,p.y+(q.y-p.y)*b.t,p.z+(q.z-p.z)*b.t,p.w+(q.w-p.w)*b.t};
+        };
+        for (auto part : {&interop::WaterMaterial::deepColor,&interop::WaterMaterial::shallowColor,
+                          &interop::WaterMaterial::sunDirection,&interop::WaterMaterial::sunColor,
+                          &interop::WaterMaterial::skyColor}) mix(part);
+    }
     frame.animation.x = previousTime; frame.animation.y = currentTime;
     frame.identity = {float(uint32_t(quality())),float(debugView.load()),float(course),float(generation)};
     frame.surface.x = float(int32_t(word(rdram,0x80192458)));

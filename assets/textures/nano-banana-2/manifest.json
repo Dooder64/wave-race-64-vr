@@ -3,10 +3,10 @@
   "name": "Wave Race 64 HD texture pack",
   "pack_id": "nano-banana-2",
   "hash_version": 5,
-  "mapping_count": 1887,
-  "image_count": 1865,
-  "database_sha256": "0eaf41e838796ddf7c200b1952f11cf0024dc79cb9465893896faa37338bdae8",
-  "total_image_bytes": 130572498,
+  "mapping_count": 1888,
+  "image_count": 1866,
+  "database_sha256": "b1f1d27b2ca2dc0349324d99ac306ee2f527f0cd26e6db1d1ef4b38dcd8bd420",
+  "total_image_bytes": 130577111,
   "credits_file": "CREDITS.md",
   "summary": [
     "Reviewed Nano Banana 2 texture replacements with source-preserving fallbacks for rejected candidates.",
@@ -6744,6 +6744,14 @@
       "width": 2048,
       "height": 16,
       "mip_levels": 12
+    },
+    {
+      "path": "textures/76543d06ba207a634be9ff05fd5562b98e31bf6913338b49ee9a90477bcabbf5.png",
+      "sha256": "76543d06ba207a634be9ff05fd5562b98e31bf6913338b49ee9a90477bcabbf5",
+      "bytes": 4613,
+      "width": 384,
+      "height": 40,
+      "mip_levels": 1
     },
     {
       "path": "textures/76567dccc9d591171ad4514310e75b1946508510419d808cfe9e97eaad4b864e.png",

@@ -493,14 +493,50 @@ full stops. Colour comes from `func_801E946C`'s style: 0 white, 3 and 5
 yellow, 4 red, 6 green, 7 grey (its 12 tint values don't tint this
 lettering). Scaled, a string's y is about 17 pixels above where it lands.
 
-### Lap message past 3 laps (known issue)
+### Lap message past 3 laps
 
 With more laps than 3, the message on crossing the line ("LAP n", from the
 lap counter at race record `+0x0`, drawn by `func_801FAEB8` with font 0) was
 seen in play showing the wrong number (LAP 8 on lap 4 of a 10-lap Reverse
-race). Forced tests show the counter and its digits drawn correctly, so the
-cause is still unknown. `WR64_LAP_TEST=<lap>,<laps>` (scripted runs) forces
-a race's lap counter and shows the message.
+race), while the HUD's LAP (`+0x320`) was right. The game sets the two
+together as a lap is counted (`0x80077A38`, `0x8007940C`), but `+0x320`
+alone goes back one when the line is crossed the wrong way and on again
+when it is recrossed (`0x80077C90`). A 10-lap Reverse race of computer
+riders logged with `WR64_LAP_LOG=1` kept all their counters in step, so
+something a human rider does parts them. The message now shows the HUD's
+lap (`patches/lap_message.cpp`, registered over the function in
+`src/overlays.cpp`; checked with `WR64_LAP_TEST=8,10`, which parts them on
+purpose). Not known: whether a counter run ahead could end a race early,
+since the race ends on `+0x0`.
+
+Play-test (2026-11-01, Expert Championship, 10 laps): the HUD's lap
+flickered back a lap mid-lap now and then, the message ran ahead (LAP 4 on
+lap 3, LAP 6 on lap 4, LAP 7 on lap 5) and the race ended after lap 7 or 8:
+so `+0x0` does run ahead of `+0x320` and ends races early. The human's line
+flag (`+0x324`) flips mid-lap on Sunny Beach too (near buoy 36), as the
+HUD's flicker suggests; the computer's riders (and the human's rider driven
+by the computer, `WR64_TEST_AUTOPILOT=1`) count true. Championship counts
+with `D_800D8178` = 0. The game's own lap-time sum allows at most 9 laps
+(`0x80077960`: `slti $at, $a1, 0xA`). `WR64_LAP_LOG=1` now logs each race's
+course, mode, difficulty, counting mode and conditions, every change of the
+human's line flag, and every rider's counters, for a play-test to find
+where `+0x0` gains.
+
+Resolved (2026-11-01). A logged 5-lap Reverse race kept `+0x0` and `+0x320`
+in step from 1 to 5, and ended after 5, yet the HUD's LAP showed 1 and 2 by
+turns. Two causes:
+- **The HUD's LAP** (drawn by codeseg `0x801F5240`: the smaller of `+0x0` and
+  the laps to finish, its last digit from the speed's digit pictures,
+  `0x0103D8D8`) was read as part of the speed by the port's miles-an-hour
+  rewrite (`src/speed_units.cpp`), which took every digit right of x 158: in
+  Championship the LAP digit is drawn at x 192, the speed's at 225, 241 and
+  257, so lap 3 at 85 km/h read "385" and the LAP showed the first digit of
+  239 mph. Only the run of digits side by side at the right is the speed's
+  now (`WR64_SPEED_LOG=1` logs which).
+- **Ten laps** are more than the game keeps: its lap times stop at nine
+  (`0x80077960`), and the ten-lap race's counter ran ahead and ended it
+  early. Laps go to 9 now (the page, the Races tab, and any 10 saved before,
+  held to 9 in races).
 
 ### Still to find (later steps, not menus)
 

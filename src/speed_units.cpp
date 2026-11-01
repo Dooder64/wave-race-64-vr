@@ -141,6 +141,24 @@ void scan(uint8_t* rdram, uint32_t list) {
     }
     if (slots.empty()) return;
     std::sort(slots.begin(), slots.end(), [](const Slot& a, const Slot& b) { return a.left < b.left; });
+    // Only the speed's own: the run of digits side by side at the right
+    // (each a digit's width on from the last). The lap's digit, of the same
+    // pictures and in Championship drawn at x 192 and more (0xC0 on from the
+    // HUD's own offset), stands apart from them -- read in with them, the
+    // lap 3 at 85 km/h was "385", and the LAP shown the first digit of 239
+    // mph.
+    size_t first = slots.size() - 1;
+    while (first > 0 && slots[first].left - slots[first - 1].left <= 20) --first;
+    static const bool log = std::getenv("WR64_SPEED_LOG") != nullptr;
+    if (log) {
+        static int frames = 0;
+        if (frames++ % 60 == 0) {
+            std::fprintf(stderr, "[wr64] speed digits at");
+            for (size_t i = 0; i < slots.size(); ++i) std::fprintf(stderr, " %u%s", slots[i].left, i < first ? " (not the speed's)" : "");
+            std::fprintf(stderr, "\n");
+        }
+    }
+    slots.erase(slots.begin(), slots.begin() + std::ptrdiff_t(first));
     int kilometres = 0;
     for (const Slot& s : slots) kilometres = kilometres * 10 + s.digit;
     int miles = int(std::lround(kilometres * 0.621371));

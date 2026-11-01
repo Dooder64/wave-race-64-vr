@@ -44,10 +44,19 @@
 // 0x800 b, its chunk unpacked at kModel; the pair's in the area at
 // kPairArea (kSlots), with their spray; each chunk read at kPacked first.
 //
+// What each does, and when, is up to a mind of its own (src/rider_minds.cpp):
+// the first rider and the pair each have a personality -- a daredevil, a
+// sightseer, a social rider, a loner, a show-off, a practiser -- and wants
+// that rise and fall, and when one tires of what it is doing it picks again:
+// its routes and routines as above, or riding along with the player for a
+// while (Follow), drifting somewhere quiet (Rest), or, having seen the
+// player's big air, going over to watch (Watch).
+//
 // WR64_COMPANIONS=0 leaves the park to the player; WR64_COMPANION_LOG=1
 // reports where it is now and then.
 
 #include "recomp.h"
+#include "wr64/rider_minds.h"
 
 #include <algorithm>
 #include <atomic>
@@ -58,6 +67,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -377,6 +387,9 @@ float face_height(float x) {
 // checkpoints' order, through the rings and over every ramp (kPractice).
 enum class Routine { Stunts, Lap, Practice };
 enum class Crash { None, Thrown, Waiting };
+// Off its routes, as its mind chooses: riding along with the player, gone
+// somewhere quiet to rest, or gone to watch something.
+enum class Free { None, Follow, Rest, Watch };
 struct Drive {
     std::chrono::steady_clock::time_point last{}, change_at{}, crash_at{};
     Routine routine = Routine::Stunts;
@@ -388,7 +401,35 @@ struct Drive {
     int stunt = 0;
     Crash crash = Crash::None;
     float body_x = 0, body_y = 0, body_z = 0, body_hx = 1, body_hz = 0, body_spin = 0, body_rise = 0, body_speed = 0;
+    Free free = Free::None;
+    float spot_x = 0, spot_z = 0, look_x = 0, look_z = 0, side = 1;
+    bool parked = false;
 } g_drive;
+
+// The player, read from its rider each frame: where, how fast and which way
+// it goes, how high above the water, and whether its big air has been
+// noticed yet.
+struct Player {
+    bool known = false;
+    float x = 0, y = 0, z = 0, speed = 0, heading = 0, height = 0;
+    bool aloft = false;
+} g_player;
+
+// The minds: the first rider's, and the pair's (they go everywhere together).
+minds::Mind g_minds[2];
+double seconds(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration<double>(t.time_since_epoch()).count();
+}
+
+void log_mind(const char* who, const minds::Mind& m) {
+    static const bool log = std::getenv("WR64_COMPANION_LOG") != nullptr;
+    if (!log) return;
+    std::fprintf(stderr, "[wr64-companion] mind: %s (%s) goes for %s for %.0f s; wants thrill %.2f sights %.2f company %.2f "
+                 "show-off %.2f rest %.2f curiosity %.2f\n", who, m.who->name, minds::name(m.doing), m.until - m.since,
+                 m.want[minds::kThrill], m.want[minds::kSights], m.want[minds::kCompany], m.want[minds::kShowOff],
+                 m.want[minds::kRest], m.want[minds::kCuriosity]);
+    std::fflush(stderr);
+}
 
 constexpr float kLookahead = 900.0f, kTurnRate = 1.1f, kAccel = 450.0f, kSample = 50.0f;
 constexpr float kLapRadius = 7000.0f;
@@ -504,6 +545,11 @@ void start_drive(std::chrono::steady_clock::time_point now) {
     d.last = now;
     d.routine = g_stunt ? Routine::Practice : Routine::Stunts;
     d.change_at = now + routine_length();
+    // Its mind: already out on its first routine a while.
+    minds::start(g_minds[0], minds::test_personality(0), chance(), seconds(now));
+    g_minds[0].doing = g_stunt ? minds::Activity::Practice : minds::Activity::Stunts;
+    g_minds[0].until = seconds(now) + std::chrono::duration<double>(routine_length()).count() * 0.5;
+    log_mind("the first rider", g_minds[0]);
     if (g_stunt) {
         // A third of the way round the lap, out of the way of the player's start.
         const auto& points = route(Routine::Practice);
@@ -515,6 +561,113 @@ void start_drive(std::chrono::steady_clock::time_point now) {
     }
     const Track t = track(0.0f);
     d.x = t.x; d.z = t.z; d.heading = std::atan2(t.hz, t.hx); d.speed = kSpeed;
+}
+
+const std::vector<Obstacle>& fixed_obstacles();
+// A quiet place to rest, away from the player and from wherever the pair
+// are: a sight's spot, and which way to face there.
+void rest_spot(float& x, float& z, float& look_x, float& look_z);
+
+
+// A place `distance` from (x, z), towards (from_x, from_z).
+std::pair<float, float> toward(float x, float z, float from_x, float from_z, float distance) {
+    const float dx = from_x - x, dz = from_z - z, length = std::max(1.0f, std::hypot(dx, dz));
+    return { x + dx / length * distance, z + dz / length * distance };
+}
+
+// The first rider starting activity `a`.
+void begin_first(Drive& d, minds::Activity a) {
+    d.free = Free::None;
+    d.parked = false;
+    switch (a) {
+    case minds::Activity::Stunts: d.routine = Routine::Stunts; d.nearest = -1; break;
+    case minds::Activity::Practice: d.routine = Routine::Practice; d.nearest = -1; break;
+    case minds::Activity::Follow:
+        d.free = Free::Follow;
+        d.side = chance()() % 2u ? 1.0f : -1.0f;
+        break;
+    case minds::Activity::Rest:
+        d.free = Free::Rest;
+        rest_spot(d.spot_x, d.spot_z, d.look_x, d.look_z);
+        break;
+    case minds::Activity::Watch: {
+        const minds::Interest& w = g_minds[0].watching;
+        d.free = Free::Watch;
+        std::tie(d.spot_x, d.spot_z) = toward(w.x, w.z, d.x, d.z, 1000.0f);
+        d.look_x = w.x;
+        d.look_z = w.z;
+        break;
+    }
+    default: d.routine = Routine::Lap; d.nearest = -1; break;
+    }
+}
+
+// Time for something else: the first rider's mind chooses.
+void choose_first(Drive& d, double t) {
+    minds::Options o;
+    o.open = g_stunt ? std::vector<minds::Activity>{ minds::Activity::Practice, minds::Activity::Follow, minds::Activity::Rest }
+                     : std::vector<minds::Activity>{ minds::Activity::Stunts, minds::Activity::Lap, minds::Activity::Follow,
+                                                     minds::Activity::Rest };
+    o.player_distance = g_player.known ? std::hypot(g_player.x - d.x, g_player.z - d.z) : -1.0f;
+    o.player_moving = g_player.speed > 200.0f;
+    begin_first(d, minds::choose(g_minds[0], o, chance(), t));
+    log_mind("the first rider", g_minds[0]);
+}
+
+// The first rider off its routes: alongside the player, a little behind,
+// matching its speed; or to a spot to rest or watch from, slowing to a stop
+// there and turning to face what it came for (the player, if it is
+// watching the player).
+void free_ride(Drive& d, float water, float dt, const std::vector<Obstacle>& player) {
+    const Player& pl = g_player;
+    std::vector<Obstacle> obstacles = fixed_obstacles();
+    float tx = d.spot_x, tz = d.spot_z, top = 900.0f;
+    if (d.free == Free::Follow) {
+        const float fx = std::cos(pl.heading), fz = std::sin(pl.heading);
+        const float slot_x = pl.x - fz * d.side * 380.0f - fx * 250.0f, slot_z = pl.z + fx * d.side * 380.0f - fz * 250.0f;
+        tx = slot_x + fx * 400.0f;
+        tz = slot_z + fz * 400.0f;
+        const float ahead = (slot_x - d.x) * std::cos(d.heading) + (slot_z - d.z) * std::sin(d.heading);
+        top = std::clamp(pl.speed + 1.2f * ahead, 250.0f, 1300.0f);
+        obstacles.push_back({ pl.x, pl.z, 260.0f, true });
+    }
+    else {
+        obstacles.insert(obstacles.end(), player.begin(), player.end());
+        if (d.free == Free::Watch && pl.known && std::hypot(pl.x - g_minds[0].watching.x, pl.z - g_minds[0].watching.z) < 3000.0f) {
+            d.look_x = pl.x;
+            d.look_z = pl.z;
+        }
+        const float left = std::hypot(tx - d.x, tz - d.z);
+        if (!d.parked && left < 150.0f) d.parked = true;
+        top = std::min(900.0f, std::max(200.0f, left * 0.9f));
+    }
+    float want_heading;
+    if (d.parked) {
+        // Coming to rest, turning slowly to face what it came for.
+        d.speed = std::max(0.0f, d.speed - 500.0f * dt);
+        want_heading = std::atan2(d.look_z - d.z, d.look_x - d.x);
+        const float diff = std::remainder(want_heading - d.heading, 6.2831853f);
+        const float step = std::clamp(diff, -0.4f * dt, 0.4f * dt);
+        d.heading = std::remainder(d.heading + step, 6.2831853f);
+        d.turning += ((dt > 0.0f ? step / dt : 0.0f) - d.turning) * std::min(1.0f, 6.0f * dt);
+    }
+    else {
+        const Avoid av = avoid(d.x, d.z, d.heading, d.speed, obstacles);
+        want_heading = std::atan2(tz - d.z, tx - d.x) + av.turn;
+        const float diff = std::remainder(want_heading - d.heading, 6.2831853f);
+        const float step = std::clamp(diff, -1.6f * dt, 1.6f * dt);
+        d.heading = std::remainder(d.heading + step, 6.2831853f);
+        d.turning += ((dt > 0.0f ? step / dt : 0.0f) - d.turning) * std::min(1.0f, 6.0f * dt);
+        const float wanted = top * av.slow * (std::fabs(diff) > 1.0f ? 0.6f : 1.0f);
+        d.speed = d.speed < wanted ? std::min(wanted, d.speed + kAccel * dt) : std::max(wanted, d.speed - 700.0f * dt);
+    }
+    d.x += std::cos(d.heading) * d.speed * dt;
+    d.z += std::sin(d.heading) * d.speed * dt;
+    d.bank = g_pose.x_right * kLean * std::clamp(d.turning * d.speed / (kSpeed * kSpeed / kRadius), -1.0f, 1.0f);
+    d.flip = 0.0f;
+    d.on_ramp = false;
+    d.y = water;
+    d.climb = 0.0f;
 }
 
 // A hull's frame: at (x, y, z), heading (hx, hz), pitched up by `pitch`,
@@ -547,18 +700,10 @@ void drive(uint32_t segment3, std::chrono::steady_clock::time_point now, float d
     static const bool log = std::getenv("WR64_COMPANION_LOG") != nullptr;
     const float water = water_height_at(segment3, d.x, d.z);
 
-    // Time for the other routine: changed where the two meet.
-    if (!d.change && now >= d.change_at && d.routine != Routine::Practice) d.change = true;
-    if (d.change && !d.airborne && d.crash == Crash::None && d.x > 4300.0f && d.z > 3000.0f && d.z < 6300.0f) {
-        d.change = false;
-        d.routine = d.routine == Routine::Stunts ? Routine::Lap : Routine::Stunts;
-        d.nearest = -1;
-        d.change_at = now + routine_length();
-        if (log) {
-            std::fprintf(stderr, "[wr64-companion] off on %s\n", d.routine == Routine::Stunts ? "a stunt run" : "a lap of the park");
-            std::fflush(stderr);
-        }
-    }
+    // Time for something else, as its mind sees it (not mid-jump).
+    const double t = seconds(now);
+    minds::feel(g_minds[0], t, dt);
+    if (!d.airborne && d.crash == Crash::None && !d.on_ramp && minds::restless(g_minds[0], t)) choose_first(d, t);
 
     // A bail: the rider thrown off ahead, then under, then back on.
     if (d.crash != Crash::None) {
@@ -625,6 +770,12 @@ void drive(uint32_t segment3, std::chrono::steady_clock::time_point now, float d
                 d.bank = d.flip = 0.0f;
             }
         }
+        return;
+    }
+
+    // Off its routes.
+    if (d.free != Free::None) {
+        free_ride(d, water, dt, obstacles);
         return;
     }
 
@@ -748,7 +899,7 @@ void drive(uint32_t segment3, std::chrono::steady_clock::time_point now, float d
 // the player, and -- only once very near -- each other. (Not on the run at
 // the ramp: they hold their lanes.)
 
-enum class PairRoutine { Sights, Weave, Trick };
+enum class PairRoutine { Sights, Weave, Trick, Follow, Watch };
 enum class TrickStep { Gather, Wait, Run };
 struct Rider {
     float x = 0, y = 0, z = 0, heading = 0, speed = 0, turning = 0, bank = 0, climb = 0;
@@ -773,6 +924,9 @@ struct Pair {
     float side = 1.0f;      // on the way, which side of the first the second rides
                             // (+1 the side its heading turns towards)
     float along = 0;        // on the weave: the formation's place round its loop
+    bool resting = false;   // at a sight to rest, staying as long as its mind wants
+    float watch_x = 0, watch_z = 0;   // watching: what, and from where
+    float spot_x = 0, spot_z = 0;
     Rider riders[2];
 } g_pair;
 
@@ -942,6 +1096,26 @@ void log_pair(const char* what) {
     std::fflush(stderr);
 }
 
+// Whether sight `sight` is there to see: in Stunt Mode the park's ramps are not.
+bool sight_there(int sight);
+
+void rest_spot(float& x, float& z, float& look_x, float& look_z) {
+    float best = -1.0f;
+    for (int s = 0; s < kSightCount; ++s) {
+        if (!sight_there(s) || s == g_pair.sight) continue;
+        const Spot spot = sight_spot(s, 0);
+        const float away = g_player.known ? std::hypot(spot.x - g_player.x, spot.z - g_player.z) : 0.0f;
+        const float score = away + float(chance()() % 2000u);
+        if (score > best) {
+            best = score;
+            x = spot.x - spot.fx * 300.0f;
+            z = spot.z - spot.fz * 300.0f;
+            look_x = kSights[s].look_x;
+            look_z = kSights[s].look_z;
+        }
+    }
+}
+
 // Off to sight `sight`: each to the place there on its own side, and the
 // second riding beside the first on that side.
 void head_for(Pair& p, int sight, std::chrono::steady_clock::time_point now) {
@@ -1003,23 +1177,47 @@ void start_trick(Pair& p, std::chrono::steady_clock::time_point now) {
     log_pair("off to jump the other ramp together");
 }
 
-// One of the two routines they are not on, by chance.
+// Watching: side by side, some way off what caught their eye, facing it.
+void start_watch(Pair& p) {
+    p.routine = PairRoutine::Watch;
+    const minds::Interest& w = g_minds[1].watching;
+    p.watch_x = w.x;
+    p.watch_z = w.z;
+    const float mx = (p.riders[0].x + p.riders[1].x) / 2.0f, mz = (p.riders[0].z + p.riders[1].z) / 2.0f;
+    std::tie(p.spot_x, p.spot_z) = toward(w.x, w.z, mx, mz, 1100.0f);
+    for (Rider& r : p.riders) r.near = r.stopped = false;
+    log_pair("off to watch the player");
+}
+
+// What next, as their mind chooses (in Stunt Mode, no trick: its ramp is
+// not there; a rest is a long stop at a sight).
 void next_routine(Pair& p, std::chrono::steady_clock::time_point now) {
     p.change = false;
-    PairRoutine next[2];
-    int n = 0;
-    for (PairRoutine r : { PairRoutine::Sights, PairRoutine::Weave, PairRoutine::Trick }) {
-        // (In Stunt Mode, no trick: its ramp is not there.)
-        if (r != p.routine && !(g_stunt && r == PairRoutine::Trick)) next[n++] = r;
-    }
-    switch (next[chance()() % uint32_t(n)]) {
-    case PairRoutine::Sights:
+    minds::Options o;
+    o.open = { minds::Activity::Sights, minds::Activity::Weave, minds::Activity::Follow, minds::Activity::Rest };
+    if (!g_stunt) o.open.push_back(minds::Activity::Trick);
+    const float mx = (p.riders[0].x + p.riders[1].x) / 2.0f, mz = (p.riders[0].z + p.riders[1].z) / 2.0f;
+    o.player_distance = g_player.known ? std::hypot(g_player.x - mx, g_player.z - mz) : -1.0f;
+    o.player_moving = g_player.speed > 200.0f;
+    const minds::Activity a = minds::choose(g_minds[1], o, chance(), seconds(now));
+    log_mind("the pair", g_minds[1]);
+    p.resting = false;
+    switch (a) {
+    case minds::Activity::Rest:
+        p.resting = true;
+        [[fallthrough]];
+    case minds::Activity::Sights:
         p.routine = PairRoutine::Sights;
         p.change_at = now + pair_routine_length();
         pick_sight(p, now);
         break;
-    case PairRoutine::Weave: start_weave(p, now); break;
-    case PairRoutine::Trick: start_trick(p, now); break;
+    case minds::Activity::Weave: start_weave(p, now); break;
+    case minds::Activity::Trick: start_trick(p, now); break;
+    case minds::Activity::Follow:
+        p.routine = PairRoutine::Follow;
+        log_pair("off to ride along with the player");
+        break;
+    default: start_weave(p, now); break;
     }
 }
 
@@ -1027,6 +1225,11 @@ void start_pair(std::chrono::steady_clock::time_point now) {
     Pair& p = g_pair;
     p = Pair{};
     p.change_at = now + pair_routine_length();
+    // Their mind: already stopped at a sight a while.
+    minds::start(g_minds[1], minds::test_personality(1), chance(), seconds(now));
+    g_minds[1].doing = minds::Activity::Sights;
+    g_minds[1].until = seconds(now) + std::chrono::duration<double>(pair_routine_length()).count() * 0.5;
+    log_mind("the pair", g_minds[1]);
     // WR64_COMPANION_TEST_PAIR=weave, in a scripted run only: weaving from
     // the start, instead of stopped at a sight.
     static const bool weave = [] {
@@ -1157,9 +1360,10 @@ void ride_sights(Pair& p, std::chrono::steady_clock::time_point now, float dt, c
     }
     if (travel(p, dt, obstacles)) {
         p.parked = true;
-        p.leave_at = now + std::chrono::milliseconds(int(uniform(10.0f, 30.0f) * 1000.0f));
+        const double rest = g_minds[1].until - seconds(now);
+        p.leave_at = now + std::chrono::milliseconds(int((p.resting ? std::max(5.0, rest) : double(uniform(10.0f, 30.0f))) * 1000.0));
         char what[96];
-        std::snprintf(what, sizeof what, "stopped to look at %s", sight.name);
+        std::snprintf(what, sizeof what, p.resting ? "stopped to rest by %s" : "stopped to look at %s", sight.name);
         log_pair(what);
     }
 }
@@ -1380,12 +1584,46 @@ void ride_trick(Pair& p, uint32_t segment3, std::chrono::steady_clock::time_poin
     }
 }
 
+// Riding along with the player, one either side of it, a little behind,
+// matching its speed; or watching: side by side, some way off, stopping and
+// turning to face the player.
+void ride_along(Pair& p, std::chrono::steady_clock::time_point now, float dt, const std::vector<Obstacle> obstacles[2]) {
+    if (p.change || !g_player.known) {
+        next_routine(p, now);
+        return;
+    }
+    const Player& pl = g_player;
+    const float fx = std::cos(pl.heading), fz = std::sin(pl.heading);
+    for (int i = 0; i < 2; ++i) {
+        Rider& r = p.riders[i];
+        const float side = i == 0 ? -1.0f : 1.0f;
+        if (p.routine == PairRoutine::Follow) {
+            const float slot_x = pl.x - fz * side * 420.0f - fx * 300.0f, slot_z = pl.z + fx * side * 420.0f - fz * 300.0f;
+            const float ahead = (slot_x - r.x) * std::cos(r.heading) + (slot_z - r.z) * std::sin(r.heading);
+            std::vector<Obstacle> near = fixed_obstacles();
+            near.push_back({ pl.x, pl.z, 260.0f, true });
+            near.push_back({ p.riders[1 - i].x, p.riders[1 - i].z, 180.0f, false });
+            steer(r, slot_x + fx * 400.0f, slot_z + fz * 400.0f, std::clamp(pl.speed + 1.2f * ahead, 250.0f, 1300.0f), dt, near);
+            continue;
+        }
+        // Watching: abreast across the line to what they watch.
+        const float lx = p.watch_x - p.spot_x, lz = p.watch_z - p.spot_z, length = std::max(1.0f, std::hypot(lx, lz));
+        const float sx = p.spot_x - lz / length * side * kAbreast / 2.0f, sz = p.spot_z + lx / length * side * kAbreast / 2.0f;
+        const float left = std::hypot(sx - r.x, sz - r.z);
+        if (!r.stopped && left < 150.0f) r.stopped = true;
+        const bool there = std::hypot(pl.x - p.watch_x, pl.z - p.watch_z) < 3000.0f;
+        if (r.stopped) settle(r, there ? pl.x : p.watch_x, there ? pl.z : p.watch_z, dt);
+        else steer(r, sx, sz, std::min(kPairSpeed, std::max(200.0f, left * 0.9f)), dt, obstacles[i]);
+    }
+}
+
 // The pair's riding this frame: `player` and `first` where the player and
 // the first rider are, if they are about.
 void ride_pair(uint32_t segment3, std::chrono::steady_clock::time_point now, float dt,
                const Obstacle* player, const Obstacle* first) {
     Pair& p = g_pair;
-    if (p.routine != PairRoutine::Trick && now >= p.change_at) p.change = true;
+    minds::feel(g_minds[1], seconds(now), dt);
+    if (p.routine != PairRoutine::Trick && minds::restless(g_minds[1], seconds(now))) p.change = true;
     std::vector<Obstacle> obstacles[2];
     for (int i = 0; i < 2; ++i) {
         obstacles[i] = fixed_obstacles();
@@ -1399,10 +1637,80 @@ void ride_pair(uint32_t segment3, std::chrono::steady_clock::time_point now, flo
         return;
     }
     if (p.routine == PairRoutine::Sights) ride_sights(p, now, dt, obstacles);
+    else if (p.routine == PairRoutine::Follow || p.routine == PairRoutine::Watch) ride_along(p, now, dt, obstacles);
     else ride_weave(p, now, dt, obstacles);
     for (Rider& r : p.riders) {
         r.y = water_height_at(segment3, r.x, r.z);
         r.climb = 0.0f;
+    }
+}
+
+// The player this frame, from its rider (the human's slot, D_800D48DC; its
+// place at +0x44): how fast and which way it goes, measured from frame to
+// frame, and its height above the water. Its big air -- more than 160 units
+// up -- is news (an Interest), which each mind may go and watch.
+void note_player(const uint8_t* rdram, uint32_t segment3, float dt, std::chrono::steady_clock::time_point now) {
+    const uint32_t slot = word_at(rdram, 0x0D48DC);
+    if (slot > 3) return;
+    const uint32_t rider = 0x192690 + slot * 0x1718;
+    auto real = [&](uint32_t a) { float v; const uint32_t w = word_at(rdram, rider + a); std::memcpy(&v, &w, 4); return v; };
+    const float x = real(0x44), y = real(0x48), z = real(0x4C);
+    if (!std::isfinite(x) || !std::isfinite(z)) return;
+    Player& pl = g_player;
+    if (pl.known && dt > 0.0f) {
+        const float moved = std::hypot(x - pl.x, z - pl.z);
+        if (moved < 200.0f) {
+            pl.speed += (moved / dt - pl.speed) * std::min(1.0f, 4.0f * dt);
+            if (moved > 1.0f) pl.heading = std::atan2(z - pl.z, x - pl.x);
+        }
+    }
+    pl.known = true;
+    pl.x = x; pl.y = y; pl.z = z;
+    pl.height = y - water_height_at(segment3, x, z);
+    if (pl.height < 40.0f) pl.aloft = false;
+    // WR64_COMPANION_TEST_AIR=<seconds>[,<x>,<z>], in a scripted run only:
+    // the player's big air, as if, that long into the outing (and there).
+    static float test_x = 0.0f, test_z = 0.0f;
+    static int test_place = 0;
+    static const float test_air = [] {
+        const char* value = std::getenv("WR64_COMPANION_TEST_AIR");
+        float t = -1.0f;
+        if (value != nullptr && std::getenv("WR64_INPUT_SCRIPT") != nullptr) test_place = std::sscanf(value, "%f,%f,%f", &t, &test_x, &test_z);
+        return t;
+    }();
+    static std::chrono::steady_clock::time_point outing{};
+    static bool tested = false;
+    if (outing.time_since_epoch().count() == 0 || now - outing > std::chrono::hours(1)) outing = now;
+    if (test_air > 0.0f && !tested && now - outing > std::chrono::duration<float>(test_air)) {
+        tested = true;
+        pl.aloft = false;
+        pl.height = 220.0f;
+    }
+    if (pl.aloft || pl.height < 160.0f) return;
+    pl.aloft = true;
+    const double t = seconds(now);
+    minds::Interest air;
+    air.x = test_place == 3 && test_air > 0.0f ? test_x : x;
+    air.z = test_place == 3 && test_air > 0.0f ? test_z : z;
+    air.strength = std::clamp(pl.height / 250.0f, 0.5f, 1.0f); air.until = t + 15.0; air.what = "the player's big air";
+    static const bool log = std::getenv("WR64_COMPANION_LOG") != nullptr;
+    if (log) {
+        std::fprintf(stderr, "[wr64-companion] the player is in the air, %.0f up at %.0f %.0f\n", pl.height, x, z);
+        std::fflush(stderr);
+    }
+    Drive& d = g_drive;
+    if (!d.airborne && d.crash == Crash::None && !d.on_ramp &&
+        minds::notice(g_minds[0], air, std::hypot(air.x - d.x, air.z - d.z), chance(), t)) {
+        begin_first(d, minds::Activity::Watch);
+        log_mind("the first rider", g_minds[0]);
+    }
+    Pair& p = g_pair;
+    const float mx = (p.riders[0].x + p.riders[1].x) / 2.0f, mz = (p.riders[0].z + p.riders[1].z) / 2.0f;
+    if (p.routine != PairRoutine::Trick && minds::notice(g_minds[1], air, std::hypot(air.x - mx, air.z - mz), chance(), t)) {
+        p.change = false;
+        p.parked = false;
+        start_watch(p);
+        log_mind("the pair", g_minds[1]);
     }
 }
 
@@ -1477,9 +1785,11 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
     const Obstacle player{ g_pose.hull.m[3][0], g_pose.hull.m[3][2], 450.0f, true };
     if (fresh) {
         g_stunt = word_at(rdram, kGameModes) == kStuntMode;
+        g_player = Player{};
         start_drive(now);
         start_pair(now);
     }
+    note_player(rdram, segments[3], dt, now);
     if (first_ready) drive(segments[3], now, dt, { player });
     const Drive& d = g_drive;
     const Obstacle first{ d.x, d.z, 450.0f, true };
@@ -1544,7 +1854,8 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         }
         if (report) {
             std::fprintf(stderr, "[wr64-companion] at %.0f %.0f %.0f, %s, speed %.0f, heading %.2f\n", d.x, d.y, d.z,
-                         d.routine == Routine::Stunts ? "stunts" : d.routine == Routine::Lap ? "lap" : "practising",
+                         d.free == Free::Follow ? "riding along" : d.free == Free::Rest ? "resting" : d.free == Free::Watch ? "watching"
+                         : d.routine == Routine::Stunts ? "stunts" : d.routine == Routine::Lap ? "lap" : "practising",
                          d.speed, d.heading);
             std::fflush(stderr);
         }
@@ -1577,6 +1888,7 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
                 std::fprintf(stderr, "[wr64-companion] the pair at %.0f %.0f and %.0f %.0f, %s, speeds %.0f %.0f; apart %.0f%s, "
                              "from the first %.0f, from the player %.0f (at %.0f %.0f)\n", a.x, a.z, c.x, c.z,
                              g_pair.routine == PairRoutine::Weave ? "weaving" : g_pair.routine == PairRoutine::Trick ? "on the trick"
+                             : g_pair.routine == PairRoutine::Follow ? "riding along" : g_pair.routine == PairRoutine::Watch ? "watching"
                              : g_pair.parked ? "stopped" : "sightseeing",
                              a.speed, c.speed, apart, closer ? " (nearest yet)" : "",
                              first_ready ? nearer(d.x, d.z) : -1.0f, nearer(player.x, player.z), player.x, player.z);

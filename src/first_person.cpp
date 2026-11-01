@@ -75,6 +75,7 @@
 // water's fog is drawn round it after the scene and before the HUD: thicker
 // with distance, lighter towards the surface, darker the deeper one looks.
 
+#include "wr64/day_night.h"
 #include "wr64/underwater_audio.h"
 #include "wr64/vr.h"
 
@@ -429,7 +430,13 @@ const Water& water_for(uint32_t course) {
 }
 Vec water_colour(uint32_t course) {
     const Water& w = water_for(course);
-    return Vec{ w.r, w.g, w.b } * w.brightness;
+    const Vec own = Vec{ w.r, w.g, w.b } * w.brightness;
+    // Day and night in a free roam: the two looks either side of the hour.
+    if (!day::active()) return own;
+    const day::Blend b = day::now();
+    const Water& p = water_for(uint32_t(b.from));
+    const Water& q = water_for(uint32_t(b.to));
+    return Vec{ p.r, p.g, p.b } * (p.brightness * (1.0f - b.t)) + Vec{ q.r, q.g, q.b } * (q.brightness * b.t);
 }
 
 // The water round `eye` for frame buffer `b`, `surface` the water's height

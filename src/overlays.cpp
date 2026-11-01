@@ -36,6 +36,7 @@ void water_task_submit_hook(uint8_t* rdram, recomp_context* ctx);
 void water_test_seed_hook(uint8_t* rdram, recomp_context* ctx);
 void water_test_course_hook(uint8_t* rdram, recomp_context* ctx);
 void texture_capture_rider_select_hook(uint8_t* rdram, recomp_context* ctx);
+void lap_message_hook(uint8_t* rdram, recomp_context* ctx);
 void texture_capture_draw_hook(uint8_t* rdram, recomp_context* ctx);
 void music_load_sequence_hook(uint8_t* rdram, recomp_context* ctx);
 void music_disable_sequence_hook(uint8_t* rdram, recomp_context* ctx);
@@ -68,6 +69,10 @@ void register_overlays() {
             FuncEntry& function = section.funcs[f];
             if (section.ram_addr + function.offset == 0x801EBD28u) {
                 function.func = texture_capture_rider_select_hook;
+            }
+            // The LAP message, with the HUD's lap (patches/lap_message.cpp).
+            if (section.ram_addr + function.offset == 0x801FAEB8u) {
+                function.func = lap_message_hook;
             }
 #if WR64_WITH_FRONTEND
             // The main menu's page draw and controls, and the course select's

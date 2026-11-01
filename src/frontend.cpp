@@ -35,6 +35,7 @@
 #include "wr64/haptics.h"
 #include "wr64/rom.h"
 #include "wr64/vr.h"
+#include "wr64/day_night.h"
 #include "wr64/updates.h"
 
 #if defined(_WIN32)
@@ -388,10 +389,11 @@ void init(bool auto_start) {
     });
     // REVERSE's misses and laps: the game races it with 5 and 3 whatever its
     // CHANGE CONDITIONS say; these are held in its races (patches/free_roam.cpp).
+    // Laps go to 9, as the game's own page does: its lap times keep nine.
     // Chosen on the Championship page after REVERSE (src/game_menus.cpp).
     std::vector<recomp::config::ConfigOptionEnumOption> miss_choices, lap_choices;
     for (uint32_t n = 1; n <= 10; ++n) miss_choices.push_back({n - 1, std::to_string(n), std::to_string(n)});
-    for (uint32_t n = 3; n <= 10; ++n) lap_choices.push_back({n - 3, std::to_string(n), std::to_string(n)});
+    for (uint32_t n = 3; n <= 9; ++n) lap_choices.push_back({n - 3, std::to_string(n), std::to_string(n)});
     races.add_enum_option("reverse_misses", "Reverse: misses", "Buoys you may miss in a REVERSE championship before you're out (the game's own is 5).", miss_choices, 4u);
     races.add_enum_option("reverse_laps", "Reverse: laps", "Laps of each REVERSE championship race (the game's own is 3).", lap_choices, 0u);
     const auto reverse_changed = [](auto, auto, auto context) {
@@ -420,6 +422,11 @@ void init(bool auto_start) {
     roam.add_option_change_callback("free_roam_look", [](auto value, auto, auto context) {
         if (context != recomp::config::OptionChangeContext::Temporary)
             wr64::set_free_roam_look(int(std::get<uint32_t>(value)) - 1);
+    });
+    roam.add_bool_option("free_roam_day", "Day and night", "Time passes as you ride: a day every 24 minutes, from dawn through noon and sunset to night, each a course's sky and light. Takes the place of Sky and water.", false);
+    roam.add_option_change_callback("free_roam_day", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::day::set_enabled(std::get<bool>(value));
     });
     roam.add_enum_option("free_roam_music", "Music", "Play another course's music in a free roam. Needs the replacement music; with the original music each course keeps its own.", course_choices, 0u);
     roam.add_option_change_callback("free_roam_music", [](auto value, auto, auto context) {

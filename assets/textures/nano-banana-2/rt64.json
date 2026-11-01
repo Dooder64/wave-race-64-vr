@@ -6699,6 +6699,12 @@
     },
     {
       "hashes": {
+        "rt64": "9211a71b79eb4262"
+      },
+      "path": "textures/76543d06ba207a634be9ff05fd5562b98e31bf6913338b49ee9a90477bcabbf5.png"
+    },
+    {
+      "hashes": {
         "rt64": "9242edc63819c33e"
       },
       "path": "textures/9c70373574540a64a9438d1046feb5294071f2a18396c80e923945373e4ba6b2.dds"

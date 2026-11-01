@@ -15,7 +15,8 @@
 //     main menu, before the choice ends it -- WAVES, once for the whole
 //     championship, and MISSES and LAPS: the game's own CHANGE CONDITIONS
 //     values for that difficulty (D_801CB308[difficulty]: wave conditions,
-//     misses 1-10, laps 3-10: the game's own page allows 1-5 and 3-9), which
+//     misses 1-10, laps 3-9: the game's own page allows 1-5 and 3-9, and
+//     its lap times keep nine), which
 //     each race reads as it sets up; drawn with
 //     the game's number lettering (func_801E9858, font 2, as that page does).
 //     REVERSE, which the game races with 5 and 3 whatever its CHANGE
@@ -163,7 +164,7 @@ constexpr int kOptionsTop = 68, kOptionsStep = 18;
 constexpr uint16_t kA = 0x8000, kB = 0x4000, kZ = 0x2000, kStart = 0x1000, kUp = 0x0800, kDown = 0x0400,
                    kLeft = 0x0200, kRight = 0x0100;
 constexpr int kSoundMove = 0x10, kSoundChoose = 0x11, kSoundBack = 0x16, kSoundStart = 0x37;
-constexpr int kStyleNormal = 0, kStyleChosen = 6;
+constexpr int kStyleNormal = 0, kStyleChosen = 6, kStyleIdle = 7;
 
 // Font 1 words the game has (segment 1).
 constexpr int kWordNormal = 0x16, kWordOn = 0x37, kWordOff = 0x38, kWordContinue = 0x30, kWordCourses = 0x08,
@@ -216,7 +217,7 @@ enum Word { kFreeRoam, kRiders, kWaves, kSky, kMusic, kFog,
             kLayout, kStuntMode, kWarmUp,
             kExtras, kSpeed, kView, kTilt, kFeedback, kTextures, kWater, kStyle, kRipples, kSpray, kUnlockAll,
             kKph, kMph, kChase, kFirstPerson, kNone, kHalf, kFull, kEvents, kOriginal, kHd, kModern, kHigh,
-            kClassic, kAqua, kSoft, kStrong, kMisses, kLaps, kUpdateAvailable, kWordCount };
+            kClassic, kAqua, kSoft, kStrong, kMisses, kLaps, kUpdateAvailable, kDayAndNight, kWordCount };
 constexpr const char* kTexts[kWordCount] = { "FREE ROAM", "RIDERS", "WAVES", "SKY", "MUSIC", "FOG",
                                              "STILL", "CALM", "GENTLE", "CHOPPY", "ROUGH", "STORMY", "WILD", "EXTREME",
                                              "LAYOUT", "STUNT MODE", "WARM UP",
@@ -224,7 +225,7 @@ constexpr const char* kTexts[kWordCount] = { "FREE ROAM", "RIDERS", "WAVES", "SK
                                              "RIPPLES", "SPRAY", "UNLOCK ALL",
                                              "KPH", "MPH", "CHASE", "FIRST PERSON", "NONE", "HALF", "FULL", "EVENTS",
                                              "ORIGINAL", "HD", "MODERN", "HIGH", "CLASSIC", "AQUA", "SOFT", "STRONG",
-                                             "MISSES", "LAPS", "UPDATE AVAILABLE" };
+                                             "MISSES", "LAPS", "UPDATE AVAILABLE", "DAY AND NIGHT" };
 // FREE ROAM's own id, and the one every other made word is drawn through:
 // empty in the font 1 table.
 constexpr int kFreeRoamId = 0x28, kScratchId = 0x2B;
@@ -463,13 +464,13 @@ bool g_reverse = false;   // the Championship chosen is REVERSE
 const std::vector<Option> kChampionshipOptions = {
     { kWaves, "races", "race_waves", kWaveValues },
     { kMisses, nullptr, nullptr, numbers(1, 10), misses_setting, set_misses_setting },
-    { kLaps, nullptr, nullptr, numbers(3, 10), laps_setting, set_laps_setting },
+    { kLaps, nullptr, nullptr, numbers(3, 9), laps_setting, set_laps_setting },
 };
 
 const std::vector<Option> kReverseOptions = {
     { kWaves, "races", "race_waves", kWaveValues },
     { kMisses, "races", "reverse_misses", numbers(1, 10) },
-    { kLaps, "races", "reverse_laps", numbers(3, 10) },
+    { kLaps, "races", "reverse_laps", numbers(3, 9) },
 };
 
 const std::vector<Option> kRaceOptions = {
@@ -478,6 +479,7 @@ const std::vector<Option> kRaceOptions = {
 const std::vector<Option> kFreeRoamOptions = {
     { kWaves, "free_roam", "free_roam_waves", kWaveValues },
     { kSky, "free_roam", "free_roam_look", kCourseValues },
+    { kDayAndNight, "free_roam", "free_roam_day", kSwitchValues },
     { kMusic, "free_roam", "free_roam_music", kCourseValues },
     { kFog, "free_roam", "free_roam_fog", kSwitchValues },
     { kRiders, "free_roam", "dolphin_park_riders", kSwitchValues },
@@ -545,8 +547,14 @@ uint32_t draw_row(uint8_t* rdram, recomp_context* ctx, uint32_t gfx, const Layou
     return draw_text(rdram, ctx, gfx, t, at.value_right - width_of(rdram, t), y);
 }
 
-uint32_t colour(uint8_t* rdram, recomp_context* ctx, uint32_t gfx, int style) {
-    return call(rdram, ctx, func_801E946C, { gfx, uint32_t(style), 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF });
+// Whether option `o` has a say just now: SKY doesn't while DAY AND NIGHT is
+// on, which brings each hour's own sky.
+bool has_say(const Option& o) { return !(o.label == kSky && menu_setting("free_roam", "free_roam_day") != 0); }
+
+// The words' colour from here on: style `style`, the twelve tints at `tint`
+// (the game greys a row with style 7 and tints of 0x80).
+uint32_t colour(uint8_t* rdram, recomp_context* ctx, uint32_t gfx, int style, uint32_t tint = 0xFF) {
+    return call(rdram, ctx, func_801E946C, { gfx, uint32_t(style), tint, tint, tint, tint, tint, tint, tint, tint, tint, tint, tint, tint });
 }
 
 uint32_t draw_page(uint8_t* rdram, recomp_context* ctx, uint32_t gfx) {
@@ -572,7 +580,12 @@ uint32_t draw_page(uint8_t* rdram, recomp_context* ctx, uint32_t gfx) {
     }
     gfx = colour(rdram, ctx, gfx, kStyleNormal);
     for (int row = 0; row < rows; ++row) {
-        if (row != g_row) gfx = draw_row(rdram, ctx, gfx, at, row);
+        if (row == g_row) continue;
+        // A row with no say just now (SKY, while DAY AND NIGHT is on) in grey.
+        const bool idle = row < int(options_of(g_page).size()) && !has_say(options_of(g_page)[size_t(row)]);
+        if (idle) gfx = colour(rdram, ctx, gfx, kStyleIdle, 0x80);
+        gfx = draw_row(rdram, ctx, gfx, at, row);
+        if (idle) gfx = colour(rdram, ctx, gfx, kStyleNormal);
     }
     gfx = colour(rdram, ctx, gfx, kStyleChosen);
     gfx = draw_row(rdram, ctx, gfx, at, g_row);
