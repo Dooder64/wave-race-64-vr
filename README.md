@@ -72,9 +72,12 @@ menu needed:
   clock, no laps, no buoys or rings, no COURSE OUT, and the land free to
   explore; far from land a gentle current eases you back. After the course,
   its own page: **WAVES** (still water up to far past the game's roughest),
-  **SKY** and water from any course, **MUSIC** (each track plays as you scroll
-  past it), **FOG**, the Dolphin Park **RIDERS**, and on Dolphin Park its
-  **LAYOUT**: Stunt Mode's, or the championship's Warm Up with the dolphin.
+  **SKY** and water from any course, **DAY AND NIGHT** (a 24-minute day
+  fading between the courses' own looks), **MUSIC** (each track plays as you
+  scroll past it), **FOG**, the Dolphin Park **RIDERS** (each with a
+  personality of its own: stunts, laps, sightseeing, following you or
+  resting, as it feels like), and on Dolphin Park its **LAYOUT**: Stunt
+  Mode's, or the championship's Warm Up with the dolphin.
 - **WAVES** before every race: after the difficulty in Championship (once for
   the whole championship), Time Trials and 2P VS, after the course in Stunt
   Mode.
@@ -117,8 +120,10 @@ A gamepad works too, as in the flat game.
 - At Dolphin Park, a swimmer diving by the piers can swim through the beach.
 - In Free Roam, passing where a hidden buoy is can still give POWER UP or
   POWER DOWN; very far out, the water's physics get odd.
-- In races longer than 3 laps, the LAP message on crossing the line can show
-  the wrong number (the lap counter at the top is right).
+- On Glacier Coast, the game's own collision reaches into open water in two
+  places Free Roam's lap passes: beside the ice ramp before the final turn,
+  and by the arrow sign at the turn to the finish. It's the same in the
+  original game, where the buoys keep you away from both.
 
 The full list is in [docs/POLISH.md](docs/POLISH.md).
 

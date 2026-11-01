@@ -7,7 +7,7 @@ namespace wr64::updates {
 
 // This build's release, as its GitHub tag reads without the "v" (bump it
 // with each release).
-inline constexpr char kVersion[] = "1.1.0-vr";
+inline constexpr char kVersion[] = "1.2.0-vr";
 
 // Asks GitHub once, on a thread of its own, for the latest release of
 // Dooder64/wave-race-64-vr. Nothing is sent but the request itself.
