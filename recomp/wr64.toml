@@ -269,3 +269,38 @@ func = "func_800C1540"
 before_vram = 0x800C1540
 text = '{ extern int wr64_race_music(uint8_t* rdram, int sequence); ctx->r4 = (int32_t)wr64_race_music(rdram, (int)ctx->r4); }'
 
+
+# Room for more ramps (patches/ramp_pieces.cpp): the ramps' slope pieces move
+# from D_801BFD78 (room for 32) to an array of the port's own, wherever the
+# game takes its address, and the setup's cap (slti $at, $t8, 0x21) follows
+# its size. At 0x80074DD8 the address is set before the branch whose delay
+# slot adds %lo(D_801BFD78) (-0x288) to it, so that both ways on have it.
+[[patches.hook]]
+func = "func_800744EC"
+before_vram = 0x80074558
+text = '{ extern int32_t wr64_ramp_pieces(void); ctx->r22 = wr64_ramp_pieces(); }'
+
+[[patches.hook]]
+func = "func_800744EC"
+before_vram = 0x80074C9C
+text = '{ extern int32_t wr64_ramp_piece_room(void); ctx->r1 = SIGNED(ctx->r24) <= wr64_ramp_piece_room() ? 1 : 0; }'
+
+[[patches.hook]]
+func = "func_800744EC"
+before_vram = 0x80074DD8
+text = '{ extern int32_t wr64_ramp_pieces(void); ctx->r22 = wr64_ramp_pieces() + 0x288; }'
+
+[[patches.hook]]
+func = "func_8006E0F4"
+before_vram = 0x8006E170
+text = '{ extern int32_t wr64_ramp_pieces(void); ctx->r30 = wr64_ramp_pieces(); }'
+
+[[patches.hook]]
+func = "func_8007F700"
+before_vram = 0x8007F714
+text = '{ extern int32_t wr64_ramp_pieces(void); ctx->r3 = wr64_ramp_pieces(); }'
+
+[[patches.hook]]
+func = "func_8007FAE4"
+before_vram = 0x8007FAF8
+text = '{ extern int32_t wr64_ramp_pieces(void); ctx->r3 = wr64_ramp_pieces(); }'

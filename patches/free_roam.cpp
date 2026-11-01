@@ -62,6 +62,7 @@
 #include "wr64/testdrive.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -69,8 +70,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 extern "C" void func_80074264(uint8_t*, recomp_context*);
+extern "C" int32_t wr64_ramp_pieces(void);
 
 namespace wr64 {
 
@@ -479,6 +482,13 @@ void free_roam_course_out_hook(uint8_t* rdram, recomp_context* ctx) {
     // (Stopped dead from full speed, it threw its rider.)
     float out_x, out_z, way_x, way_z, height;
     const bool held = land_backs_hold(uint32_t(course), x, z, -5.0f, &out_x, &out_z, &way_x, &way_z, &height);
+    static const bool hold_log = env_on("WR64_LAND_HOLD_LOG");
+    if (hold_log && height > -30.0f) {
+        std::fprintf(stderr, "[wr64] land hold: asked at %.0f %.0f, rider at %.0f %.0f, slope %.0f, %s to %.0f %.0f\n", x, z,
+                     real(rdram, kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize + 0x44),
+                     real(rdram, kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize + 0x4C), height,
+                     held ? "held" : "braked", out_x, out_z);
+    }
     if (!held && height > -30.0f) {
         const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
         for (uint32_t i = 0; i < 12; ++i) {
@@ -510,6 +520,100 @@ void free_roam_course_out_hook(uint8_t* rdram, recomp_context* ctx) {
     }
 }
 
+
+// WR64_TEST_RAMP=<x>,<z>,<degrees>[;<x>,<z>,<degrees>...], in a scripted
+// run only: ramps added there, each ridden that way (as the course's own:
+// 270 along -x, 7 nearly along +z; the way over is (sin, cos) of it). Ramps
+// are made as the course sets up (func_80071E70, see docs/COURSE_CREATOR.md)
+// from a table per course and mode -- D_800D66CC for Stunt Mode, D_800D66A4
+// otherwise -- of five s16s each (x, z, two zeros, the angle; ending at an
+// angle of -1), into the course's objects (D_801BC940), with all that goes
+// with them. Adding one to the objects afterwards gives neither a ramp drawn
+// nor one ridden, so instead Dolphin Park's two tables are pointed, before it
+// loads, at copies with the ramps added, in memory nothing else uses
+// (kRampTables, above the game's 8 MB; patches/ramp_pieces.cpp). The jet
+// ski's height is logged while it is well up, its place every half second.
+// A negative angle first adds none; WR64_TEST_RAMP_INSTEAD=<n> leaves the
+// course's ramp n out.
+void test_ramp(uint8_t* rdram) {
+    static std::vector<std::array<float, 3>> ramps;
+    static const bool test = [] {
+        const char* value = std::getenv("WR64_TEST_RAMP");
+        if (value == nullptr || std::getenv("WR64_INPUT_SCRIPT") == nullptr) return false;
+        for (const char* p = value; p != nullptr && *p != '\0';) {
+            std::array<float, 3> r{};
+            if (std::sscanf(p, "%f,%f,%f", &r[0], &r[1], &r[2]) != 3) break;
+            ramps.push_back(r);
+            p = std::strchr(p, ';');
+            if (p != nullptr) ++p;
+        }
+        return !ramps.empty();
+    }();
+    if (!test) return;
+    constexpr uint32_t kTables[2] = { 0x0D66A4, 0x0D66CC }, kRampTables = 0x80804000u, kTableRoom = 0x200;
+    static bool pointed = false;
+    if (!pointed && ramps[0][2] >= 0.0f) {
+        pointed = true;
+        // Above 8 MB: past the 0x7FFFFF the port's own helpers keep to.
+        auto set_half = [&](uint32_t a, int16_t v) { *reinterpret_cast<int16_t*>(rdram + (((a - 0x80000000u)) ^ 2)) = v; };
+        // Dolphin Park's tables only: its race table has no ramps, its Stunt
+        // Mode table the four (ROM 0x2A9C18), which are written out again
+        // here (the course's data, loaded with it, isn't there to copy yet).
+        constexpr int16_t kStuntRamps[4][5] = {
+            { 2500, -4952, 0, 0, 270 }, { 92, -4952, 0, 0, 270 }, { -2407, -4952, 0, 0, 270 }, { -6065, 664, 0, 0, 7 },
+        };
+        static const int instead = std::getenv("WR64_TEST_RAMP_INSTEAD") ? std::atoi(std::getenv("WR64_TEST_RAMP_INSTEAD")) : -1;
+        for (uint32_t t = 0; t < 2; ++t) {
+            const uint32_t to = kRampTables + t * kTableRoom;
+            uint32_t n = 0;
+            auto put = [&](const int16_t (&e)[5]) {
+                for (uint32_t k = 0; k < 5; ++k) set_half(to + n * 10 + k * 2, e[k]);
+                ++n;
+            };
+            if (t == 1) {
+                for (int i = 0; i < 4; ++i) if (i != instead) put(kStuntRamps[i]);
+            }
+            for (const auto& r : ramps) {
+                const int16_t e[5] = { int16_t(r[0]), int16_t(r[1]), 0, 0, int16_t(r[2]) };
+                put(e);
+            }
+            const int16_t end[5] = { -1, -1, -1, -1, -1 };
+            put(end);
+            set_word(rdram, kTables[t], int32_t(to));
+        }
+        std::fprintf(stderr, "[wr64] test ramp: Dolphin Park's ramp tables point at copies with %zu ramp(s) added\n", ramps.size());
+    }
+    if (current_game_state() != 0x28) return;
+    const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
+    const float x = real(rdram, rider + 0x44), y = real(rdram, rider + 0x48), z = real(rdram, rider + 0x4C);
+    static int frames = 0;
+    ++frames;
+    if ((y > 20.0f && frames % 3 == 0) || frames % 30 == 0) std::fprintf(stderr, "[wr64] test ramp: the jet ski at %.0f %.0f %.0f\n", x, y, z);
+    static bool listed = false;
+    if (!listed && frames > 30) {
+        listed = true;
+        constexpr uint32_t kObjects = 0x1BC940, kObjectSize = 0xC4;
+        const int32_t count = word(rdram, 0x1BFA40);
+        std::fprintf(stderr, "[wr64] test ramp: %d slope pieces built\n", word(rdram, 0x1C0578));
+        // Each piece, from wherever the game keeps them (patches/ramp_pieces.cpp).
+        for (int32_t i = 0; i < word(rdram, 0x1C0578); ++i) {
+            const uint8_t* p = rdram + (uint32_t(wr64_ramp_pieces()) - 0x80000000u) + uint32_t(i) * 64;
+            std::fprintf(stderr, "[wr64] test ramp: piece %d", i);
+            for (int k = 0; k < 16; ++k) {
+                float v;
+                std::memcpy(&v, p + k * 4, 4);
+                std::fprintf(stderr, " %.2f", v);
+            }
+            std::fprintf(stderr, "\n");
+        }
+        for (int32_t i = 0; i < count; ++i) {
+            const uint32_t o = kObjects + uint32_t(i) * kObjectSize;
+            if (word(rdram, o + 0x4C) != 1) continue;
+            std::fprintf(stderr, "[wr64] test ramp: object %d, a ramp at %.0f %.0f, %.0f degrees, slot %d\n", i, real(rdram, o),
+                         real(rdram, o + 8), real(rdram, o + 0x48), word(rdram, o + 0x64));
+        }
+    }
+}
 
 // WR64_FREE_ROAM_TEST_AT, once a frame of a race (see below).
 void test_place(uint8_t* rdram) {
@@ -680,6 +784,7 @@ void free_roam_frame(uint8_t* rdram) {
         day::sky_frame(rdram, sky, day::start_look(course));
     }
     if (state == 0x28) test_place(rdram);
+    test_ramp(rdram);
     // WR64_LAP_LOG=1: each rider's lap (race record +0) and the HUD's lap
     // (+0x320) whenever either changes, with the laps to finish, the buoy the
     // arrow points at next (+0x0C), the line-side flag (+0x324) and where the
