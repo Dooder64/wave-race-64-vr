@@ -391,36 +391,53 @@ namespace {
 // Course `course`'s rims' nearest point to (x, z), its height there and the
 // way out; the distance squared, or 1e30 if the course has no backs. Where
 // slopes overlap (Glacier Coast's narrow canyon, its two sides' slopes
-// meeting), the rim whose slope is highest there instead.
-float nearest_rim(uint32_t course, float x, float z, float* px, float* pz, float* top, float* nx, float* nz) {
+// meeting), the rim whose slope is highest there instead; in *slope, the
+// slope's height there (-1e30 if none). Each rim answers
+// by its nearest point only: a farther stretch of it, seen past its end at a
+// slant, would put a slope where the nearer wall has the course's water
+// (Glacier Coast's channels, ridden into invisible slopes).
+float nearest_rim(uint32_t course, float x, float z, float* px, float* pz, float* top, float* nx, float* nz, float* slope) {
     float best = 1e30f, highest = -1e30f;
+    *slope = -1e30f;
     for (const Backs& backs : kBacks) {
         if (backs.course != course) continue;
         for (int r = 0; r < backs.rim_count; ++r) {
             const Rim& rim = backs.rims[r];
+            float near = 1e30f, qx = 0, qz = 0, y = 0, ox = 0, oz = 0;
+            bool past_end = false;
             for (int i = 0; i + 1 < rim.count; ++i) {
                 const RimPoint& a = rim.points[i];
                 const RimPoint& b = rim.points[i + 1];
                 const float ex = b.x - a.x, ez = b.z - a.z;
                 const float u = std::clamp(((x - a.x) * ex + (z - a.z) * ez) / std::max(ex * ex + ez * ez, 1.0f), 0.0f, 1.0f);
-                const float qx = a.x + ex * u, qz = a.z + ez * u;
-                const float d = (x - qx) * (x - qx) + (z - qz) * (z - qz);
-                const float y = a.y + (b.y - a.y) * u;
-                const float ox = a.out_x + (b.out_x - a.out_x) * u, oz = a.out_z + (b.out_z - a.out_z) * u;
-                const float far = reach(y), out = std::sqrt(d);
-                const float height = (x - qx) * ox + (z - qz) * oz > 0.0f && out < far ? slope_height(y, out / far) : -1e30f;
-                if (height > highest) {
-                    highest = height;
-                } else if (height < highest || d >= best) {
-                    continue;
-                }
-                best = d;
-                *px = qx;
-                *pz = qz;
-                *top = a.y + (b.y - a.y) * u;
-                *nx = a.out_x + (b.out_x - a.out_x) * u;
-                *nz = a.out_z + (b.out_z - a.out_z) * u;
+                const float sx = a.x + ex * u, sz = a.z + ez * u;
+                const float d = (x - sx) * (x - sx) + (z - sz) * (z - sz);
+                if (d >= near) continue;
+                near = d;
+                past_end = (i == 0 && u <= 0.0f) || (i + 2 == rim.count && u >= 1.0f);
+                qx = sx;
+                qz = sz;
+                y = a.y + (b.y - a.y) * u;
+                ox = a.out_x + (b.out_x - a.out_x) * u;
+                oz = a.out_z + (b.out_z - a.out_z) * u;
             }
+            if (near >= 1e30f) continue;
+            const float far = reach(y), out = std::sqrt(near);
+            // (Nor past either end of the rim, where none is drawn.)
+            const bool behind = (x - qx) * ox + (z - qz) * oz > 0.0f && !past_end;
+            const float height = behind && out < far ? slope_height(y, out / far) : -1e30f;
+            if (height > highest) {
+                highest = height;
+            } else if (height < highest || near >= best) {
+                continue;
+            }
+            best = near;
+            *px = qx;
+            *pz = qz;
+            *top = y;
+            *nx = ox;
+            *nz = oz;
+            *slope = height;
         }
     }
     return best;
@@ -433,8 +450,8 @@ float nearest_rim(uint32_t course, float x, float z, float* px, float* pz, float
 // has none. The land's backs count as land for Free Roam's current, so the
 // way round behind them stays open.
 float land_backs_distance(uint32_t course, float x, float z) {
-    float px = 0, pz = 0, top = 0, nx = 0, nz = 0;
-    const float best = nearest_rim(course, x, z, &px, &pz, &top, &nx, &nz);
+    float px = 0, pz = 0, top = 0, nx = 0, nz = 0, slope = 0;
+    const float best = nearest_rim(course, x, z, &px, &pz, &top, &nx, &nz, &slope);
     if (best >= 1e30f) return 1e9f;
     const float d = std::sqrt(best);
     const bool outside = (x - px) * nx + (z - pz) * nz > 0.0f;
@@ -445,12 +462,10 @@ float land_backs_distance(uint32_t course, float x, float z) {
 // false where there are none (on the land's side of a rim, or past a slope's
 // foot). A thrown rider stands, walks and swims on them as on the land.
 bool land_backs_ground(uint32_t course, float x, float z, float* height) {
-    float px = 0, pz = 0, top = 0, nx = 0, nz = 0;
-    const float best = nearest_rim(course, x, z, &px, &pz, &top, &nx, &nz);
-    if (best >= 1e30f || (x - px) * nx + (z - pz) * nz <= 0.0f) return false;
-    const float out = std::sqrt(best), far = reach(top);
-    if (out >= far) return false;
-    *height = slope_height(top, out / far);
+    float px = 0, pz = 0, top = 0, nx = 0, nz = 0, slope = 0;
+    nearest_rim(course, x, z, &px, &pz, &top, &nx, &nz, &slope);
+    if (slope <= -1e29f) return false;
+    *height = slope;
     return true;
 }
 
@@ -458,10 +473,11 @@ bool land_backs_hold(uint32_t course, float x, float z, float above, float* out_
                      float* way_z, float* height) {
     *height = -1e9f;
     // The rim's nearest point, its height there, and the way out.
-    float px = 0, pz = 0, top = 0, nx = 0, nz = 0;
-    const float best = nearest_rim(course, x, z, &px, &pz, &top, &nx, &nz);
+    float px = 0, pz = 0, top = 0, nx = 0, nz = 0, slope = 0;
+    const float best = nearest_rim(course, x, z, &px, &pz, &top, &nx, &nz, &slope);
     const float n = std::hypot(nx, nz);
-    if (best >= 1e30f || n < 1e-3f) return false;
+    // Only where nearest_rim finds a slope (not past a rim's end).
+    if (best >= 1e30f || n < 1e-3f || slope <= -1e29f) return false;
     nx /= n;
     nz /= n;
     // On the land's outer side only, and within the slope's reach.
