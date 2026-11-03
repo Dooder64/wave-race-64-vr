@@ -74,6 +74,7 @@
 #include <cstring>
 #include <random>
 #include <span>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -409,7 +410,8 @@ float face_height(float x) {
 // ramps of its own, none where the stunt loop's is -- so it practises
 // instead, for as long as the player rides: laps of the stunt course, in its
 // checkpoints' order, through the rings and over every ramp (kPractice).
-enum class Routine { Stunts, Lap, Practice };
+// (Shore: away from the park, round the course's land, g_shore_lap.)
+enum class Routine { Stunts, Lap, Practice, Shore };
 enum class Crash { None, Thrown, Waiting };
 // Off its routes, as its mind chooses: riding along with the player, gone
 // somewhere quiet to rest, gone to watch something, or taken with the
@@ -592,6 +594,15 @@ bool pair_out() { return g_pair_out; }
 bool more_out() { return g_more_out; }
 std::vector<std::pair<float, float>> g_course_lap;
 std::vector<float> g_lap_straight;
+std::vector<std::pair<float, float>> g_shore_lap;
+// The mines some courses lay in the water (Sunny Beach's four in a square
+// west of its ramp, the user's F2 mark, 2026-11-03): in the list of things
+// floating after the buoys' count (D_801BB120), 0x18 apart from 0x801BB138
+// (x, y, z, a radius of 25, then the kind: 3 a mine, 1 an edge buoy), read
+// as the course starts; kept clear of by kMineRoom.
+constexpr uint32_t kMines = 0x1BB138, kMineSize = 0x18, kMineKind = 3;
+constexpr float kMineRoom = 300.0f;
+std::vector<std::pair<float, float>> g_mines;
 
 // The buoy list (D_801AEE20, 0x104 bytes each, counted at D_801BB120): each
 // one's middle at +0x00 and +0x08.
@@ -658,6 +669,55 @@ void build_course_lap(const uint8_t* rdram) {
                 x = rx + ux * room; z = rz + uz * room;
             }
             else { x = rx - ux * room; z = rz - uz * room; }
+        }
+    }
+    // Round the mines (Sunny Beach's four in a square, Twilight City's): the
+    // line went straight through Sunny Beach's, and their rooms meet, so a
+    // rider on it stopped before them for good. Mines within 800 of each
+    // other are one cluster; the line bends round each on an arc kMineRoom
+    // and more out from its furthest mine, on whichever side is open water.
+    {
+        std::vector<int> group(g_mines.size(), -1);
+        int groups = 0;
+        for (size_t a = 0; a < g_mines.size(); ++a) {
+            if (group[a] < 0) group[a] = groups++;
+            for (size_t b = a + 1; b < g_mines.size(); ++b) {
+                if (std::hypot(g_mines[a].first - g_mines[b].first, g_mines[a].second - g_mines[b].second) >= 800.0f) continue;
+                if (group[b] < 0) group[b] = group[a];
+                else if (group[b] != group[a]) {
+                    const int from = group[b];
+                    for (int& g : group) if (g == from) g = group[a];
+                }
+            }
+        }
+        const std::vector<std::pair<float, float>> before = g_course_lap;
+        const size_t n = before.size();
+        for (int g = 0; g < groups && n > 8; ++g) {
+            float cx = 0.0f, cz = 0.0f;
+            int count = 0;
+            for (size_t k = 0; k < g_mines.size(); ++k) if (group[k] == g) { cx += g_mines[k].first; cz += g_mines[k].second; ++count; }
+            if (count == 0) continue;
+            cx /= float(count); cz /= float(count);
+            float radius = 0.0f;
+            for (size_t k = 0; k < g_mines.size(); ++k) {
+                if (group[k] == g) radius = std::max(radius, std::hypot(g_mines[k].first - cx, g_mines[k].second - cz));
+            }
+            radius += kMineRoom + 150.0f;
+            float side = 0.0f;
+            for (size_t i = 0; i < n; ++i) {
+                const float qx = before[i].first - cx, qz = before[i].second - cz;
+                if (std::hypot(qx, qz) >= radius) continue;
+                const auto& a = before[(i + n - 4) % n];
+                const auto& b = before[(i + 4) % n];
+                const float length = std::max(1.0f, std::hypot(b.first - a.first, b.second - a.second));
+                const float dx = (b.first - a.first) / length, dz = (b.second - a.second) / length;
+                const float px = -dz, pz = dx;
+                // The side: open water off the cluster's middle, else the other.
+                if (side == 0.0f) side = map_open(g_rider_map, cx + px * radius, cz + pz * radius) ? 1.0f : -1.0f;
+                const float along = qx * dx + qz * dz;
+                const float across = side * std::sqrt(std::max(0.0f, radius * radius - along * along));
+                g_course_lap[i] = { cx + dx * along + px * across, cz + dz * along + pz * across };
+            }
         }
     }
     // The corners: where the line turns more than 17 degrees over 100 units.
@@ -752,7 +812,7 @@ std::chrono::milliseconds routine_length() {
 
 // A routine's route as points kSample apart, in the way it is driven.
 const std::vector<std::pair<float, float>>& route(Routine r) {
-    if (g_course != 0) return g_course_lap;
+    if (g_course != 0) return r == Routine::Shore && !g_shore_lap.empty() ? g_shore_lap : g_course_lap;
     static const std::vector<std::pair<float, float>> stunts = [] {
         std::vector<std::pair<float, float>> v;
         const float loop = 2.0f * ((kEast - kWest) + 3.14159265f * kRadius);
@@ -861,7 +921,13 @@ void begin_first(Drive& d, minds::Activity a) {
         break;
     }
     case minds::Activity::Dolphin: d.free = Free::Dolphin; break;
-    default: d.routine = Routine::Lap; d.nearest = -1; break;
+    default:
+        // (Where there is a way round the shore, half the time that.)
+        d.routine = !g_shore_lap.empty() && chance()() % 2u == 0u ? Routine::Shore : Routine::Lap;
+        d.nearest = -1;
+        if (std::getenv("WR64_COMPANION_LOG") && d.routine == Routine::Shore)
+            std::fprintf(stderr, "[wr64-companion] %s rides round the shore\n", kMindNames[d.mind]);
+        break;
     }
 }
 
@@ -1327,14 +1393,6 @@ constexpr float kAcrossX = kOverZ, kAcrossZ = -kOverX;
 constexpr float kRampHalfLength = kRampCrest - kRampStart, kRampHalfWidth = 480.0f;
 constexpr float kLane = 220.0f;
 constexpr float kCrossingX = kOtherCrestX + kOverX * (kOut - kOtherCrestZ) / kOverZ, kCrossingZ = kOut;
-// The mines some courses lay in the water (Sunny Beach's four in a square
-// west of its ramp, the user's F2 mark, 2026-11-03): in the list of things
-// floating after the buoys' count (D_801BB120), 0x18 apart from 0x801BB138
-// (x, y, z, a radius of 25, then the kind: 3 a mine, 1 an edge buoy), read
-// as the course starts; kept clear of by kMineRoom.
-constexpr uint32_t kMines = 0x1BB138, kMineSize = 0x18, kMineKind = 3;
-constexpr float kMineRoom = 300.0f;
-std::vector<std::pair<float, float>> g_mines;
 
 // The weave's loop: east along z = kWeaveOut from kWeaveWest to kWeaveEast,
 // round a half circle to z = kWeaveBack and west again, and round. Each
@@ -1505,6 +1563,42 @@ bool sight_there(int sight);
 
 bool rider_water(const uint8_t* rdram, uint32_t course, float x, float z);
 bool inside_boundary(const uint8_t* rdram, float x, float z);
+bool map_open(const WaterMap& m, float x, float z);
+
+// Port Blue's helicopter (the user, 2026-11-03: when it is the sight, the
+// riders follow it): the game's animal of type 12 in its animals table
+// (D_801CF060, 30 of 0xBC: type +0, place +0xC/+0x14), flying some 600 up.
+// A sight of its own that goes where it goes: a spot in open water 800 off
+// below it, facing it.
+struct Helicopter { bool known = false; float x = 0.0f, z = 0.0f; } g_helicopter;
+int g_helicopter_sight = -1;
+void find_helicopter(const uint8_t* rdram) {
+    g_helicopter.known = false;
+    if (g_course != 5) return;
+    for (uint32_t i = 0; i < 30; ++i) {
+        const uint32_t a = 0x1CF060 + i * 0xBC;
+        if (word_at(rdram, a) != 12) continue;
+        const uint32_t wx = word_at(rdram, a + 0xC), wz = word_at(rdram, a + 0x14);
+        std::memcpy(&g_helicopter.x, &wx, 4);
+        std::memcpy(&g_helicopter.z, &wz, 4);
+        g_helicopter.known = std::isfinite(g_helicopter.x) && std::isfinite(g_helicopter.z);
+        return;
+    }
+}
+void place_helicopter_sight() {
+    if (g_helicopter_sight < 0 || g_helicopter_sight >= int(g_sights.size()) || !g_helicopter.known) return;
+    Sight& sight = g_sights[size_t(g_helicopter_sight)];
+    // The way it was off from it last if that is open water, else the
+    // nearest way round that is (so it doesn't hop from side to side).
+    const float was = std::atan2(sight.z - g_helicopter.z, sight.x - g_helicopter.x);
+    for (int k = 0; k < 8; ++k) {
+        const float a = was + float(k % 2 ? 1 : -1) * float((k + 1) / 2) * 0.785f;
+        const float x = g_helicopter.x + std::cos(a) * 800.0f, z = g_helicopter.z + std::sin(a) * 800.0f;
+        if (map_open(g_rider_map, x, z)) { sight.x = x; sight.z = z; break; }
+    }
+    sight.look_x = g_helicopter.x;
+    sight.look_z = g_helicopter.z;
+}
 
 // Away from the park: eight quiet spots, evenly round the buoys' line, each
 // 400 or 650 to one side of it, facing on along it towards a point on it
@@ -1517,6 +1611,12 @@ void build_course_spots(const uint8_t* rdram) {
         if (m.course != g_course) continue;
         const float a = m.look / 57.29578f;
         g_sights.push_back({ m.name, m.x, m.z, m.x + std::cos(a) * 1200.0f, m.z + std::sin(a) * 1200.0f });
+    }
+    g_helicopter_sight = -1;
+    if (g_helicopter.known) {
+        g_helicopter_sight = int(g_sights.size());
+        g_sights.push_back({ "the helicopter", g_helicopter.x, g_helicopter.z - 800.0f, g_helicopter.x, g_helicopter.z });
+        place_helicopter_sight();
     }
     g_marked = int(g_sights.size());
     const size_t n = g_course_lap.size();
@@ -1832,6 +1932,16 @@ bool travel(Pair& p, float dt, const std::vector<Obstacle> obstacles[2]) {
 
 void ride_sights(Pair& p, std::chrono::steady_clock::time_point now, float dt, const std::vector<Obstacle> obstacles[2]) {
     const Sight& sight = g_sights[p.sight];
+    // Watching the helicopter, and it has flown on: after it.
+    if (p.parked && p.sight == g_helicopter_sight) {
+        const Spot s = sight_spot(p.sight, p.swapped ? 1 : 0);
+        if (std::hypot(p.riders[0].x - s.x, p.riders[0].z - s.z) > 600.0f) {
+            p.parked = false;
+            p.set_off = now;
+            for (Rider& r : p.riders) r.near = r.stopped = false;
+            log_pair("off after the helicopter");
+        }
+    }
     if (p.parked) {
         for (Rider& r : p.riders) settle(r, sight.look_x, sight.look_z, dt);
         if (now < p.leave_at) return;
@@ -2201,13 +2311,13 @@ void ride_dolphin(Pair& p, std::chrono::steady_clock::time_point now, float dt, 
 // kWedgeBack back and kWedgeSide either side, coming up alongside it when it
 // stops and facing what it faces.
 //
-// Off by default away from Dolphin Park (WR64_MORE_RIDERS=0 none,
-// =everywhere on every course).
+// On every course (the user, 2026-11-03; WR64_MORE_RIDERS=0 none, =park
+// on Dolphin Park only).
 bool more_riders_on(uint32_t course) {
     static const int setting = [] {
         const char* value = std::getenv("WR64_MORE_RIDERS");
-        if (value == nullptr) return 1;
-        return std::strcmp(value, "0") == 0 ? 0 : std::strcmp(value, "everywhere") == 0 ? 2 : 1;
+        if (value == nullptr) return 2;
+        return std::strcmp(value, "0") == 0 ? 0 : std::strcmp(value, "park") == 0 ? 1 : 2;
     }();
     return setting == 2 || (setting == 1 && course == 0);
 }
@@ -2246,7 +2356,16 @@ void ride_wings(uint32_t segment3, float dt, const std::vector<Obstacle>& others
         obstacles.insert(obstacles.end(), others.begin(), others.end());
         obstacles.push_back({ l.x, l.z, 200.0f, false });
         obstacles.push_back({ g_wings[1 - i].x, g_wings[1 - i].z, 180.0f, false });
-        const float left = std::hypot(sx - r.x, sz - r.z);
+        float left = std::hypot(sx - r.x, sz - r.z);
+        // Left far behind (caught in some dead end: on Glacier Coast one was
+        // 14000 off) and out of the player's sight, both it and its place:
+        // back in its place, going the leader's way.
+        const bool unseen = !g_player.known || (std::hypot(g_player.x - r.x, g_player.z - r.z) > 4000.0f &&
+                                                std::hypot(g_player.x - sx, g_player.z - sz) > 4000.0f);
+        if (left > 3000.0f && unseen && (g_course == 0 || map_open(g_rider_map, sx, sz))) {
+            r.x = sx; r.z = sz; r.heading = l.heading; r.speed = l.speed;
+            left = 0.0f;
+        }
         if (stopped && left < 120.0f) settle(r, l.look_x, l.look_z, dt);
         else if (stopped) steer(r, sx, sz, std::clamp(left * 0.9f, 120.0f, 700.0f), dt, obstacles);
         else {
@@ -2551,8 +2670,14 @@ enum class DolphinAct { Swim, Leap, Dance, Call };
 enum class DolphinPhase { Roam, Seek, Entertain, Chase, Leave };
 constexpr int kSwimAnimation = 0, kLeapAnimation = 1, kHighLeapAnimation = 2, kDanceAnimation = 5, kCallAnimation = 4;
 constexpr float kDolphinSwim = 750.0f, kDolphinLeap = 900.0f, kDolphinTurn = 1.6f;
-// The people it may seek: the player, and the first rider.
-constexpr int kAudience = 3;
+// The people it may seek: the player, the first rider, the pair, and the
+// more riders -- the second and third riders and the trio (the user,
+// 2026-11-03: every rider with a mind of its own). Each rider's mind:
+// audience_mind; each single's (or the trio's leader's) drive:
+// audience_drive.
+constexpr int kAudience = 6;
+int audience_mind(int t) { return t == 1 ? 0 : t == 2 ? 1 : t >= 3 && t < kAudience ? t - 1 : -1; }
+Drive* audience_drive(int t) { return t == 1 ? &g_drives[0] : t >= 3 && t < kAudience ? &g_drives[t - 2] : nullptr; }
 
 struct Dolphin {
     float x = 0, y = 0, z = 0, heading = 0, speed = 0;
@@ -2588,7 +2713,10 @@ const char* phase_name(DolphinPhase p) {
     }
     return "?";
 }
-const char* audience_name(int t) { return t == 0 ? "the player" : t == 1 ? "the rider" : t == 2 ? "the pair" : "nobody"; }
+const char* audience_name(int t) {
+    return t == 0 ? "the player" : t == 1 ? "the rider" : t == 2 ? "the pair" : t == 3 ? "the second rider"
+         : t == 4 ? "the third rider" : t == 5 ? "the trio" : "nobody";
+}
 
 void log_dolphin(const char* what) {
     static const bool log = std::getenv("WR64_DOLPHIN_LOG") != nullptr;
@@ -2610,11 +2738,12 @@ bool audience_place(int t, float& x, float& z, float& fx, float& fz, float& spee
         fx = h[2][0] / length; fz = h[2][2] / length;
         return true;
     }
-    if (t == 1) {
-        if (!g_racers[0].ready || g_course == 0) return false;
-        const Drive& d = g_drive;
-        x = d.x; z = d.z; speed = d.speed; fx = std::cos(d.heading); fz = std::sin(d.heading);
-        return d.crash == Crash::None;
+    if (t == 1 || t >= 3) {
+        if (!g_racers[0].ready || g_course == 0 || (t >= 3 && !g_more_out)) return false;
+        const Drive* d = audience_drive(t);
+        if (d == nullptr) return false;
+        x = d->x; z = d->z; speed = d->speed; fx = std::cos(d->heading); fz = std::sin(d->heading);
+        return d->crash == Crash::None;
     }
     if (t == 2) {
         if (!g_pair_out || g_course == 0) return false;
@@ -2630,7 +2759,7 @@ bool audience_place(int t, float& x, float& z, float& fx, float& fz, float& spee
 // Whether audience member `t` is paying the dolphin attention.
 bool attending(int t) {
     const Dolphin& o = g_dolphin;
-    if (t == 1 || t == 2) return g_minds[t - 1].doing == minds::Activity::Dolphin;
+    if (audience_mind(t) >= 0) return g_minds[audience_mind(t)].doing == minds::Activity::Dolphin;
     float x, z, fx, fz, speed;
     if (!audience_place(t, x, z, fx, fz, speed)) return false;
     const float dx = o.x - x, dz = o.z - z, distance = std::hypot(dx, dz);
@@ -2661,9 +2790,9 @@ void start_act(const uint8_t* rdram, DolphinAct act, double now) {
     journal::Fields f;
     f.add("act", acts[int(act)]).add("animation", o.animation).add("phase", phase_name(o.phase)).add("for", audience_name(o.target));
     f.add("distance", double(distance)).add("attending", attending(o.target));
-    if (o.target == 1 || o.target == 2) {
-        const int which = o.target - 1;
-        Drive& d = g_drive;
+    if (audience_mind(o.target) >= 0) {
+        const int which = audience_mind(o.target);
+        Drive* drive = audience_drive(o.target);
         minds::Mind& m = g_minds[which];
         const bool was = m.doing == minds::Activity::Dolphin;
         const double until = m.until;
@@ -2675,7 +2804,8 @@ void start_act(const uint8_t* rdram, DolphinAct act, double now) {
         if (took) f.add("rider_interest_added", m.until - std::max(until, now));
         if (took && was) ++o.enjoyed;
         if (took) {
-            if (!was && which == 0 && !d.airborne && !d.on_ramp && d.crash == Crash::None) begin_first(d, minds::Activity::Dolphin);
+            if (!was && drive != nullptr && !drive->airborne && !drive->on_ramp && drive->crash == Crash::None)
+                begin_first(*drive, minds::Activity::Dolphin);
             if (!was && which == 1) start_pair_dolphin(g_pair);
             log_mind(which, "the dolphin");
         }
@@ -2729,7 +2859,7 @@ void set_phase(DolphinPhase phase, int target, double until, const char* why) {
         // How the try went.
         journal::Fields f;
         f.add("with", audience_name(had));
-        if ((had == 1 || had == 2) && g_minds[had - 1].who != nullptr) f.add("personality", g_minds[had - 1].who->name);
+        if (audience_mind(had) >= 0 && g_minds[audience_mind(had)].who != nullptr) f.add("personality", g_minds[audience_mind(had)].who->name);
         f.add("ended", why).add("lasted", now - o.episode_since);
         f.add("won", o.wins > 0).add("wins", o.wins);
         if (o.won_at >= 0) f.add("to_attention", o.won_at - o.episode_since);
@@ -2949,35 +3079,42 @@ void measure_ramps() {
                      shape.crest_x, shape.crest_z, shape.top, shape.face, shape.launch, shape.pop);
     }
 }
-// (With a margin of 150 all round, so routes keep off the beaches' edges.)
-bool rider_open(const uint8_t* rdram, uint32_t course, float x, float z) {
+// (With a margin of a square all round, so routes keep off the beaches'
+// edges: water in the squares either side, build_rider_map.) Here, what
+// else keeps a square closed.
+bool rider_open_clear(float x, float z) {
     for (const auto& [rx, rz] : g_ramps) {
         if (std::hypot(x - rx, z - rz) < kRampRoom) return false;
     }
     for (const auto& [mx, mz] : g_mines) {
         if (std::hypot(x - mx, z - mz) < kMineRoom) return false;
     }
-    // (Nor on a ramp's pieces, whose corners reach out past kRampRoom.)
+    // (Nor on a ramp's pieces, whose corners reach out past kRampRoom; only
+    // looked for near a ramp, which keeps building the map quick.)
+    bool near_ramp = false;
+    for (const auto& [rx, rz] : g_ramps) near_ramp = near_ramp || std::hypot(x - rx, z - rz) < 2500.0f;
     for (const float dx : { -150.0f, 0.0f, 150.0f }) {
         for (const float dz : { -150.0f, 0.0f, 150.0f }) {
-            if (ramp_surface(x + dx, z + dz, -1e9f) > -1e8f) return false;
+            if (near_ramp && ramp_surface(x + dx, z + dz, -1e9f) > -1e8f) return false;
         }
     }
-    return rider_water(rdram, course, x, z) && rider_water(rdram, course, x + 150.0f, z) && rider_water(rdram, course, x - 150.0f, z) &&
-           rider_water(rdram, course, x, z + 150.0f) && rider_water(rdram, course, x, z - 150.0f);
+    return true;
 }
 // Where a rider may be at all, away from the park: water to float in, clear
-// of the ramps' decks (no margin: sights by the shore are reached).
+// of the ramps' decks (no margin: sights by the shore are reached). Here,
+// what else keeps a square closed.
 WaterMap g_wet_map;
-bool rider_wet(const uint8_t* rdram, uint32_t course, float x, float z) {
+bool rider_wet_clear(float x, float z) {
     for (const auto& [rx, rz] : g_ramps) {
         if (std::hypot(x - rx, z - rz) < 500.0f) return false;
     }
     for (const auto& [mx, mz] : g_mines) {
         if (std::hypot(x - mx, z - mz) < 120.0f) return false;
     }
-    if (ramp_surface(x, z, -1e9f) > -1e8f) return false;
-    return rider_water(rdram, course, x, z);
+    for (const auto& [rx, rz] : g_ramps) {
+        if (std::hypot(x - rx, z - rz) < 2500.0f && ramp_surface(x, z, -1e9f) > -1e8f) return false;
+    }
+    return true;
 }
 
 void build_rider_map(const uint8_t* rdram) {
@@ -3048,17 +3185,197 @@ void build_rider_map(const uint8_t* rdram) {
         g_mines.emplace_back(x, z);
         g_ramp_obstacles.push_back({ x, z, kMineRoom, true });
     }
-    build_map(rdram, g_rider_map, rider_open, 8000.0f);
-    build_map(rdram, g_wet_map, rider_wet, 8000.0f);
+    // Both maps from one look at each square's water (rider_water): looking
+    // six times a square took 1.2 seconds on Twilight City's 381 by 381,
+    // a stall in the headset as a ride began.
+    WaterMap water;
+    build_map(rdram, water, rider_water, 8000.0f);
+    g_rider_map = water;
+    g_wet_map = water;
+    auto wet = [&](int i, int j) { return i >= 0 && j >= 0 && i < water.w && j < water.h && water.open[size_t(j) * size_t(water.w) + size_t(i)]; };
+    for (int j = 0; j < water.h; ++j)
+        for (int i = 0; i < water.w; ++i) {
+            const size_t c = size_t(j) * size_t(water.w) + size_t(i);
+            if (!water.open[c]) continue;
+            const float x = water.x0 + (float(i) + 0.5f) * kCell, z = water.z0 + (float(j) + 0.5f) * kCell;
+            g_wet_map.open[c] = rider_wet_clear(x, z);
+            g_rider_map.open[c] = wet(i + 1, j) && wet(i - 1, j) && wet(i, j + 1) && wet(i, j - 1) && rider_open_clear(x, z);
+        }
     std::fprintf(stderr, "[wr64-companion] course %u: the riders' map, %d by %d squares, %zu ramps, %zu mines\n", g_course,
                  g_rider_map.w, g_rider_map.h, g_ramps.size(), g_mines.size());
     for (const auto& [mx, mz] : g_mines) std::fprintf(stderr, "[wr64-companion] a mine at %.0f %.0f\n", mx, mz);
+    // WR64_RIDER_MAP_DUMP=<folder>: the map as a picture (rider_map_<course>.pgm,
+    // white open, black not; its corner and square size in a comment).
+    if (const char* folder = std::getenv("WR64_RIDER_MAP_DUMP")) {
+        const std::string path = std::string(folder) + "/rider_map_" + std::to_string(g_course) + ".pgm";
+        if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+            std::fprintf(f, "P5\n# x0 %.0f z0 %.0f cell %.0f\n%d %d\n255\n", g_rider_map.x0, g_rider_map.z0, kCell, g_rider_map.w, g_rider_map.h);
+            for (const uint8_t o : g_rider_map.open) std::fputc(o ? 255 : 0, f);
+            std::fclose(f);
+        }
+    }
     std::fflush(stderr);
 }
 
 bool map_open(const WaterMap& m, float x, float z) {
     const int i = int(std::floor((x - m.x0) / kCell)), j = int(std::floor((z - m.z0) / kCell));
     return i >= 0 && j >= 0 && i < m.w && j < m.h && m.open[size_t(j) * size_t(m.w) + size_t(i)];
+}
+
+// Away from the park, where there is much out-of-bounds water round the
+// land (the user, 2026-11-03: Sunny Beach, Port Blue, Glacier Coast), a
+// second way round besides the buoys' line: all the way round the land.
+// Each is the user's own ride round it (WR64_POSITION_LOG, between two F2
+// marks, 2026-11-03), its stops dropped, 250 apart, smoothed; the riders'
+// map couldn't find them (Port Blue's walls are too thin for it, Glacier
+// Coast's land runs off its edge). Joined up, points kSample apart. The
+// user rode them, so they are water: the riders' maps are opened along
+// them (Glacier Coast's has its northern channel as land).
+struct ShoreRoute { uint32_t course; std::vector<std::pair<float, float>> points; };
+const std::vector<ShoreRoute>& shore_routes() {
+    static const std::vector<ShoreRoute> routes = {
+        // Sunny Beach: round the sandbar and the mainland.
+        { 1, {
+              { 303, -2377 }, { 544, -2382 }, { 786, -2391 }, { 1030, -2404 }, { 1277, -2415 }, { 1524, -2424 }, { 1773, -2429 }, { 2023, -2434 },
+              { 2272, -2439 }, { 2522, -2448 }, { 2771, -2462 }, { 3019, -2483 }, { 3266, -2513 }, { 3512, -2551 }, { 3756, -2599 }, { 3998, -2656 },
+              { 4239, -2722 }, { 4476, -2796 }, { 4712, -2877 }, { 4946, -2964 }, { 5179, -3055 }, { 5411, -3148 }, { 5642, -3242 }, { 5874, -3333 },
+              { 6108, -3421 }, { 6344, -3502 }, { 6582, -3575 }, { 6822, -3640 }, { 7064, -3697 }, { 7308, -3746 }, { 7554, -3787 }, { 7801, -3822 },
+              { 8049, -3851 }, { 8298, -3873 }, { 8546, -3887 }, { 8794, -3892 }, { 9041, -3884 }, { 9287, -3863 }, { 9531, -3827 }, { 9773, -3777 },
+              { 10013, -3714 }, { 10250, -3640 }, { 10485, -3558 }, { 10719, -3471 }, { 10952, -3380 }, { 11184, -3286 }, { 11414, -3190 }, { 11644, -3092 },
+              { 11874, -2993 }, { 12103, -2894 }, { 12332, -2794 }, { 12562, -2696 }, { 12793, -2600 }, { 13025, -2508 }, { 13258, -2421 }, { 13494, -2340 },
+              { 13732, -2264 }, { 13971, -2193 }, { 14212, -2126 }, { 14453, -2061 }, { 14694, -1995 }, { 14934, -1927 }, { 15173, -1855 }, { 15410, -1778 },
+              { 15644, -1692 }, { 15872, -1597 }, { 16093, -1489 }, { 16302, -1365 }, { 16496, -1223 }, { 16667, -1062 }, { 16811, -882 }, { 16919, -685 },
+              { 16987, -475 }, { 17011, -260 }, { 16987, -46 }, { 16917, 158 }, { 16803, 344 }, { 16652, 504 }, { 16471, 634 }, { 16265, 732 },
+              { 16042, 796 }, { 15808, 831 }, { 15568, 841 }, { 15324, 835 }, { 15079, 820 }, { 14832, 805 }, { 14586, 798 }, { 14340, 804 },
+              { 14095, 826 }, { 13852, 864 }, { 13611, 918 }, { 13372, 985 }, { 13137, 1065 }, { 12905, 1154 }, { 12676, 1252 }, { 12450, 1357 },
+              { 12227, 1468 }, { 12007, 1586 }, { 11791, 1710 }, { 11580, 1842 }, { 11376, 1982 }, { 11179, 2133 }, { 10992, 2293 }, { 10812, 2464 },
+              { 10640, 2642 }, { 10472, 2825 }, { 10306, 3012 }, { 10140, 3197 }, { 9970, 3380 }, { 9796, 3557 }, { 9615, 3728 }, { 9427, 3890 },
+              { 9233, 4044 }, { 9032, 4190 }, { 8825, 4328 }, { 8613, 4460 }, { 8398, 4587 }, { 8181, 4709 }, { 7961, 4828 }, { 7739, 4941 },
+              { 7514, 5046 }, { 7286, 5142 }, { 7053, 5224 }, { 6816, 5293 }, { 6576, 5349 }, { 6332, 5393 }, { 6086, 5428 }, { 5839, 5458 },
+              { 5591, 5484 }, { 5342, 5507 }, { 5093, 5528 }, { 4845, 5544 }, { 4596, 5554 }, { 4346, 5557 }, { 4097, 5553 }, { 3848, 5544 },
+              { 3598, 5531 }, { 3349, 5517 }, { 3100, 5502 }, { 2850, 5490 }, { 2600, 5480 }, { 2351, 5474 }, { 2101, 5472 }, { 1851, 5473 },
+              { 1601, 5476 }, { 1352, 5479 }, { 1102, 5483 }, { 852, 5484 }, { 602, 5482 }, { 352, 5478 }, { 102, 5471 }, { -147, 5463 },
+              { -397, 5454 }, { -647, 5445 }, { -897, 5438 }, { -1146, 5433 }, { -1396, 5431 }, { -1646, 5431 }, { -1896, 5434 }, { -2146, 5439 },
+              { -2396, 5445 }, { -2646, 5454 }, { -2896, 5463 }, { -3145, 5474 }, { -3395, 5486 }, { -3645, 5498 }, { -3894, 5509 }, { -4144, 5519 },
+              { -4394, 5527 }, { -4644, 5532 }, { -4893, 5533 }, { -5143, 5528 }, { -5392, 5516 }, { -5640, 5496 }, { -5887, 5467 }, { -6133, 5429 },
+              { -6376, 5380 }, { -6618, 5321 }, { -6857, 5252 }, { -7093, 5175 }, { -7327, 5090 }, { -7559, 4997 }, { -7786, 4897 }, { -8010, 4788 },
+              { -8227, 4670 }, { -8438, 4540 }, { -8641, 4400 }, { -8839, 4251 }, { -9032, 4097 }, { -9224, 3946 }, { -9418, 3808 }, { -9618, 3694 },
+              { -9824, 3614 }, { -10035, 3576 }, { -10249, 3584 }, { -10461, 3636 }, { -10671, 3726 }, { -10875, 3845 }, { -11076, 3983 }, { -11273, 4132 },
+              { -11470, 4284 }, { -11668, 4436 }, { -11870, 4583 }, { -12075, 4725 }, { -12283, 4862 }, { -12495, 4993 }, { -12710, 5120 }, { -12928, 5242 },
+              { -13148, 5358 }, { -13370, 5465 }, { -13595, 5557 }, { -13821, 5627 }, { -14048, 5666 }, { -14272, 5667 }, { -14490, 5628 }, { -14697, 5547 },
+              { -14889, 5428 }, { -15059, 5277 }, { -15204, 5098 }, { -15318, 4899 }, { -15398, 4685 }, { -15442, 4461 }, { -15447, 4233 }, { -15415, 4005 },
+              { -15348, 3782 }, { -15251, 3567 }, { -15131, 3359 }, { -14993, 3158 }, { -14844, 2961 }, { -14690, 2768 }, { -14530, 2578 }, { -14366, 2394 },
+              { -14194, 2219 }, { -14013, 2055 }, { -13820, 1906 }, { -13617, 1769 }, { -13404, 1645 }, { -13185, 1529 }, { -12961, 1419 }, { -12735, 1312 },
+              { -12508, 1208 }, { -12280, 1106 }, { -12051, 1005 }, { -11822, 906 }, { -11592, 809 }, { -11361, 712 }, { -11131, 616 }, { -10901, 519 },
+              { -10672, 419 }, { -10446, 314 }, { -10223, 203 }, { -10003, 86 }, { -9786, -37 }, { -9571, -164 }, { -9358, -294 }, { -9145, -426 },
+              { -8934, -559 }, { -8722, -692 }, { -8511, -825 }, { -8299, -959 }, { -8088, -1093 }, { -7878, -1227 }, { -7667, -1362 }, { -7456, -1495 },
+              { -7243, -1627 }, { -7029, -1753 }, { -6811, -1872 }, { -6589, -1981 }, { -6362, -2076 }, { -6129, -2154 }, { -5892, -2215 }, { -5650, -2259 },
+              { -5405, -2287 }, { -5158, -2303 }, { -4909, -2311 }, { -4659, -2313 }, { -4410, -2314 }, { -4160, -2314 }, { -3910, -2315 }, { -3660, -2318 },
+              { -3410, -2322 }, { -3160, -2327 }, { -2910, -2334 }, { -2660, -2342 }, { -2410, -2351 }, { -2161, -2360 }, { -1911, -2370 }, { -1661, -2380 },
+              { -1411, -2389 }, { -1162, -2395 }, { -914, -2397 }, { -667, -2396 }, { -422, -2390 }, { -179, -2382 }, { 62, -2377 },
+          } },
+        // Port Blue: round the whole harbour.
+        { 5, {
+              { -6290, 166 }, { -6319, 385 }, { -6351, 609 }, { -6382, 842 }, { -6412, 1080 }, { -6439, 1324 }, { -6464, 1572 }, { -6486, 1820 },
+              { -6508, 2070 }, { -6528, 2319 }, { -6548, 2568 }, { -6566, 2817 }, { -6584, 3067 }, { -6600, 3316 }, { -6614, 3566 }, { -6626, 3815 },
+              { -6636, 4065 }, { -6643, 4315 }, { -6646, 4564 }, { -6644, 4814 }, { -6637, 5063 }, { -6621, 5311 }, { -6594, 5557 }, { -6554, 5800 },
+              { -6495, 6036 }, { -6417, 6266 }, { -6318, 6487 }, { -6199, 6699 }, { -6064, 6903 }, { -5915, 7100 }, { -5756, 7289 }, { -5588, 7471 },
+              { -5413, 7641 }, { -5227, 7794 }, { -5030, 7924 }, { -4820, 8025 }, { -4599, 8097 }, { -4367, 8139 }, { -4128, 8157 }, { -3884, 8156 },
+              { -3637, 8145 }, { -3388, 8129 }, { -3139, 8114 }, { -2890, 8102 }, { -2640, 8094 }, { -2391, 8089 }, { -2142, 8084 }, { -1896, 8073 },
+              { -1654, 8051 }, { -1419, 8009 }, { -1194, 7942 }, { -983, 7847 }, { -784, 7725 }, { -598, 7579 }, { -420, 7416 }, { -245, 7243 },
+              { -71, 7067 }, { 106, 6893 }, { 287, 6721 }, { 471, 6554 }, { 659, 6389 }, { 849, 6226 }, { 1040, 6065 }, { 1232, 5905 },
+              { 1425, 5747 }, { 1619, 5589 }, { 1814, 5432 }, { 2009, 5276 }, { 2205, 5121 }, { 2401, 4966 }, { 2597, 4811 }, { 2793, 4656 },
+              { 2989, 4500 }, { 3185, 4345 }, { 3380, 4188 }, { 3574, 4031 }, { 3768, 3873 }, { 3961, 3714 }, { 4152, 3554 }, { 4343, 3392 },
+              { 4532, 3229 }, { 4720, 3064 }, { 4905, 2896 }, { 5086, 2725 }, { 5262, 2549 }, { 5431, 2367 }, { 5588, 2178 }, { 5731, 1980 },
+              { 5856, 1772 }, { 5959, 1554 }, { 6041, 1327 }, { 6101, 1092 }, { 6143, 851 }, { 6170, 605 }, { 6186, 357 }, { 6195, 108 },
+              { 6199, -141 }, { 6201, -391 }, { 6203, -641 }, { 6206, -891 }, { 6211, -1141 }, { 6220, -1391 }, { 6232, -1640 }, { 6247, -1889 },
+              { 6265, -2139 }, { 6285, -2388 }, { 6306, -2637 }, { 6328, -2886 }, { 6349, -3135 }, { 6369, -3384 }, { 6388, -3633 }, { 6403, -3883 },
+              { 6415, -4132 }, { 6424, -4382 }, { 6429, -4632 }, { 6431, -4882 }, { 6430, -5131 }, { 6427, -5381 }, { 6421, -5631 }, { 6413, -5881 },
+              { 6403, -6131 }, { 6391, -6380 }, { 6376, -6630 }, { 6356, -6878 }, { 6327, -7123 }, { 6285, -7363 }, { 6223, -7592 }, { 6136, -7803 },
+              { 6020, -7992 }, { 5872, -8151 }, { 5695, -8279 }, { 5492, -8375 }, { 5270, -8442 }, { 5034, -8487 }, { 4790, -8516 }, { 4543, -8535 },
+              { 4294, -8547 }, { 4044, -8557 }, { 3794, -8565 }, { 3544, -8571 }, { 3294, -8576 }, { 3044, -8580 }, { 2794, -8582 }, { 2544, -8584 },
+              { 2294, -8585 }, { 2044, -8584 }, { 1794, -8584 }, { 1544, -8583 }, { 1294, -8583 }, { 1044, -8584 }, { 794, -8585 }, { 544, -8588 },
+              { 294, -8592 }, { 45, -8597 }, { -205, -8604 }, { -455, -8611 }, { -705, -8620 }, { -955, -8628 }, { -1205, -8637 }, { -1455, -8646 },
+              { -1704, -8653 }, { -1954, -8657 }, { -2202, -8656 }, { -2450, -8646 }, { -2696, -8624 }, { -2941, -8590 }, { -3183, -8541 }, { -3421, -8478 },
+              { -3656, -8400 }, { -3885, -8308 }, { -4107, -8201 }, { -4321, -8081 }, { -4527, -7947 }, { -4726, -7800 }, { -4919, -7645 }, { -5107, -7483 },
+              { -5291, -7316 }, { -5470, -7144 }, { -5641, -6967 }, { -5800, -6781 }, { -5941, -6586 }, { -6061, -6379 }, { -6156, -6161 }, { -6227, -5932 },
+              { -6275, -5694 }, { -6304, -5451 }, { -6319, -5205 }, { -6323, -4956 }, { -6322, -4706 }, { -6317, -4457 }, { -6309, -4207 }, { -6301, -3957 },
+              { -6292, -3707 }, { -6285, -3458 }, { -6278, -3208 }, { -6274, -2958 }, { -6270, -2708 }, { -6268, -2458 }, { -6265, -2208 }, { -6261, -1958 },
+              { -6256, -1708 }, { -6249, -1458 }, { -6242, -1211 }, { -6236, -966 }, { -6233, -727 }, { -6236, -494 }, { -6247, -270 }, { -6265, -51 },
+          } },
+        // Glacier Coast: round the land, through the northern channel.
+        { 8, {
+              { -5098, 3792 }, { -5090, 4010 }, { -5080, 4233 }, { -5068, 4465 }, { -5054, 4704 }, { -5039, 4948 }, { -5023, 5196 }, { -5007, 5445 },
+              { -4990, 5694 }, { -4973, 5944 }, { -4958, 6193 }, { -4944, 6443 }, { -4931, 6692 }, { -4915, 6941 }, { -4895, 7189 }, { -4865, 7434 },
+              { -4820, 7675 }, { -4757, 7908 }, { -4671, 8130 }, { -4558, 8337 }, { -4419, 8523 }, { -4254, 8686 }, { -4066, 8820 }, { -3859, 8922 },
+              { -3637, 8992 }, { -3406, 9028 }, { -3171, 9031 }, { -2936, 9003 }, { -2704, 8945 }, { -2477, 8863 }, { -2255, 8760 }, { -2038, 8643 },
+              { -1825, 8517 }, { -1612, 8386 }, { -1400, 8256 }, { -1186, 8127 }, { -970, 8001 }, { -754, 7877 }, { -536, 7753 }, { -319, 7630 },
+              { -101, 7507 }, { 115, 7382 }, { 331, 7255 }, { 545, 7127 }, { 759, 6998 }, { 971, 6866 }, { 1182, 6731 }, { 1390, 6594 },
+              { 1596, 6452 }, { 1797, 6305 }, { 1992, 6152 }, { 2181, 5990 }, { 2361, 5820 }, { 2531, 5640 }, { 2689, 5451 }, { 2833, 5252 },
+              { 2959, 5043 }, { 3065, 4826 }, { 3145, 4600 }, { 3198, 4369 }, { 3219, 4134 }, { 3207, 3900 }, { 3165, 3669 }, { 3095, 3441 },
+              { 3004, 3217 }, { 2903, 2996 }, { 2801, 2774 }, { 2710, 2549 }, { 2639, 2321 }, { 2594, 2089 }, { 2580, 1854 }, { 2597, 1619 },
+              { 2644, 1386 }, { 2718, 1156 }, { 2812, 932 }, { 2923, 712 }, { 3046, 496 }, { 3175, 283 }, { 3308, 71 }, { 3444, -139 },
+              { 3580, -348 }, { 3717, -557 }, { 3854, -766 }, { 3993, -974 }, { 4133, -1181 }, { 4274, -1387 }, { 4418, -1591 }, { 4564, -1795 },
+              { 4711, -1997 }, { 4860, -2197 }, { 5010, -2397 }, { 5161, -2597 }, { 5312, -2796 }, { 5463, -2995 }, { 5614, -3194 }, { 5765, -3393 },
+              { 5915, -3593 }, { 6065, -3793 }, { 6214, -3994 }, { 6363, -4195 }, { 6511, -4396 }, { 6659, -4598 }, { 6806, -4800 }, { 6952, -5003 },
+              { 7096, -5207 }, { 7238, -5412 }, { 7374, -5621 }, { 7504, -5833 }, { 7626, -6050 }, { 7740, -6271 }, { 7845, -6496 }, { 7944, -6725 },
+              { 8037, -6957 }, { 8126, -7190 }, { 8214, -7424 }, { 8302, -7657 }, { 8391, -7891 }, { 8481, -8124 }, { 8573, -8357 }, { 8666, -8589 },
+              { 8761, -8820 }, { 8859, -9050 }, { 8959, -9279 }, { 9062, -9506 }, { 9168, -9732 }, { 9278, -9956 }, { 9392, -10179 }, { 9510, -10399 },
+              { 9632, -10617 }, { 9758, -10832 }, { 9888, -11045 }, { 10023, -11256 }, { 10160, -11465 }, { 10299, -11672 }, { 10440, -11878 }, { 10581, -12085 },
+              { 10721, -12292 }, { 10858, -12500 }, { 10988, -12712 }, { 11108, -12927 }, { 11212, -13147 }, { 11294, -13371 }, { 11345, -13594 }, { 11357, -13812 },
+              { 11326, -14015 }, { 11248, -14194 }, { 11126, -14336 }, { 10967, -14433 }, { 10783, -14478 }, { 10586, -14469 }, { 10391, -14407 }, { 10207, -14298 },
+              { 10039, -14150 }, { 9890, -13972 }, { 9756, -13773 }, { 9632, -13561 }, { 9514, -13344 }, { 9395, -13125 }, { 9273, -12907 }, { 9146, -12693 },
+              { 9013, -12482 }, { 8876, -12274 }, { 8733, -12069 }, { 8588, -11866 }, { 8440, -11664 }, { 8291, -11463 }, { 8144, -11262 }, { 8000, -11058 },
+              { 7859, -10852 }, { 7723, -10643 }, { 7592, -10431 }, { 7466, -10215 }, { 7347, -9996 }, { 7234, -9774 }, { 7125, -9549 }, { 7021, -9323 },
+              { 6918, -9096 }, { 6812, -8871 }, { 6700, -8651 }, { 6576, -8440 }, { 6438, -8242 }, { 6281, -8060 }, { 6106, -7898 }, { 5913, -7755 },
+              { 5705, -7630 }, { 5486, -7520 }, { 5259, -7423 }, { 5027, -7334 }, { 4792, -7251 }, { 4554, -7174 }, { 4315, -7102 }, { 4075, -7037 },
+              { 3833, -6980 }, { 3588, -6930 }, { 3343, -6888 }, { 3096, -6851 }, { 2848, -6819 }, { 2600, -6791 }, { 2352, -6765 }, { 2103, -6739 },
+              { 1855, -6712 }, { 1607, -6681 }, { 1361, -6645 }, { 1117, -6601 }, { 874, -6548 }, { 635, -6484 }, { 397, -6412 }, { 161, -6333 },
+              { -75, -6252 }, { -311, -6172 }, { -548, -6098 }, { -788, -6032 }, { -1029, -5977 }, { -1273, -5936 }, { -1517, -5911 }, { -1762, -5905 },
+              { -2006, -5918 }, { -2247, -5952 }, { -2486, -6005 }, { -2722, -6076 }, { -2954, -6162 }, { -3182, -6258 }, { -3409, -6363 }, { -3633, -6472 },
+              { -3856, -6585 }, { -4078, -6700 }, { -4299, -6817 }, { -4516, -6938 }, { -4730, -7065 }, { -4936, -7201 }, { -5131, -7349 }, { -5313, -7510 },
+              { -5479, -7686 }, { -5628, -7878 }, { -5761, -8082 }, { -5879, -8297 }, { -5986, -8520 }, { -6086, -8748 }, { -6181, -8979 }, { -6273, -9211 },
+              { -6364, -9444 }, { -6456, -9677 }, { -6549, -9908 }, { -6645, -10139 }, { -6746, -10367 }, { -6853, -10592 }, { -6966, -10814 }, { -7086, -11033 },
+              { -7212, -11248 }, { -7343, -11460 }, { -7481, -11668 }, { -7623, -11873 }, { -7772, -12073 }, { -7927, -12266 }, { -8091, -12451 }, { -8264, -12624 },
+              { -8450, -12778 }, { -8646, -12907 }, { -8852, -13004 }, { -9060, -13061 }, { -9263, -13071 }, { -9449, -13030 }, { -9604, -12940 }, { -9716, -12806 },
+              { -9779, -12636 }, { -9789, -12443 }, { -9750, -12237 }, { -9669, -12028 }, { -9557, -11820 }, { -9423, -11616 }, { -9277, -11417 }, { -9124, -11220 },
+              { -8971, -11023 }, { -8820, -10825 }, { -8676, -10622 }, { -8541, -10415 }, { -8417, -10201 }, { -8306, -9980 }, { -8208, -9753 }, { -8121, -9521 },
+              { -8046, -9285 }, { -7979, -9045 }, { -7920, -8803 }, { -7865, -8559 }, { -7813, -8315 }, { -7761, -8070 }, { -7707, -7827 }, { -7646, -7586 },
+              { -7576, -7349 }, { -7492, -7118 }, { -7393, -6895 }, { -7276, -6681 }, { -7141, -6478 }, { -6990, -6286 }, { -6826, -6102 }, { -6654, -5924 },
+              { -6480, -5748 }, { -6311, -5569 }, { -6152, -5384 }, { -6011, -5189 }, { -5890, -4983 }, { -5793, -4765 }, { -5718, -4536 }, { -5662, -4299 },
+              { -5622, -4057 }, { -5593, -3810 }, { -5572, -3562 }, { -5555, -3312 }, { -5541, -3063 }, { -5527, -2813 }, { -5513, -2564 }, { -5497, -2314 },
+              { -5479, -2065 }, { -5458, -1816 }, { -5435, -1568 }, { -5410, -1319 }, { -5385, -1070 }, { -5360, -821 }, { -5337, -573 }, { -5314, -324 },
+              { -5293, -75 }, { -5273, 175 }, { -5254, 424 }, { -5235, 673 }, { -5218, 923 }, { -5201, 1172 }, { -5185, 1421 }, { -5170, 1671 },
+              { -5155, 1920 }, { -5143, 2170 }, { -5132, 2418 }, { -5124, 2662 }, { -5118, 2902 }, { -5113, 3134 }, { -5109, 3357 }, { -5105, 3575 },
+          } },
+    };
+    return routes;
+}
+void build_shore_lap() {
+    g_shore_lap.clear();
+    for (const ShoreRoute& r : shore_routes()) {
+        if (r.course != g_course) continue;
+        const size_t n = r.points.size();
+        for (size_t k = 0; n >= 3 && k < n; ++k) {
+            const auto [ax, az] = r.points[k];
+            const auto [bx, bz] = r.points[(k + 1) % n];
+            const float length = std::hypot(bx - ax, bz - az);
+            for (float t = 0.0f; t < length; t += kSample) g_shore_lap.emplace_back(ax + (bx - ax) * t / length, az + (bz - az) * t / length);
+        }
+    }
+    for (WaterMap* m : { &g_rider_map, &g_wet_map }) {
+        if (m->w == 0) continue;
+        for (const auto& [x, z] : g_shore_lap) {
+            const int ci = int(std::floor((x - m->x0) / kCell)), cj = int(std::floor((z - m->z0) / kCell));
+            for (int j = cj - 1; j <= cj + 1; ++j)
+                for (int i = ci - 1; i <= ci + 1; ++i)
+                    if (i >= 0 && j >= 0 && i < m->w && j < m->h) m->open[size_t(j) * size_t(m->w) + size_t(i)] = 1;
+        }
+    }
+    if (!g_shore_lap.empty()) {
+        std::fprintf(stderr, "[wr64-companion] course %u: a way round its shore, %zu points\n", g_course, g_shore_lap.size());
+        std::fflush(stderr);
+    }
 }
 
 void step_on(float& x, float& z, float heading, float& speed, float dt) {
@@ -3397,6 +3714,7 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
     const Clock::time_point now = Clock::now();
     const bool fresh = g_racers[0].character < 0 || now - last > std::chrono::seconds(2) || course != g_course;
     if (fresh) {
+        const auto setup_from = std::chrono::steady_clock::now();
         g_course = course;
         const int player = player_character(rdram);
         std::vector<int> others;
@@ -3409,7 +3727,17 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         if (course != 0) {
             build_rider_map(rdram);
             build_course_lap(rdram);
+            build_shore_lap();
+            find_helicopter(rdram);
             build_course_spots(rdram);
+            std::fprintf(stderr, "[wr64-companion] course %u: set up in %lld ms\n", course,
+                         (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - setup_from).count());
+            if (const char* folder = std::getenv("WR64_RIDER_MAP_DUMP")) {
+                if (std::FILE* f = std::fopen((std::string(folder) + "/rider_lap_" + std::to_string(course) + ".txt").c_str(), "w")) {
+                    for (const auto& [x, z] : g_course_lap) std::fprintf(f, "%.0f %.0f\n", x, z);
+                    std::fclose(f);
+                }
+            }
         }
         else {
             if (std::getenv("WR64_OBJECT_DUMP")) { build_rider_map(rdram); g_ramps.clear(); g_ramp_angles.clear(); g_ramp_obstacles.clear(); }
@@ -3419,6 +3747,8 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
             g_mines.clear();
             g_slope_pieces.clear();
             g_ramp_shapes.clear();
+            g_shore_lap.clear();
+            g_helicopter_sight = -1;
         }
         std::fprintf(stderr, "[wr64-companion] character %d rides with the player (character %d)%s; %d and %d ride together%s\n",
                      others[0], player, g_racers[0].ready ? "" : " (its models did not load)", others[1], others[2],
@@ -3426,9 +3756,26 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         std::fflush(stderr);
     }
     last = now;
-    // The dolphin, on the courses it suits: not Dolphin Park (the game has
-    // its own), Twilight City (a city) or Glacier Coast (too cold).
-    const bool dolphin_course = course != 0 && course != 6 && course != 7;
+    find_helicopter(rdram);
+    place_helicopter_sight();
+    // WR64_ANIMAL_LOG=1: the game's animals table (D_801CF060, 30 of 0xBC:
+    // type +0, place +0xC/+0x10/+0x14) every 3 seconds, for finding what
+    // moves on a course (Port Blue's helicopter).
+    static const bool animal_log = std::getenv("WR64_ANIMAL_LOG") != nullptr;
+    static auto animal_at = now;
+    if (animal_log && now - animal_at > std::chrono::seconds(3)) {
+        animal_at = now;
+        auto real_at = [&](uint32_t a) { float v; const uint32_t w = word_at(rdram, a); std::memcpy(&v, &w, 4); return v; };
+        for (uint32_t i = 0; i < 30; ++i) {
+            const uint32_t a = 0x1CF060 + i * 0xBC;
+            if (word_at(rdram, a) == 0) continue;
+            std::fprintf(stderr, "[wr64-animal] %u type %u at %.0f %.0f %.0f\n", i, word_at(rdram, a), real_at(a + 0xC), real_at(a + 0x10), real_at(a + 0x14));
+        }
+        std::fflush(stderr);
+    }
+    // The dolphin, on every course but Dolphin Park (the game has its own):
+    // the user, 2026-11-03.
+    const bool dolphin_course = course != 0;
     if (fresh) {
         g_dolphin_ready = dolphin_course && load_dolphin(rdram);
         g_dolphin.placed = false;
@@ -3609,7 +3956,7 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         if (report) {
             std::fprintf(stderr, "[wr64-companion] at %.0f %.0f %.0f, %s, speed %.0f, heading %.2f\n", d.x, d.y, d.z,
                          d.free == Free::Follow ? "riding along" : d.free == Free::Rest ? "resting" : d.free == Free::Watch ? "watching"
-                         : d.routine == Routine::Stunts ? "stunts" : d.routine == Routine::Lap ? "lap" : "practising",
+                         : d.free == Free::Dolphin ? "with the dolphin" : d.routine == Routine::Stunts ? "stunts" : d.routine == Routine::Lap ? "lap" : d.routine == Routine::Shore ? "round the shore" : "practising",
                          d.speed, d.heading);
             std::fflush(stderr);
         }
@@ -3671,8 +4018,8 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
                 const Drive& o = g_drives[i];
                 std::fprintf(stderr, "[wr64-companion] %s at %.0f %.0f, %s, speed %.0f\n", kMindNames[o.mind], o.x, o.z,
                              o.free == Free::Follow ? "riding along" : o.free == Free::Rest ? (o.parked ? "resting" : "off to rest")
-                             : o.free == Free::Watch ? "watching" : o.routine == Routine::Stunts ? "stunts" : o.routine == Routine::Lap ? "lap"
-                             : "practising", o.speed);
+                             : o.free == Free::Watch ? "watching" : o.free == Free::Dolphin ? "with the dolphin" : o.routine == Routine::Stunts ? "stunts" : o.routine == Routine::Lap ? "lap"
+                             : o.routine == Routine::Shore ? "round the shore" : "practising", o.speed);
             }
             const Drive& l = g_drives[kTrioLeader];
             std::fprintf(stderr, "[wr64-companion] the trio's wings %.0f and %.0f from their places\n",

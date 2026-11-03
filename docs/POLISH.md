@@ -35,8 +35,9 @@ together.
 | 2.1 | Black box flashes on screen as the course-intro card fades in (seen at every course change in the 2026-10-28 recording) | course intro / loading | open |
 | 2.2 | Brief flat-screen flashes at transitions | menus ↔ races | open |
 | 2.3 | Course card's box flashes in during the fade | course intro | open |
-| 2.4 | Left eye flickers white on the initials-entry screen (Sunset Bay TT; not on Port Blue) | TT initials, state 0x64 | open |
+| 2.4 | Left eye flickers white on the initials-entry screen (Sunset Bay TT; not on Port Blue); also on course select and in the attract scene (2026-11-03: the menu drawn flat on white, single frames). CAUSE: with MSAA every pass is drawn in the frame's own target and resolved into its own; the HUD's over-white pass was drawn there last, and a frame the game shows again unredrawn is presented from that target. Fix: the left eye is drawn last (tools/patch_rt64_vr.py). Mirror capture of course select: 6 flashes in 1100 frames before, 0 after | menus, attract, TT initials | fixed, awaiting headset check |
 | 2.5 | Remove the black screen-wipe transitions in VR — they fill the screen in flat but look odd on the floating panel (low priority) | menus, before/after races | open |
+| 2.6 | The "Wave Race 64" logo replaces the sky for a few frames now and then in the attract scene. Not new; the user feels it comes and goes as other changes are made. Not from re-shown frames (none were counted in a 10-minute attract run, 2026-11-03) | attract scene | open |
 
 ## Round 3 — falls and swimming
 

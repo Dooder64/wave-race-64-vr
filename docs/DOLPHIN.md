@@ -12,8 +12,9 @@ its audience (flat-tested only). Code: the dolphin's section at the end of
 riders' side in `src/rider_minds.cpp` (Activity::Dolphin, each personality's
 `dolphin` liking, `dolphin_act`), the first rider's Free::Dolphin and the
 pair's PairRoutine::Dolphin. Out
-on every course but Dolphin Park, Twilight City and Glacier Coast, in a free
-roam. Test switches: `WR64_DOLPHIN_LOG=1` (its decisions, and where it is
+on every course but Dolphin Park (which has the game's own), in a free
+roam: the user asked for Twilight City and Glacier Coast too on
+2026-11-03. Test switches: `WR64_DOLPHIN_LOG=1` (its decisions, and where it is
 every 2 seconds), `WR64_DOLPHIN_TEST_ANIM=<0-7>` (an animation in front of
 the player, in a scripted run).
 

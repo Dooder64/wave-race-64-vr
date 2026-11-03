@@ -20,6 +20,7 @@
 #include <ctime>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <SDL.h>
@@ -954,17 +955,32 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
             if (event->key.keysym.sym == SDLK_F6) wr64::vr::recenter();
             if (event->key.keysym.sym == SDLK_F4) wr64::vr::recover();
             if (event->key.keysym.sym == SDLK_F3) wr64::swim_request_throw();
-            if (event->key.keysym.sym == SDLK_F2) {
-                wr64::request_mark();
-#if defined(_WIN32)
-                save_mark_picture();
+#if !defined(_WIN32)
+            if (event->key.keysym.sym == SDLK_F2) wr64::request_mark();
 #endif
-            }
             if (event->key.keysym.sym == SDLK_F7) wr64::vr::cycle_debug_offset();
             if (event->key.keysym.sym == SDLK_F8) wr64::vr::cycle_stereo();
         }
         return 0;
     }, nullptr);
+
+#if defined(_WIN32)
+    // F2 whichever window has the keyboard: riding in the headset, the game's
+    // window often hasn't (the user's first ride round the courses lost 21 of
+    // 23 marks so), so the key is watched on Windows rather than waited for.
+    std::thread([] {
+        bool was = false;
+        for (;;) {
+            const bool down = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+            if (down && !was) {
+                wr64::request_mark();
+                save_mark_picture();
+            }
+            was = down;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }).detach();
+#endif
 
 #if WR64_WITH_FRONTEND
     // recompui reads the window through a global of its own; publish ours so

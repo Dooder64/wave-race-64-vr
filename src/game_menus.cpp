@@ -603,8 +603,11 @@ uint32_t draw_page(uint8_t* rdram, recomp_context* ctx, uint32_t gfx) {
 
 void open(uint8_t* rdram, recomp_context* ctx, Page page) {
     g_page = page;
-    g_row = 0;
     g_dolphin_park = chosen_course(rdram) == 0;
+    // On CONTINUE, so settings already as a player likes them are passed with
+    // one press (the user, 2026-11-03); EXTRAS, opened to change something,
+    // on its first row.
+    g_row = page == Page::Extras ? 0 : rows_of(page) - 1;
     std::fprintf(stderr, "[wr64] game menus: page %d opened\n", int(page));
     if (page == Page::ChampionshipWaves) store32(rdram, kIdle, 0);
     else if (page != Page::Extras) swallow_sound_once(kSoundStart);

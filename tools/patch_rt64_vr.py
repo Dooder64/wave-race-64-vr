@@ -879,19 +879,30 @@ WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: a headset's head, 
                         ext.sharedResources->wr64HeadTags[framesRendered] = wr64HeadTag;
                     }
 
-                    // wr64: in stereo this is the left eye, moved left by half the
-                    // separation.
-                    wr64EyeIndex = 0;
-                    wr64EyeOffsetX = wr64Stereo ? (-0.5f * wr64Separation) : 0.0f;
-                    wr64LensUsed = false;
-                    threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
-                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
+                    // wr64: the HUD on its own, twice -- over black, then over
+                    // white -- when the eyes last put a scene through the lens, into
+                    // targets of its own; then the right eye; then the left eye,
+                    // last. With multisampling every pass is drawn in the frame's
+                    // own target and resolved from it into its own, and a frame the
+                    // game shows again without redrawing it is shown from that
+                    // target: drawn last there, the HUD over white showed in the left
+                    // eye (the user's white flicker with the menu drawn flat, on
+                    // course select and in the attract scene, 2026-11-03).
+                    static bool wr64EyesUsedLens = false;
+                    bool wr64PanelDrawn = false;
+                    auto &wr64PanelTargets = ext.sharedResources->wr64PanelTargets;
+                    if (wr64Panel && wr64EyesUsedLens && (framesRendered < wr64PanelTargets[0].size()) && (framesRendered < wr64PanelTargets[1].size())) {
+                        for (int pass = 0; pass < 2; pass++) {
+                            wr64EyeIndex = 0;
+                            wr64EyeOffsetX = 0.0f;
+                            wr64PanelPass = pass + 1;
+                            threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                                interpolationTargetKey, interpolationTargetFbPairIndex, wr64PanelTargets[pass][framesRendered].get(), wr64StereoModifierBase + 0x100 * (pass + 1) + framesRendered,
+                                velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
+                        }
 
-                    // wr64: a frame no scene of which went through a headset's
-                    // lens -- a menu with nothing 3D behind it -- is shown on its
-                    // flat screen instead of to its eyes.
-                    if (framesRendered < ext.sharedResources->wr64ScreenFrames.size()) {
-                        ext.sharedResources->wr64ScreenFrames[framesRendered] = !wr64LensUsed;
+                        wr64PanelPass = 0;
+                        wr64PanelDrawn = true;
                     }
 
                     // wr64: and the right eye: the same frame at the same weights,
@@ -907,24 +918,22 @@ WORKLOAD_RENDER_REPLACEMENT = """                    // wr64: a headset's head, 
                             interpolationTargetKey, interpolationTargetFbPairIndex, rightTarget, wr64StereoModifierBase + framesRendered, velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
                     }
 
-                    // wr64: and the HUD on its own, twice -- over black, then over
-                    // white -- once the eyes have shown the frame put a scene
-                    // through the lens, into targets of its own.
-                    bool wr64PanelDrawn = false;
-                    auto &wr64PanelTargets = ext.sharedResources->wr64PanelTargets;
-                    if (wr64Panel && wr64LensUsed && (framesRendered < wr64PanelTargets[0].size()) && (framesRendered < wr64PanelTargets[1].size())) {
-                        for (int pass = 0; pass < 2; pass++) {
-                            wr64EyeIndex = 0;
-                            wr64EyeOffsetX = 0.0f;
-                            wr64PanelPass = pass + 1;
-                            threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
-                                interpolationTargetKey, interpolationTargetFbPairIndex, wr64PanelTargets[pass][framesRendered].get(), wr64StereoModifierBase + 0x100 * (pass + 1) + framesRendered,
-                                velocityUploaderUsed, false, tileInterpolationUsed, lookAtInterpolationUsed);
-                        }
+                    // wr64: in stereo this is the left eye, moved left by half the
+                    // separation.
+                    wr64EyeIndex = 0;
+                    wr64EyeOffsetX = wr64Stereo ? (-0.5f * wr64Separation) : 0.0f;
+                    wr64LensUsed = false;
+                    threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
 
-                        wr64PanelPass = 0;
-                        wr64PanelDrawn = true;
+                    // wr64: a frame no scene of which went through a headset's
+                    // lens -- a menu with nothing 3D behind it -- is shown on its
+                    // flat screen instead of to its eyes.
+                    if (framesRendered < ext.sharedResources->wr64ScreenFrames.size()) {
+                        ext.sharedResources->wr64ScreenFrames[framesRendered] = !wr64LensUsed;
                     }
+
+                    wr64EyesUsedLens = wr64LensUsed;
 
                     if (framesRendered < ext.sharedResources->wr64PanelFrames.size()) {
                         ext.sharedResources->wr64PanelFrames[framesRendered] = wr64PanelDrawn;
@@ -1135,6 +1144,31 @@ XR_DRAW_REPLACEMENT = """#               if defined(_WIN32)
                 // swap chain's buffers are; the wrapper owns nothing, so the
                 // runtime's images are never released here. The runtime hands an
                 // image over in the render-target state and takes it back so.
+                // (A frame shown again undrawn: the eyes from the pictures they
+                // were last drawn from, not from its own target as it was last
+                // left -- which could be any earlier picture.)
+                {
+                    static VIRenderer::RenderParams wr64LastEyeParams[2];
+                    static bool wr64LastEyesKept = false;
+                    static uint32_t wr64Presents = 0, wr64ReshownCount = 0;
+                    ++wr64Presents;
+                    if (!wr64Reshown) {
+                        wr64LastEyeParams[0] = wr64EyeParams[0];
+                        wr64LastEyeParams[1] = wr64EyeParams[1];
+                        wr64LastEyesKept = (wr64EyeParams[0].texture != nullptr);
+                    }
+                    else if (wr64LastEyesKept) {
+                        ++wr64ReshownCount;
+                        wr64EyeParams[0] = wr64LastEyeParams[0];
+                        wr64EyeParams[1] = wr64LastEyeParams[1];
+                    }
+                    if (wr64Presents >= 600) {
+                        if (wr64ReshownCount > 0) {
+                            fprintf(stderr, "[wr64-vr] %u of the last %u presents showed a frame again undrawn; the eyes were drawn from the last pictures\\n", wr64ReshownCount, wr64Presents);
+                        }
+                        wr64Presents = wr64ReshownCount = 0;
+                    }
+                }
                 if (wr64XrState == 1) {
                     const auto &wr64ScreenFrames = ext.sharedResources->wr64ScreenFrames;
                     const bool wr64Screen = (wr64XrFrame.screen.resource != nullptr) && (uint32_t(i) < wr64ScreenFrames.size()) && wr64ScreenFrames[i];
@@ -1813,6 +1847,44 @@ PANEL_FILL_GUARD_REPLACEMENT = """            case InstanceDrawCall::Type::FillR
 
 """
 
+# A present of a frame the workload didn't draw -- the game showing an older
+# picture again -- is presented from its target as it was last left. In the
+# headset that was a flash of whatever went there last (the user's left-eye
+# flashes to a flat picture in the attract scene, 2026-11-03), so for those
+# the eyes keep their last images (as for a frame RT64 drew nothing for).
+PRESENT_RESHOWN_DECL_ANCHOR = """        bool lockedWorkloadMutex = false;
+"""
+
+PRESENT_RESHOWN_DECL_REPLACEMENT = """        bool lockedWorkloadMutex = false;
+        // wr64: a frame the workload didn't draw, shown again (below).
+        bool wr64Reshown = false;
+"""
+
+PRESENT_RESHOWN_ANCHOR = """                else {
+                    lockedWorkloadMutex = true;
+                    ext.sharedResources->workloadMutex.lock();
+                }
+"""
+
+PRESENT_RESHOWN_REPLACEMENT = """                else {
+                    lockedWorkloadMutex = true;
+                    ext.sharedResources->workloadMutex.lock();
+                    wr64Reshown = true;
+                }
+"""
+
+PRESENT_RESHOWN_RDRAM_ANCHOR = """                lockedWorkloadMutex = true;
+                ext.sharedResources->workloadMutex.lock();
+
+                RenderTargetKey colorTargetKey(fbAddress"""
+
+PRESENT_RESHOWN_RDRAM_REPLACEMENT = """                lockedWorkloadMutex = true;
+                ext.sharedResources->workloadMutex.lock();
+                wr64Reshown = true;
+
+                RenderTargetKey colorTargetKey(fbAddress"""
+
+
 def ensure_file(target, content, name):
     if target.exists() and target.read_text() == content:
         print(f"  {target.name}: {name} already in place")
@@ -1872,6 +1944,9 @@ def main():
     patch(PRESENT_QUEUE, XR_DRAW_ANCHOR, XR_DRAW_REPLACEMENT, "headset (eye images drawn)")
     patch(PRESENT_QUEUE, XR_END_ANCHOR, XR_END_REPLACEMENT, "headset (frame ended)")
     patch(PRESENT_QUEUE, XR_SLEEP_ANCHOR, XR_SLEEP_REPLACEMENT, "headset (no window pacing)")
+    patch(PRESENT_QUEUE, PRESENT_RESHOWN_DECL_ANCHOR, PRESENT_RESHOWN_DECL_REPLACEMENT, "headset (re-shown frames: flag)")
+    patch(PRESENT_QUEUE, PRESENT_RESHOWN_ANCHOR, PRESENT_RESHOWN_REPLACEMENT, "headset (re-shown frames)")
+    patch(PRESENT_QUEUE, PRESENT_RESHOWN_RDRAM_ANCHOR, PRESENT_RESHOWN_RDRAM_REPLACEMENT, "headset (re-shown frames from RDRAM)")
     patch(PRESENT_QUEUE, XR_WAIT_ANCHOR, XR_WAIT_REPLACEMENT, "headset (no window wait)")
     patch(PRESENT_HEADER, XR_HEADER_INCLUDE_ANCHOR, XR_HEADER_INCLUDE_REPLACEMENT, "headset (header include)")
     patch(PRESENT_HEADER, XR_MEMBERS_ANCHOR, XR_MEMBERS_REPLACEMENT, "headset (wrapped images)")

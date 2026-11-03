@@ -293,6 +293,13 @@ void init(bool auto_start) {
     recompui::register_launcher_update_callback([pending = true, auto_start, shift](auto *) mutable {
         if (!pending) return;
         pending = false;
+        // WR64_TEST_SETTINGS=<tab id>, for screenshots of the settings: the
+        // launcher stays, with the settings open on that tab.
+        if (const char* tab = std::getenv("WR64_TEST_SETTINGS")) {
+            recompui::config::open();
+            if (*tab != '\0') recompui::config::set_tab(tab);
+            return;
+        }
         const auto straight = recompui::config::get_config(recompui::config::general::id).get_option_value("start_straight");
         const bool chosen = std::holds_alternative<bool>(straight) && std::get<bool>(straight);
         if (!auto_start && (shift || !chosen || !recomp::is_rom_valid(std::u8string{wr64::kGameId}))) return;

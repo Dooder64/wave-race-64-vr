@@ -85,12 +85,14 @@ it stops.
 There are only four characters, so the new riders reuse the three racers'
 models already unpacked. Each has its own matrices at 0x59A000 + 0x1000 i,
 with room for six. They throw no spray yet: `src/body_splash.cpp` has
-three slots. They are not part of the dolphin's audience yet.
+three slots.
 
-They are on for Dolphin Park only. `WR64_MORE_RIDERS=0` turns them off;
-`WR64_MORE_RIDERS=everywhere` puts them on every course. Scripted runs on
-Dolphin Park and Sunny Beach, 2-3 minutes each, showed no crash; the
-riders were fully drawn and the trio held its wedge.
+Since 2026-11-03 (the user: every rider, with a mind of its own, on every
+course) they are on everywhere. `WR64_MORE_RIDERS=0` turns them off;
+`=park` keeps them to Dolphin Park. The second and third riders and the
+trio are also in the dolphin's audience (`kAudience` 6: `audience_mind`,
+`audience_drive`). It may seek and perform for them, and each one's own
+mind decides whether it is taken with the dolphin.
 
 ### Ramps away from the park (2026-11-03, not play-tested)
 
@@ -112,6 +114,26 @@ lands short of the mines. Route maps also keep off the pieces' whole
 footprint, whose corners reach past the old round no-go zone.
 
 `WR64_OBJECT_DUMP=1` also prints every object's words and every piece.
+
+### Marked sights, the shore, the helicopter (2026-11-03, not play-tested)
+
+- **F2 works whatever window has the keyboard:** on Windows the key is
+  watched with `GetAsyncKeyState`. The user's first ride round the
+  courses lost 21 of 23 marks while the window wasn't focused. Marks still
+  count only in a race (state 0x28).
+- **Marked sights so far:** Sunset Bay's observation tower and Glacier
+  Coast's view out to sea. The rest are to be marked again.
+- **Round the shore** (`Routine::Shore`): on courses with a recorded
+  route, a first rider (or the trio) choosing a lap rides it half the
+  time. The routes are to be the user's own rides round the land
+  (`WR64_POSITION_LOG=1`, between two F2 marks), in `shore_routes()`. The
+  riders' map couldn't trace them: Port Blue's walls are too thin for it,
+  and Glacier Coast's land runs off its edge.
+- **The helicopter** (Port Blue): the game's animal of type 12, some 600
+  up. It is a marked sight that goes where it goes, with a spot 800 off it
+  in open water. A pair parked there sets off again if it flies on.
+  `WR64_ANIMAL_LOG=1` prints the animals table every 3 seconds.
+- **The dolphin** is now on every course but Dolphin Park.
 
 ## Two different kinds of rider
 
