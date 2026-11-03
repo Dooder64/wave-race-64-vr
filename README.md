@@ -58,8 +58,10 @@ so on the title screen; both can be turned off in Settings → General.
   or walking up the beach, and climbing back on.
 - **Seafloors** under every course, so there is something below you: sand,
   rock, canals and shallows, no deeper than about 15 m.
-- **Dolphin Park riders:** three other riders out on the water in the warm-up
-  park, doing laps, stunts and routines of their own.
+- **People-watching in Free Roam:** eight riders and the dolphin on every
+  course, each with a mind of its own: laps and ramp jumps, sightseeing,
+  resting, riding along with you, watching your big air, or stopping to
+  watch the dolphin perform. Port Blue's riders follow the helicopter.
 - **The whole scene drawn all round you**, rather than only what the
   monitor's camera would show.
 
@@ -74,10 +76,11 @@ menu needed:
   its own page: **WAVES** (still water up to far past the game's roughest),
   **SKY** and water from any course, **DAY AND NIGHT** (a 24-minute day
   fading between the courses' own looks), **MUSIC** (each track plays as you
-  scroll past it), **FOG**, the Dolphin Park **RIDERS** (each with a
-  personality of its own: stunts, laps, sightseeing, following you or
-  resting, as it feels like), and on Dolphin Park its **LAYOUT**: Stunt
-  Mode's, or the championship's Warm Up with the dolphin.
+  scroll past it), **FOG**, the **RIDERS** (eight on every course, each
+  with a personality of its own: laps, ramp jumps, sightseeing, following
+  you, resting or watching the dolphin, as it feels like), and on Dolphin
+  Park its **LAYOUT**: Stunt Mode's, or the championship's Warm Up with the
+  dolphin.
 - **WAVES** before every race: after the difficulty in Championship (once for
   the whole championship), Time Trials and 2P VS, after the course in Stunt
   Mode.
@@ -113,6 +116,10 @@ A gamepad works too, as in the flat game.
 
 ### Known issues
 
+- Free Roam's riders sometimes clip through walls and ice, most of all on
+  Glacier Coast and the walled courses.
+- In the attract scene the title's logo sometimes shows over the sky for a
+  few frames.
 - Brief flashes at some transitions between menus and races, and the
   black screen-wipes look odd on the floating panel.
 - Menus animate at the game's 20 frames a second on the panel.
