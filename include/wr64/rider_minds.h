@@ -15,9 +15,10 @@ enum Want { kThrill, kSights, kCompany, kShowOff, kRest, kCuriosity, kWants };
 
 // What a rider can be doing. The first rider's routes (Stunts, Lap,
 // Practice), the pair's routines (Sights, Weave, Trick), and either's
-// Follow (riding along with the player), Rest (drifting somewhere quiet) and
-// Watch (gone to see something that caught its eye).
-enum class Activity { Stunts, Lap, Practice, Sights, Weave, Trick, Follow, Rest, Watch };
+// Follow (riding along with the player), Rest (drifting somewhere quiet),
+// Watch (gone to see something that caught its eye) and Dolphin (taken with
+// the dolphin's antics: watching it, or following where it leads).
+enum class Activity { Stunts, Lap, Practice, Sights, Weave, Trick, Follow, Rest, Watch, Dolphin };
 const char* name(Activity a);
 
 // Who a rider is: how much each want counts with it, and how quickly it
@@ -26,6 +27,7 @@ struct Personality {
     const char* name;
     float weight[kWants];
     float patience;     // seconds an activity holds it, on average
+    float dolphin;      // how much the dolphin's antics please it, 0-1
 };
 const std::vector<Personality>& personalities();
 
@@ -50,6 +52,13 @@ struct Mind {
     // When it last went to see something: news doesn't pull it away again
     // straight after.
     double noticed_at = -1e9;
+    // Its last decision, for the decisions journal (src/journal.cpp): each
+    // activity weighed in its last choice -- its score by its wants and who
+    // it is, then the chance added -- and, in its last notice or response
+    // to the dolphin, how strongly it was drawn and the chance against it.
+    struct Weighed { Activity activity; float score, chance; };
+    std::vector<Weighed> weighed;
+    float pull = 0, roll = 0, needed = 0;
 };
 
 // What a rider could do now, and how far away the player is (or < 0 if
@@ -74,6 +83,13 @@ Activity choose(Mind& m, const Options& options, std::mt19937& chance, double no
 // Something noticed: whether it's interesting enough to go and see now,
 // given how far away it is. Sets `watching` if so.
 bool notice(Mind& m, const Interest& interest, float distance, std::mt19937& chance, double now);
+
+// The dolphin performing for it (docs/DOLPHIN.md): a new act -- a leap, its
+// dance, its call -- seen from `distance` away. Not yet taken with the
+// dolphin: whether it is now (Dolphin, for 10 to 30 seconds). Already:
+// whether it enjoyed the new act (10 to 30 seconds more). By how much the
+// dolphin pleases it and how curious it is now.
+bool dolphin_act(Mind& m, float distance, std::mt19937& chance, double now);
 
 // A rider's personality for a scripted test: WR64_COMPANION_TEST_MINDS=
 // <first>,<pair>, names from personalities() (e.g. daredevil,social).

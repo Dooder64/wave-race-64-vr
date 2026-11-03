@@ -42,6 +42,7 @@ constexpr float kSatisfies[][kWants] = {
     { 0.2f, 0.0f, 1.0f, 0.4f, 0.0f, 0.4f },   // Follow the player
     { 0.0f, 0.2f, 0.0f, 0.0f, 1.0f, 0.0f },   // Rest
     { 0.0f, 0.2f, 0.2f, 0.0f, 0.3f, 1.0f },   // Watch
+    { 0.2f, 0.8f, 0.3f, 0.0f, 0.3f, 0.8f },   // Dolphin
 };
 
 float uniform(std::mt19937& chance, float lo, float hi) {
@@ -61,19 +62,20 @@ const char* name(Activity a) {
     case Activity::Follow: return "riding along with the player";
     case Activity::Rest: return "a rest";
     case Activity::Watch: return "watching";
+    case Activity::Dolphin: return "the dolphin";
     }
     return "?";
 }
 
 const std::vector<Personality>& personalities() {
-    //                                     thrill sights company show-off rest curiosity  patience
+    //                                     thrill sights company show-off rest curiosity  patience dolphin
     static const std::vector<Personality> all = {
-        { "daredevil", { 1.0f, 0.1f, 0.2f, 0.7f, 0.1f, 0.4f }, 70.0f },
-        { "sightseer", { 0.2f, 1.0f, 0.3f, 0.1f, 0.6f, 0.7f }, 60.0f },
-        { "social",    { 0.4f, 0.4f, 1.0f, 0.3f, 0.3f, 0.6f }, 50.0f },
-        { "loner",     { 0.5f, 0.7f, 0.0f, 0.1f, 0.7f, 0.2f }, 80.0f },
-        { "show-off",  { 0.7f, 0.1f, 0.6f, 1.0f, 0.2f, 0.5f }, 45.0f },
-        { "practiser", { 0.8f, 0.2f, 0.2f, 0.3f, 0.3f, 0.2f }, 120.0f },
+        { "daredevil", { 1.0f, 0.1f, 0.2f, 0.7f, 0.1f, 0.4f }, 70.0f, 0.5f },
+        { "sightseer", { 0.2f, 1.0f, 0.3f, 0.1f, 0.6f, 0.7f }, 60.0f, 0.95f },
+        { "social",    { 0.4f, 0.4f, 1.0f, 0.3f, 0.3f, 0.6f }, 50.0f, 0.9f },
+        { "loner",     { 0.5f, 0.7f, 0.0f, 0.1f, 0.7f, 0.2f }, 80.0f, 0.15f },
+        { "show-off",  { 0.7f, 0.1f, 0.6f, 1.0f, 0.2f, 0.5f }, 45.0f, 0.6f },
+        { "practiser", { 0.8f, 0.2f, 0.2f, 0.3f, 0.3f, 0.2f }, 120.0f, 0.3f },
     };
     return all;
 }
@@ -107,15 +109,18 @@ bool restless(const Mind& m, double now) { return now >= m.until; }
 Activity choose(Mind& m, const Options& options, std::mt19937& chance, double now) {
     Activity best = options.open.empty() ? m.doing : options.open[0];
     float best_score = -1e9f;
+    m.weighed.clear();
     for (Activity a : options.open) {
-        if (a == Activity::Watch) continue;     // only ever by noticing something
+        if (a == Activity::Watch || a == Activity::Dolphin) continue;     // only ever by noticing something
         if (a == Activity::Follow && (options.player_distance < 0.0f || options.player_distance > 9000.0f || !options.player_moving))
             continue;
         float score = 0.0f;
         for (int i = 0; i < kWants; ++i) score += m.who->weight[i] * m.want[i] * kSatisfies[int(a)][i];
         if (a == Activity::Follow) score *= 0.5f + m.fondness;
         if (a == m.doing) score *= 0.35f;       // something else for a change
-        score += uniform(chance, 0.0f, 0.25f);
+        const float luck = uniform(chance, 0.0f, 0.25f);
+        m.weighed.push_back({ a, score, luck });
+        score += luck;
         if (score > best_score) {
             best_score = score;
             best = a;
@@ -140,12 +145,33 @@ bool notice(Mind& m, const Interest& interest, float distance, std::mt19937& cha
     if (now - m.noticed_at < 25.0 || m.doing == Activity::Watch || m.doing == Activity::Trick) return false;
     const float near = std::clamp(1.0f - (distance - 2000.0f) / 7000.0f, 0.0f, 1.0f);
     const float pull = interest.strength * near * (0.3f + m.who->weight[kCuriosity]) * (0.5f + m.want[kCuriosity]);
-    if (pull + uniform(chance, 0.0f, 0.2f) < 0.6f) return false;
+    m.pull = pull;
+    m.roll = uniform(chance, 0.0f, 0.2f);
+    m.needed = 0.6f;
+    if (pull + m.roll < 0.6f) return false;
     m.watching = interest;
     m.noticed_at = now;
     m.doing = Activity::Watch;
     m.since = now;
     m.until = now + uniform(chance, 8.0f, 18.0f);
+    return true;
+}
+
+bool dolphin_act(Mind& m, float distance, std::mt19937& chance, double now) {
+    if (m.who == nullptr || distance > 4000.0f) return false;
+    const float likes = m.who->dolphin * (0.6f + 0.4f * m.want[kCuriosity]);
+    m.pull = likes;
+    m.roll = uniform(chance, 0.0f, 1.0f);
+    m.needed = 1.0f;
+    if (m.doing == Activity::Dolphin) {
+        if (m.roll >= likes) return false;
+        m.until = std::max(m.until, now) + uniform(chance, 10.0f, 30.0f);
+        return true;
+    }
+    if (m.doing == Activity::Trick || m.roll >= likes) return false;
+    m.doing = Activity::Dolphin;
+    m.since = now;
+    m.until = now + uniform(chance, 10.0f, 30.0f);
     return true;
 }
 

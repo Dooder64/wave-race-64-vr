@@ -58,6 +58,7 @@
 
 #include "recomp.h"
 #include "wr64/day_night.h"
+#include "wr64/journal.h"
 #include "wr64/music.h"
 #include "wr64/testdrive.h"
 
@@ -70,6 +71,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <map>
+#include <string>
 #include <vector>
 
 extern "C" void func_80074264(uint8_t*, recomp_context*);
@@ -242,6 +246,10 @@ void current(uint8_t* rdram, int32_t course, float x, float z) {
 // is a free roam.
 void set_free_roam(bool on) { g_on.store(on || env_on("WR64_FREE_ROAM_MODE"), std::memory_order_relaxed); }
 bool free_roam_chosen() { return g_on.load(std::memory_order_relaxed); }
+
+// F2 (src/callbacks.cpp): marks asked for, taken by the next race frame.
+std::atomic<int> g_marks{ 0 };
+void request_mark() { g_marks.fetch_add(1, std::memory_order_relaxed); }
 // From src/game_menus.cpp: leaves `sound` out the next time it is asked for.
 void swallow_sound_once(int sound) { g_swallow.store(sound, std::memory_order_relaxed); }
 // From the settings (the WAVES pages and the Free Roam options).
@@ -279,6 +287,7 @@ void start_warm_up(uint8_t* rdram) {
 // From src/game_menus.cpp, as the course select sets up: back from a Warm Up
 // to Stunt Mode.
 void leave_warm_up(uint8_t* rdram) {
+    if (const char* d = std::getenv("WR64_TEST_DIFFICULTY")) set_word(rdram, kDifficulty, std::atoi(d));
     if (!g_on.load(std::memory_order_relaxed) || word(rdram, kChosenMode) != kChampionship) return;
     set_word(rdram, kChosenMode, kStunt);
     set_word(rdram, kGameMode, kStunt);
@@ -337,6 +346,24 @@ bool free_roam_hides_rect(const uint8_t* rdram, uint32_t left, uint32_t top, uin
 // projection of its own), the start's countdown lights (four lists, also
 // under their own), and the messages popping up mid-screen (0x01014820).
 bool free_roam_hides(const uint8_t* rdram, uint32_t list) {
+    // WR64_CALL_LOG=1: the segment-1 lists called in a free roam, and how
+    // often, now and then; WR64_HIDE_TEST=<hex>: that one left out.
+    static const bool call_log = std::getenv("WR64_CALL_LOG") != nullptr;
+    if (call_log && free_roam_active(rdram) && (list >> 24) == 0x01) {
+        static std::map<uint32_t, int> counts;
+        static int calls = 0;
+        ++counts[list];
+        if (++calls % 50000 == 0) {
+            for (const auto& [l, n] : counts) std::fprintf(stderr, "[wr64-calls] %08X %d\n", l, n);
+            std::fprintf(stderr, "[wr64-calls] --\n");
+            counts.clear();
+        }
+    }
+    static const uint32_t hide_test = [] {
+        const char* value = std::getenv("WR64_HIDE_TEST");
+        return value != nullptr ? uint32_t(std::strtoul(value, nullptr, 16)) : 0u;
+    }();
+    if (hide_test != 0 && list == hide_test) return free_roam_active(rdram);
     switch (list) {
         case 0x01010528: case 0x010106C0: case 0x01010730: case 0x01010998: case 0x010109F8: case 0x01014820:
             return free_roam_active(rdram) && !paused(rdram);
@@ -346,20 +373,20 @@ bool free_roam_hides(const uint8_t* rdram, uint32_t list) {
         return free_roam_active(rdram);
     }
     // The buoys, one call each: the race buoys (0x0102CC58 and 0x0102CC70 on
-    // some courses, 0x0102CCE8 and 0x0102CD00 on the others) and the rows
-    // marking the course's edges (0x0102CD78 and 0x0102CD90, or 0x0102CE08 and
-    // 0x0102CE20), from a frame's trace of each course; the race buoys' striped
+    // some courses, 0x0102CCE8 and 0x0102CD00 on the others), from a frame's
+    // trace of each course; the rows marking the course's edges (0x0102CD78
+    // and 0x0102CD90, or 0x0102CE08 and 0x0102CE20) are drawn. The race buoys' striped
     // tails and L or R letters (0x01029BE0 and 0x01029C88 for the buoys passed
     // on one side, 0x0102AD90 and 0x0102AE38 for the other); and the arrows
-    // over the next buoys (0x0102CE78, a sprite each). Stunt Mode's CHECK
-    // POINT gates (0x01018AA8 and 0x01018D58, the banner and its posts) and
-    // the buoy by each (0x0102CB78), from a Sunny Beach frame's trace and
-    // leaving them out of a scripted run.
+    // over the next buoys (0x0102CE78, a sprite each). Not Stunt Mode's CHECK
+    // POINT gates (0x01018AA8 and 0x01018D58, the banner and its posts) or
+    // the buoy by each (0x0102CB78): a free roam is a Stunt Mode run, its
+    // checkpoints (kind 2) still stop a jet ski, and hidden they were
+    // invisible walls (the user, 2026-11-02).
     switch (list) {
         case 0x0102CC58: case 0x0102CC70: case 0x0102CCE8: case 0x0102CD00:
-        case 0x0102CD78: case 0x0102CD90: case 0x0102CE08: case 0x0102CE20: case 0x0102CE78:
+        case 0x0102CE78:
         case 0x01029BE0: case 0x01029C88: case 0x0102AD90: case 0x0102AE38:
-        case 0x01018AA8: case 0x01018D58: case 0x0102CB78:
             return free_roam_active(rdram);
         default: return false;
     }
@@ -631,14 +658,14 @@ void test_place(uint8_t* rdram) {
     if (test && current_game_state() == 0x28 && test_frames < 90) {
         ++test_frames;
         const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
-        // The hull's heading from its points (the first three the bow's, the
-        // next three the stern's).
+        // The hull's heading from its points (the first three the stern's,
+        // the next three the bow's, as for a mark below).
         float bow_x = 0, bow_z = 0, stern_x = 0, stern_z = 0;
         for (uint32_t i = 0; i < 3; ++i) {
-            bow_x += real(rdram, rider + 0x90 + i * 0x20) / 3.0f;
-            bow_z += real(rdram, rider + 0x98 + i * 0x20) / 3.0f;
-            stern_x += real(rdram, rider + 0x90 + (i + 3) * 0x20) / 3.0f;
-            stern_z += real(rdram, rider + 0x98 + (i + 3) * 0x20) / 3.0f;
+            stern_x += real(rdram, rider + 0x90 + i * 0x20) / 3.0f;
+            stern_z += real(rdram, rider + 0x98 + i * 0x20) / 3.0f;
+            bow_x += real(rdram, rider + 0x90 + (i + 3) * 0x20) / 3.0f;
+            bow_z += real(rdram, rider + 0x98 + (i + 3) * 0x20) / 3.0f;
         }
         const float cx = real(rdram, rider + 0x44), cz = real(rdram, rider + 0x4C);
         const float turn = test_at[2] * 0.0174533f - std::atan2(bow_z - stern_z, bow_x - stern_x);
@@ -838,6 +865,46 @@ void free_roam_frame(uint8_t* rdram) {
     // -- the clock time (to the millisecond, to match screenshots by), the
     // course, where, how high, its speed (+0x68) and which way its velocity
     // goes -- for finding, from a play-test, what it ran into.
+    // F2, in a race: a mark -- the time (UTC, to match a screenshot by), the
+    // course, where the human's jet ski is and which way its hull faces
+    // (degrees, 0 along +x, 90 along +z) -- added to marks.txt beside the log,
+    // to the log and to the decisions journal (src/journal.cpp); for marking a
+    // course's sights from a ride, or a moment worth talking over.
+    if (g_marks.exchange(0, std::memory_order_relaxed) > 0 && state == 0x28) {
+        const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
+        // The hull's six points: the stern's three, then the bow's (the
+        // other way round put the first Sunny Beach marks' facings 180
+        // degrees out, against the way the jet ski had been going).
+        float bow_x = 0, bow_z = 0, stern_x = 0, stern_z = 0;
+        for (uint32_t i = 0; i < 3; ++i) {
+            stern_x += real(rdram, rider + 0x90 + i * 0x20);
+            stern_z += real(rdram, rider + 0x98 + i * 0x20);
+            bow_x += real(rdram, rider + 0x90 + (i + 3) * 0x20);
+            bow_z += real(rdram, rider + 0x98 + (i + 3) * 0x20);
+        }
+        const std::time_t now = std::time(nullptr);
+        std::tm local{};
+        gmtime_s(&local, &now);
+        char when[32];
+        std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S UTC", &local);
+        static int count = 0;
+        char line[200];
+        std::snprintf(line, sizeof line, "mark %d: %s course %d at %.0f %.0f %.0f, facing %.0f\n", ++count, when,
+                      word(rdram, kCourse), real(rdram, rider + 0x44), real(rdram, rider + 0x48), real(rdram, rider + 0x4C),
+                      std::atan2(bow_z - stern_z, bow_x - stern_x) * 57.29578f);
+        std::fprintf(stderr, "[wr64] %s", line);
+        journal::Fields f;
+        f.add("mark", count).add("course", word(rdram, kCourse)).add("x", double(real(rdram, rider + 0x44)))
+            .add("y", double(real(rdram, rider + 0x48))).add("z", double(real(rdram, rider + 0x4C)))
+            .add("facing", double(std::atan2(bow_z - stern_z, bow_x - stern_x) * 57.29578f));
+        journal::write("mark", f);
+        if (const char* local_app = std::getenv("LOCALAPPDATA")) {
+            if (std::FILE* f = std::fopen((std::string(local_app) + "\\WaveRace64Recomp\\marks.txt").c_str(), "a")) {
+                std::fputs(line, f);
+                std::fclose(f);
+            }
+        }
+    }
     static const bool position_log = env_on("WR64_POSITION_LOG");
     if (position_log && state == 0x28) {
         static int frames = 0;

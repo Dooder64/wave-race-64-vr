@@ -72,6 +72,47 @@ uncommitted, awaiting play-test.** Racers: research only.
   other when changing plans (seen in logs; this was so before as well).
 - Riders still only on Dolphin Park.
 
+### More riders (2026-11-02, not play-tested)
+
+Eight riders besides the player: the first rider, the pair, two more
+singles and a trio. Each single and the trio has a mind of its own (minds
+2, 3 and 4). The singles are copies of the first rider: its routes and
+ramp jumps, resting, riding along and watching. The trio's leader has the
+same choices without the ramps, at 750 units a second. Its two wingmen
+keep a wedge, 300 back and 280 to either side, and come up beside it when
+it stops.
+
+There are only four characters, so the new riders reuse the three racers'
+models already unpacked. Each has its own matrices at 0x59A000 + 0x1000 i,
+with room for six. They throw no spray yet: `src/body_splash.cpp` has
+three slots. They are not part of the dolphin's audience yet.
+
+They are on for Dolphin Park only. `WR64_MORE_RIDERS=0` turns them off;
+`WR64_MORE_RIDERS=everywhere` puts them on every course. Scripted runs on
+Dolphin Park and Sunny Beach, 2-3 minutes each, showed no crash; the
+riders were fully drawn and the trio held its wedge.
+
+### Ramps away from the park (2026-11-03, not play-tested)
+
+Riders now ride a course's ramps by the game's own slope pieces
+(`D_801BFD78`, moved to 0x80800000 by `patches/ramp_pieces.cpp`). Each is
+a solid box: a corner and three axes with lengths, a point inside when
+`(corner - p) . axis` is within `[0, length)` for each, as
+`func_8007FAE4` tests the jet ski. `ramp_surface(x, z)` is the top of the
+pieces there. Each ramp's crest is the highest point on the line through
+its middle the way it is ridden, which is where its last climb ends.
+
+Sunny Beach's ramp is filed at (-619, -1065), but its crest is at -1124,
+80 up, with a face 250 long climbing 0.56 at the end. Riders had been
+riding Dolphin Park's ramp shape, finished at the filed point, where the
+real ramp is still under water. Now they slow up the face and leave the
+crest at the angle of its last climb, at a speed that brings them down
+1300 past it: 647, with a pop of 362. That leaves room for a roll and
+lands short of the mines. Route maps also keep off the pieces' whole
+footprint, whose corners reach past the old round no-go zone.
+
+`WR64_OBJECT_DUMP=1` also prints every object's words and every piece.
+
 ## Two different kinds of rider
 
 | | Free Roam riders | Racers |

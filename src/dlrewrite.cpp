@@ -2508,7 +2508,18 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
                     companions.clear();
                     const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));
                     wr64::companions_draw(rdram, w.segments, course, companions);
-                    for (const auto& [a, b] : companions) w.emit(a, b);
+                    // The state put back afterwards: the dolphin's, last,
+                    // is its own and not the game's.
+                    if (!companions.empty()) {
+                        const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
+                        w.emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
+                        w.emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
+                        w.emit(ex | G_EX_PUSHCOMBINE_V1, 0);
+                        for (const auto& [a, b] : companions) w.emit(a, b);
+                        w.emit(ex | G_EX_POPCOMBINE_V1, 0);
+                        w.emit(ex | G_EX_POPOTHERMODE_V1, 0);
+                        w.emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
+                    }
                 }
             }
             if (modern_water) w.water_material(false);

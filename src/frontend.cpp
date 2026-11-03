@@ -222,6 +222,7 @@ void set_race_music(int course);
 void set_fog(bool on);
 namespace speed_units { void set_mph(bool on); }
 void set_companions(bool on);
+namespace journal { void set_on(bool on); }
 
 // src/game_menus.cpp: a setting of the Races or Free Roam tab, read and
 // changed from the game's own menus: an on/off switch as 0 or 1, a list's
@@ -444,6 +445,11 @@ void init(bool auto_start) {
             wr64::set_companions(std::get<bool>(value));
     });
     auto &debug = recompui::config::create_config_tab("Debug", "debug", true);
+    debug.add_bool_option("record_decisions", "Record riders' decisions", "Keep a record of what the Free Roam riders and the dolphin decide and why, in decisions.jsonl beside the game's log, for looking back at an outing.", true);
+    debug.add_option_change_callback("record_decisions", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary)
+            wr64::journal::set_on(std::get<bool>(value));
+    });
     debug.add_bool_option("debug_unlock_all", "Unlock all courses and difficulties", "Open every course in Time Trials and every Championship difficulty, whatever your save holds. The game may keep these in your save when it next saves.", false);
     debug.add_option_change_callback("debug_unlock_all", [](auto value, auto, auto context) {
         if (context != recomp::config::OptionChangeContext::Temporary)

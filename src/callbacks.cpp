@@ -17,6 +17,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -69,12 +71,71 @@ std::atomic<bool> g_throttle{ false };
 bool throttle_held() { return g_throttle.load(std::memory_order_relaxed); }
 // patches/swim_back.cpp: a debug wipe-out (F3).
 void swim_request_throw();
+// patches/free_roam.cpp: a mark of where the player is (F2).
+void request_mark();
 }
 
 namespace {
 
 SDL_Window* g_window = nullptr;
 SDL_GameController* g_controller = nullptr;
+
+#if defined(_WIN32)
+// F2's picture: the game window as it shows on the screen (RT64 presents
+// through D3D12, so the window cannot be asked to draw itself into a bitmap;
+// see tools/capture_window.ps1), saved as a .bmp in a marks folder beside
+// marks.txt, named by the time (UTC) as the mark is.
+void save_mark_picture() {
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (g_window == nullptr || SDL_GetWindowWMInfo(g_window, &info) != SDL_TRUE) return;
+    HWND window = info.info.win.window;
+    RECT area;
+    POINT origin{ 0, 0 };
+    if (!GetClientRect(window, &area) || !ClientToScreen(window, &origin)) return;
+    const int width = area.right, height = area.bottom;
+    if (width <= 0 || height <= 0) return;
+    HDC screen = GetDC(nullptr);
+    HDC memory = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
+    HGDIOBJ previous = SelectObject(memory, bitmap);
+    BitBlt(memory, 0, 0, width, height, screen, origin.x, origin.y, SRCCOPY);
+    SelectObject(memory, previous);
+    BITMAPINFOHEADER header{};
+    header.biSize = sizeof header;
+    header.biWidth = width;
+    header.biHeight = height;
+    header.biPlanes = 1;
+    header.biBitCount = 24;
+    header.biCompression = BI_RGB;
+    const uint32_t stride = (uint32_t(width) * 3 + 3) & ~3u;
+    std::vector<uint8_t> pixels(size_t(stride) * uint32_t(height));
+    GetDIBits(memory, bitmap, 0, UINT(height), pixels.data(), reinterpret_cast<BITMAPINFO*>(&header), DIB_RGB_COLORS);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+
+    const char* local_app = std::getenv("LOCALAPPDATA");
+    if (local_app == nullptr) return;
+    const std::string folder = std::string(local_app) + "\\WaveRace64Recomp\\marks";
+    CreateDirectoryA(folder.c_str(), nullptr);
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+    gmtime_s(&utc, &now);
+    char name[64];
+    std::strftime(name, sizeof name, "\\mark %Y-%m-%d %H%M%S UTC.bmp", &utc);
+    std::FILE* f = std::fopen((folder + name).c_str(), "wb");
+    if (f == nullptr) return;
+    BITMAPFILEHEADER file{};
+    file.bfType = 0x4D42;  // "BM"
+    file.bfOffBits = sizeof file + sizeof header;
+    file.bfSize = file.bfOffBits + DWORD(pixels.size());
+    std::fwrite(&file, sizeof file, 1, f);
+    std::fwrite(&header, sizeof header, 1, f);
+    std::fwrite(pixels.data(), 1, pixels.size(), f);
+    std::fclose(f);
+}
+#endif
 
 // ---------------------------------------------------------------- input ----
 
@@ -893,6 +954,12 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
             if (event->key.keysym.sym == SDLK_F6) wr64::vr::recenter();
             if (event->key.keysym.sym == SDLK_F4) wr64::vr::recover();
             if (event->key.keysym.sym == SDLK_F3) wr64::swim_request_throw();
+            if (event->key.keysym.sym == SDLK_F2) {
+                wr64::request_mark();
+#if defined(_WIN32)
+                save_mark_picture();
+#endif
+            }
             if (event->key.keysym.sym == SDLK_F7) wr64::vr::cycle_debug_offset();
             if (event->key.keysym.sym == SDLK_F8) wr64::vr::cycle_stereo();
         }
