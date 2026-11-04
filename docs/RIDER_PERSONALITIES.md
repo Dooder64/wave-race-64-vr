@@ -135,6 +135,98 @@ footprint, whose corners reach past the old round no-go zone.
   `WR64_ANIMAL_LOG=1` prints the animals table every 3 seconds.
 - **The dolphin** is now on every course but Dolphin Park.
 
+### Walls and ice (2026-11-03, for 1.3.1, uncommitted, not play-tested)
+
+The user found riders still clipping through walls, worst on Glacier Coast.
+Three causes, three fixes:
+
+- **The walled courses' walls weren't on the riders' maps.** Marine
+  Fortress, Port Blue, Twilight City and Southern Island's sea walls have
+  deep floor right up to them, and the maps went by the floor. Now
+  `rider_water` (and the dolphin's water) also wants the point kWallRoom
+  (90) clear of them, by the seafloor's `course_clearance`, which the swim
+  back already goes round walls by.
+- **Glacier Coast's ice is slope pieces**, like the ramps', and an earlier
+  speed-up looked at pieces only near a ramp (Glacier has none). Each piece
+  now has its outline worked out from its corners, and `on_slope_piece`
+  blocks wherever a piece stands out of the water, on any course.
+- **The buoys' line is drawn straight from buoy to buoy**, across land and
+  walls. Each stretch of it on closed squares of the riders' map is now
+  replaced by the way round, from the riders' route-finding, except the
+  straight runs over the ramps they jump. The log says how many stretches
+  were re-routed on each course: Glacier Coast's 14, Port Blue's 11 and
+  Marine Fortress's 10, for example.
+- **A rider brought to a stop at a closed square used to creep on** (meant
+  for rough shore tables). It no longer creeps into a wall or onto ice.
+
+The user's play-test on Port Blue (2026-11-03): most riders drove into a
+wall straight away, again and again. Three more causes, three more fixes:
+
+- **Thin walls between squares.** The map's squares are 200 across and
+  judged at their middles. A thin wall along the edge between two squares
+  is 100 from both middles, more than kWallRoom, so both were open and
+  routes went straight through it. A square is now closed on the riders'
+  map within 150 of a wall (the distance `rider_water` already measured, so
+  no extra lookups). The finer kWallRoom still decides each step.
+- **The wrong start square.** A rider in a closed square plans from the
+  nearest open one. By Port Blue's island that was on the far side of its
+  wall, so the rider aimed at the wall for good. It now plans from the
+  nearest one it can reach in a straight line without passing within 45 of
+  a wall or over ice.
+- **Stuck nose-on.** A rider stopped short now slides along what it met,
+  the nearest way to its heading that's clear, in 30-degree steps.
+
+The buoys' line is also pushed off the walls: each point with closed
+squares within 400 is moved away from them, on open squares (Port Blue's
+607 points, Marine Fortress's 346, Glacier Coast's 414).
+
+In a scripted Port Blue run the first rider, which had sat at the island's
+east wall the whole ride, now rides the whole course. Marine Fortress,
+Twilight City and Glacier Coast set up in 30, 388 and 43 ms, with no rider
+held in place.
+
+Scripted runs on all nine courses show the walls on the maps (pictures
+drawn with `WR64_RIDER_MAP_DUMP`) and setup times of 11–48 ms. Twilight
+City's 384 ms is the exception, from its wall distances: that's the start
+of a ride, and worth making quicker.
+
+### The unattended checks (2026-11-03, the user at work)
+
+`WR64_RIDER_CHECK=<file>` logs every rider twice a second: where it is, how
+fast, what it is doing, how far from a wall, and whether its square is
+water. A script runs each course's Free Roam for five minutes, the player
+idle at the start and wandering, and flags riders **stuck** (moved under
+200 in 5 s while riding), against a **wall** (nearer than 45), on **land**
+(not water on the map, away from the ramps), and **circling** (40 s within
+1500 of one place). What it found, and what was done:
+
+- **Thin walls between the map's squares, again, for each step.** A rider
+  stepped on wherever its square was open, judged by its middle; a wing
+  of the trio was 2 from a wall. Now each step on a walled course is judged
+  by the distance to the walls itself: nearer than kWallRoom, only away.
+  Twilight City's riders against a wall: 63 to 3.
+- **Into a corner.** Stopped short, a rider slides to the nearest way
+  that's clear -- now all the way round to straight back (in a corner of
+  Twilight City's canals the pair were held for good).
+- **Held for good.** A rider on its route that has moved under 150 in
+  three seconds is put back on open water further along it, if the player
+  can see neither place. Sunset Bay's first rider, off its ramp onto the
+  land beside it and wedged against the ramp's side, was the first.
+- **A ramp with no face.** Sunset Bay's by the shore measures none (116 up
+  straight from the water). The laps no longer go over it, and the pair's
+  jump isn't done there.
+- **Landing on land.** Each ramp's jump is now as long as the open water
+  past it allows (from 1300 down), by the course's sea floor.
+- **Run-ups over land.** The straight run at a ramp (and the lap line
+  kept straight there) is taken only over water; at Sunset Bay it crossed
+  the land before the second ramp.
+- **The checks' own mistakes**, fixed in the script: Dolphin Park has no
+  water map; the trio's wings wait while their leader does; on and beside
+  a ramp a jet ski is off the map by design.
+
+Round 3 against round 2 (idle runs, flags): Sunset Bay's stuck riders 34 to
+6, Port Blue's 34 to 9, Port Blue's and Marine Fortress's wall flags gone.
+
 ## Two different kinds of rider
 
 | | Free Roam riders | Racers |

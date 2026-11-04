@@ -83,6 +83,13 @@ namespace wr64 {
 
 // src/seafloor.cpp: how far a point is from the course's nearest land.
 float land_distance(uint32_t course, float x, float z);
+// src/guest_course.cpp: a guest course in place of the base course.
+namespace guest {
+void frame(uint8_t* rdram, uint32_t state);
+bool active(const uint8_t* rdram);
+bool start(float now_x, float now_z, float& x, float& z, float& heading);
+float past_bounds(float x, float z);
+}
 // src/land_backs.cpp: how far a point is from the backs of the course's land.
 float land_backs_distance(uint32_t course, float x, float z);
 // src/land_backs.cpp: whether a point is on the backs of the course's land.
@@ -191,6 +198,8 @@ void set_real(uint8_t* rdram, uint32_t address, float v) { std::memcpy(rdram + (
 // own course-out test, between its physics steps: from the display-list
 // rewriter, on another thread, its writes landed at odd moments of the
 // game's frame and the jet ski stalled.
+// (On a guest course, src/guest_course.cpp, how far past its bounds
+// instead.)
 void current(uint8_t* rdram, int32_t course, float x, float z) {
     const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
     const float past_course = !g_edge.outside ? 0.0f
@@ -198,7 +207,7 @@ void current(uint8_t* rdram, int32_t course, float x, float z) {
                                               : 1e9f;
     const float past_land = std::fmin(land_distance(uint32_t(course), x, z),
                                       land_backs_distance(uint32_t(course), x, z)) - kLandReach;
-    const float past = std::fmin(past_course, past_land);
+    const float past = guest::active(rdram) ? guest::past_bounds(x, z) : std::fmin(past_course, past_land);
     static struct { bool known = false; int32_t course = -1; float x = 0.0f, z = 0.0f; } allowed;
     if (allowed.course != course) allowed = {};
     allowed.course = course;
@@ -372,6 +381,15 @@ bool free_roam_hides(const uint8_t* rdram, uint32_t list) {
     if (list == 0x0101EA48 || list == 0x0101E620) {
         return free_roam_active(rdram);
     }
+    // On a guest course (src/guest_course.cpp) the base course's boundary
+    // rows, checkpoint gates and their buoys too.
+    switch (list) {
+        case 0x0102CD78: case 0x0102CD90: case 0x0102CE08: case 0x0102CE20:
+        case 0x01018AA8: case 0x01018D58: case 0x0102CB78:
+            if (guest::active(rdram)) return true;
+            break;
+        default: break;
+    }
     // The buoys, one call each: the race buoys (0x0102CC58 and 0x0102CC70 on
     // some courses, 0x0102CCE8 and 0x0102CD00 on the others), from a frame's
     // trace of each course; the rows marking the course's edges (0x0102CD78
@@ -501,7 +519,10 @@ void free_roam_course_out_hook(uint8_t* rdram, recomp_context* ctx) {
         g_edge.z = z;
     }
     ctx->r2 = 0;
+    // (On a guest course, by its own bounds; nothing else here is the base
+    // course's to do there: its land is not there.)
     current(rdram, course, x, z);
+    if (guest::active(rdram)) return;
     // The backs of the course's land (src/land_backs.cpp), unknown to the
     // game: a jet ski coming up one is braked over its foot (from 30 below
     // the water, its way up the slope losing an eighth of its points
@@ -655,8 +676,13 @@ void test_place(uint8_t* rdram) {
                std::sscanf(value, "%f,%f,%f", &test_at[0], &test_at[1], &test_at[2]) == 3;
     }();
     static int test_frames = 0;
-    if (test && current_game_state() == 0x28 && test_frames < 90) {
-        ++test_frames;
+    // (A guest course's own start, likewise: src/guest_course.cpp.)
+    float guest_at[3];
+    const uint32_t ridden = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
+    const bool guest = guest::start(real(rdram, ridden + 0x44), real(rdram, ridden + 0x4C), guest_at[0], guest_at[1], guest_at[2]);
+    if (guest) std::copy(std::begin(guest_at), std::end(guest_at), std::begin(test_at));
+    if ((guest || (test && test_frames < 90)) && current_game_state() == 0x28) {
+        if (!guest) ++test_frames;
         const uint32_t rider = kRiders + uint32_t(word(rdram, kHumanSlot)) * kRiderSize;
         // The hull's heading from its points (the first three the stern's,
         // the next three the bow's, as for a mark below).
@@ -810,6 +836,7 @@ void free_roam_frame(uint8_t* rdram) {
         day_frame(rdram, &original[0][0], course);
         day::sky_frame(rdram, sky, day::start_look(course));
     }
+    guest::frame(rdram, state);
     if (state == 0x28) test_place(rdram);
     test_ramp(rdram);
     // WR64_LAP_LOG=1: each rider's lap (race record +0) and the HUD's lap

@@ -8,6 +8,9 @@ namespace wr64::music {
 void initialize(const std::filesystem::path& music_directory,
                 const std::filesystem::path& bundled_directory = {});
 void set_enabled(bool enabled);
+// Whether the custom music (the replacement recordings) is on: the Sound
+// tab's Music, Original or Custom.
+bool custom_enabled();
 void set_volume(double percent);
 void set_replacement_volume(double percent);
 void mix(int16_t* samples, size_t sample_count, uint32_t sample_rate);

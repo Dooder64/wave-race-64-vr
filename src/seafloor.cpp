@@ -2009,6 +2009,8 @@ bool seafloor_only_below(uint32_t course) {
 // ID and `segments` the frame's (13 and 14 the course's data, 3 the
 // frame's buffer). Without waves merged round the camera, the floor round the
 // course's middle.
+namespace guest { bool active(const uint8_t* rdram); bool took_vertex_area(); }
+
 uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[16], uint32_t* identity) {
     *identity = 0x80000000u | (kBase + 0x40);
     dump_textures(rdram, course, segments);
@@ -2019,10 +2021,23 @@ uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[
     const uint32_t sand = made ? kMadeSand : segments[floor->sand_segment] + floor->sand;
     static uint32_t built_course = ~0u, built_sand = 0;
     static bool ok = false;
+    // A guest course (src/guest_course.cpp) has the vertex area: no floor,
+    // and built again after.
+    if (guest::active(rdram)) {
+        built_course = ~0u;
+        return 0;
+    }
     if (built_course != course || built_sand != sand) {
         built_course = course;
         built_sand = sand;
         const uint32_t second = floor->zone != nullptr ? segments[floor->second_segment] + floor->second : 0;
+        // After a guest course, its pack in the vertex area: given back
+        // (the area is checked free before a first build, and the pack
+        // left it full: every course after Great Bay had no floor, the
+        // user's Drake Lake, 2026-11-03).
+        if (*reinterpret_cast<uint32_t*>(rdram + kBase) != kMarker && guest::took_vertex_area()) {
+            std::memset(rdram + kVertices, 0, kVerticesEnd - kVertices);
+        }
         ok = build(rdram, *floor, sand, second);
         if (ok && made) make_silt(rdram);
     }

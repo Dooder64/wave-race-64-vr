@@ -75,6 +75,7 @@
 #include "wr64/updates.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -113,6 +114,12 @@ void set_menu_setting(const char* tab, const char* id, uint32_t to);
 // patches/free_roam.cpp.
 void set_free_roam(bool on);
 bool free_roam_chosen();
+// src/guest_course.cpp: Great Bay for the next free roam on Dolphin Park, or
+// not (the GUEST COURSES page), and whether it is.
+namespace guest {
+void choose(bool on);
+bool chosen();
+}
 void swallow_sound_once(int sound);
 void start_warm_up(uint8_t* rdram);
 void leave_warm_up(uint8_t* rdram);
@@ -217,7 +224,8 @@ enum Word { kFreeRoam, kRiders, kWaves, kSky, kMusic, kFog,
             kLayout, kStuntMode, kWarmUp,
             kExtras, kSpeed, kView, kTilt, kFeedback, kTextures, kWater, kStyle, kRipples, kSpray, kUnlockAll,
             kKph, kMph, kChase, kFirstPerson, kNone, kHalf, kFull, kEvents, kOriginal, kHd, kModern, kHigh,
-            kClassic, kAqua, kSoft, kStrong, kMisses, kLaps, kUpdateAvailable, kDayAndNight, kWordCount };
+            kClassic, kAqua, kSoft, kStrong, kMisses, kLaps, kUpdateAvailable, kDayAndNight,
+            kGuestCourses, kGreatBay, kBack, kComingSoon, kWordCount };
 constexpr const char* kTexts[kWordCount] = { "FREE ROAM", "RIDERS", "WAVES", "SKY", "MUSIC", "FOG",
                                              "STILL", "CALM", "GENTLE", "CHOPPY", "ROUGH", "STORMY", "WILD", "EXTREME",
                                              "LAYOUT", "STUNT MODE", "WARM UP",
@@ -225,7 +233,8 @@ constexpr const char* kTexts[kWordCount] = { "FREE ROAM", "RIDERS", "WAVES", "SK
                                              "RIPPLES", "SPRAY", "UNLOCK ALL",
                                              "KPH", "MPH", "CHASE", "FIRST PERSON", "NONE", "HALF", "FULL", "EVENTS",
                                              "ORIGINAL", "HD", "MODERN", "HIGH", "CLASSIC", "AQUA", "SOFT", "STRONG",
-                                             "MISSES", "LAPS", "UPDATE AVAILABLE", "DAY AND NIGHT" };
+                                             "MISSES", "LAPS", "UPDATE AVAILABLE", "DAY AND NIGHT",
+                                             "GUEST COURSES", "GREAT BAY", "BACK", "COMING SOON" };
 // FREE ROAM's own id, and the one every other made word is drawn through:
 // empty in the font 1 table.
 constexpr int kFreeRoamId = 0x28, kScratchId = 0x2B;
@@ -476,11 +485,17 @@ const std::vector<Option> kReverseOptions = {
 const std::vector<Option> kRaceOptions = {
     { kWaves, "races", "race_waves", kWaveValues },
 };
+// The MUSIC row: another course's music is the custom recordings' only, so
+// with the Sound tab's Music on Original it stays on the course's own.
+uint32_t music_setting() { return music::custom_enabled() ? menu_setting("free_roam", "free_roam_music") : 0u; }
+void set_music_setting(uint32_t to) {
+    if (music::custom_enabled()) set_menu_setting("free_roam", "free_roam_music", to);
+}
 const std::vector<Option> kFreeRoamOptions = {
     { kWaves, "free_roam", "free_roam_waves", kWaveValues },
     { kSky, "free_roam", "free_roam_look", kCourseValues },
     { kDayAndNight, "free_roam", "free_roam_day", kSwitchValues },
-    { kMusic, "free_roam", "free_roam_music", kCourseValues },
+    { kMusic, nullptr, nullptr, kCourseValues, music_setting, set_music_setting },
     { kFog, "free_roam", "free_roam_fog", kSwitchValues },
     { kRiders, "free_roam", "dolphin_park_riders", kSwitchValues },
 };
@@ -508,7 +523,7 @@ const std::vector<Option> kExtrasOptions = {
 
 // ------------------------------------------------------------------ pages --
 
-enum class Page { None, ChampionshipWaves, CourseWaves, FreeRoam, Extras };
+enum class Page { None, ChampionshipWaves, CourseWaves, FreeRoam, Extras, Guest };
 Page g_page = Page::None;
 int g_row = 0;
 int g_saved_cursor = 0;      // the main menu's row the page was opened from
@@ -603,7 +618,9 @@ uint32_t draw_page(uint8_t* rdram, recomp_context* ctx, uint32_t gfx) {
 
 void open(uint8_t* rdram, recomp_context* ctx, Page page) {
     g_page = page;
-    g_dolphin_park = chosen_course(rdram) == 0;
+    // (Great Bay, from the GUEST COURSES page, is ridden on Dolphin Park
+    // but has no layout of Dolphin Park's to choose.)
+    g_dolphin_park = chosen_course(rdram) == 0 && !guest::chosen();
     // On CONTINUE, so settings already as a player likes them are passed with
     // one press (the user, 2026-11-03); EXTRAS, opened to change something,
     // on its first row.
@@ -673,7 +690,7 @@ void preview_music(const uint8_t* rdram) {
     if (g_page != Page::FreeRoam || g_row >= int(options_of(g_page).size())) return;
     const Option& o = options_of(g_page)[size_t(g_row)];
     if (o.label != kMusic) return;
-    const uint32_t value = menu_setting(o.tab, o.id);
+    const uint32_t value = value_of(o);
     const int course = value == 0 ? chosen_course(rdram) : int(value) - 1;
     music::preview(course + 6);
 }
@@ -859,6 +876,191 @@ void game_menus_input_hook(uint8_t* rdram, recomp_context* ctx) {
     if (go) game_controls(rdram, ctx);
 }
 
+// ------------------------------------------------------- guest courses --
+//
+// GUEST COURSES: down from the course select's last course in a free roam, a
+// page of the places from other games (src/guest_course.cpp) -- for now
+// GREAT BAY -- and BACK; its picture (a blank square until there is one) on
+// the right, over the course's model. Choosing one is a free roam of its
+// base course, Dolphin Park, with the guest chosen: the Free Roam options
+// page follows as for any course.
+constexpr uint32_t kCourseStep = 0x2C7538;     // D_i4_802C7538: 0 while the course list has the cursor
+constexpr int kLastCourseRow = 8;
+constexpr Word kGuestRows[] = { kGreatBay, kBack };
+constexpr int kGuestRowCount = 2;
+int g_guest_row = 0;
+
+// Whether GREAT BAY can be ridden from the page yet: not in a release until
+// the user has played it through (2026-11-03: shown with COMING SOON for
+// 1.3.1); WR64_GUEST_OPEN=1 opens it, for testing it.
+bool guest_open() {
+    static const bool open = [] {
+        const char* v = std::getenv("WR64_GUEST_OPEN");
+        return v != nullptr && v[0] == '1';
+    }();
+    return open;
+}
+
+// The page's picture: thumbnail.bin beside the guest course's pack
+// (tools/guest/make_thumbnail.py: kThumbW by kThumbH, RGBA 5551, twice the
+// square's size), put each frame the page is up where the jet ski's splash
+// draws in a race (src/body_splash.cpp's lists, unused in the menus), and
+// drawn in 64 by 32 pieces (a load each: TMEM's 4 KB), scaled to half.
+// Empty if there is none: the square stays black.
+constexpr uint32_t kThumbnail = 0x640000, kThumbnailList = 0x65E000;
+constexpr int kThumbW = 284, kThumbH = 210, kThumbX = 150, kThumbY = 54;
+// (The player's own, beside their pack, else the one the release brings,
+// guest\greatbay.rgba16 by the executable: the game runs in its folder.)
+const std::vector<uint8_t>& thumbnail() {
+    static const std::vector<uint8_t> data = [] {
+        std::vector<uint8_t> d(size_t(kThumbW * kThumbH * 2));
+        std::vector<std::string> paths;
+        if (const char* local = std::getenv("LOCALAPPDATA")) paths.push_back(std::string(local) + "\\WaveRace64Recomp\\guest\\greatbay\\thumbnail.bin");
+        paths.push_back("guest\\greatbay.rgba16");
+        for (const std::string& path : paths) {
+            if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+                const bool read = std::fread(d.data(), 1, d.size(), f) == d.size();
+                std::fclose(f);
+                if (read) return d;
+            }
+        }
+        d.clear();
+        return d;
+    }();
+    return data;
+}
+
+uint32_t draw_thumbnail(uint8_t* rdram, uint32_t gfx) {
+    const std::vector<uint8_t>& d = thumbnail();
+    if (d.empty()) return gfx;
+    for (size_t i = 0; i + 4 <= d.size(); i += 4) {
+        store32(rdram, kThumbnail + uint32_t(i), (uint32_t(d[i]) << 24) | (uint32_t(d[i + 1]) << 16) | (uint32_t(d[i + 2]) << 8) | d[i + 3]);
+    }
+    // Its list after it (some 325 commands: more than the menu's own list
+    // should be asked to hold), called from the menu's.
+    store32(rdram, phys(gfx), 0x06000000u);
+    store32(rdram, phys(gfx) + 4, 0x80000000u | kThumbnailList);
+    gfx += 8;
+    uint32_t at = kThumbnailList;
+    auto put = [&](uint32_t w0, uint32_t w1) {
+        store32(rdram, at, w0);
+        store32(rdram, at + 4, w1);
+        at += 8;
+    };
+    put(0xE7000000u, 0);
+    put(0xBA001402u, 0x00000000u);             // one cycle
+    put(0xBA000C02u, 0x00002000u);             // bilinear
+    put(0xBA001301u, 0x00000000u);             // no perspective
+    put(0xBA000E02u, 0x00000000u);             // no palette
+    put(0xB9000002u, 0x00000000u);             // no alpha compare
+    put(0xB900031Du, 0x0F0A4000u);             // opaque surface
+    put(0xFCFFFFFFu, 0xFFFCF279u);             // the texel as it is
+    put(0xFD100000u | uint32_t(kThumbW - 1), 0x80000000u | kThumbnail);
+    for (int t0 = 0; t0 < kThumbH; t0 += 32) {
+        for (int s0 = 0; s0 < kThumbW; s0 += 64) {
+            const int s1 = std::min(kThumbW, s0 + 64), t1 = std::min(kThumbH, t0 + 32);
+            const uint32_t line = uint32_t((s1 - s0) * 2 + 7) / 8;
+            const uint32_t from = (uint32_t(s0 * 4) << 12) | uint32_t(t0 * 4), to = (uint32_t((s1 - 1) * 4) << 12) | uint32_t((t1 - 1) * 4);
+            put(0xF5100000u | (line << 9), 0x07000000u);
+            put(0xE6000000u, 0);
+            put(0xF4000000u | from, 0x07000000u | to);
+            put(0xE7000000u, 0);
+            put(0xF5100000u | (line << 9), (2u << 18) | (2u << 8));        // clamped
+            put(0xF2000000u | from, to);
+            const int x0 = kThumbX + s0 / 2, y0 = kThumbY + t0 / 2, x1 = kThumbX + s1 / 2, y1 = kThumbY + t1 / 2;
+            put(0xE4000000u | (uint32_t(x1 * 4) << 12) | uint32_t(y1 * 4), (uint32_t(x0 * 4) << 12) | uint32_t(y0 * 4));
+            put(0xB3000000u, (uint32_t(s0 << 5) << 16) | uint32_t(t0 << 5));  // where the piece starts (s10.5)
+            put(0xB2000000u, (0x0800u << 16) | 0x0800u);                       // two texels a pixel (s5.10)
+        }
+    }
+    put(0xE7000000u, 0);
+    put(0xB8000000u, 0);
+    return gfx;
+}
+
+uint32_t draw_guest_page(uint8_t* rdram, recomp_context* ctx, uint32_t gfx) {
+    place_pictures(rdram);
+    constexpr int kBarX = 22, kBarW = 150, kTop = 58, kStep = 22;
+    gfx = call(rdram, ctx, func_801E7C58, { gfx, 8, 20, 311, 219, 0, 0, 0, 0xE0 });
+    // The picture's place, solid: the course model's box, covered.
+    gfx = call(rdram, ctx, func_801E7C58, { gfx, 150, 54, 292, 159, 0, 0, 0, 0xFF });
+    for (int row = 0; row < kGuestRowCount; ++row) {
+        const int y = kTop + row * kStep - 2;
+        gfx = call(rdram, ctx, func_801E7C58, { gfx, uint32_t(kBarX + 2), uint32_t(y + 1), uint32_t(kBarX + kBarW - 3), uint32_t(y + 13), 0, 0, 0, 0xFF });
+    }
+    store32(rdram, phys(gfx), 0x06000000u);
+    store32(rdram, phys(gfx) + 4, kBarSetup);
+    gfx += 8;
+    gfx = call(rdram, ctx, func_80094338, { gfx, 0, 40, 24, 240, 0xF });
+    for (int row = 0; row < kGuestRowCount; ++row) {
+        gfx = call(rdram, ctx, func_80094338, { gfx, 0, uint32_t(kBarX), uint32_t(kTop + row * kStep - 2), uint32_t(kBarW), 0xF });
+    }
+    gfx = colour(rdram, ctx, gfx, kStyleNormal);
+    gfx = draw_text(rdram, ctx, gfx, made(kGuestCourses), 160 - g_pictures[kGuestCourses].ink / 2, 25);
+    for (int row = 0; row < kGuestRowCount; ++row) {
+        if (row == g_guest_row) continue;
+        const Word w = kGuestRows[row];
+        gfx = draw_text(rdram, ctx, gfx, made(w), kBarX + kBarW / 2 - g_pictures[w].ink / 2, kTop + row * kStep + 1);
+    }
+    gfx = colour(rdram, ctx, gfx, kStyleChosen);
+    const Word w = kGuestRows[g_guest_row];
+    gfx = draw_text(rdram, ctx, gfx, made(w), kBarX + kBarW / 2 - g_pictures[w].ink / 2, kTop + g_guest_row * kStep + 1);
+    gfx = draw_thumbnail(rdram, gfx);
+    // Not open yet: COMING SOON under the picture, blinking (a second on,
+    // half off) while GREAT BAY has the cursor.
+    static int blink = 0;
+    blink = (blink + 1) % 30;
+    if (!guest_open() && kGuestRows[g_guest_row] == kGreatBay && blink < 20) {
+        gfx = colour(rdram, ctx, gfx, kStyleChosen);
+        gfx = draw_text(rdram, ctx, gfx, made(kComingSoon), kThumbX + kThumbW / 4 - g_pictures[kComingSoon].ink / 2, kThumbY + kThumbH / 2 + 8);
+    }
+    return call(rdram, ctx, func_801E5554, { gfx });
+}
+
+// Below the course list in a free roam, a sign there is more: a small
+// arrow, pointing down, left of SOUTHERN ISLAND's bar, bobbing (a stack of
+// bars, each narrower than the one above, in the chosen row's green).
+uint32_t draw_more_arrow(uint8_t* rdram, recomp_context* ctx, uint32_t gfx) {
+    static int frames = 0;
+    const int bob = int(std::lround(std::sin(double(++frames) * 0.12) * 2.0));
+    constexpr int kX = 15, kY = 198;
+    for (int row = 0; row < 6; ++row) {
+        const int half = 5 - row;
+        const int y = kY + bob + row;
+        gfx = call(rdram, ctx, func_801E7C58, { gfx, uint32_t(kX - half), uint32_t(y), uint32_t(kX + half + 1), uint32_t(y + 1), 0x40, 0xFF, 0x40, 0xFF });
+    }
+    return gfx;
+}
+
+// The page's controls: up from its first row, and BACK or B, return to the
+// course list (on its last course); GREAT BAY goes on to the Free Roam
+// options, Dolphin Park the course.
+void guest_page_controls(uint8_t* rdram, recomp_context* ctx, uint16_t buttons) {
+    if ((buttons & kB) || ((buttons & kUp) && g_guest_row == 0) ||
+        ((buttons & (kA | kZ | kStart)) && kGuestRows[g_guest_row] == kBack)) {
+        g_page = Page::None;
+        play(rdram, ctx, (buttons & kUp) ? kSoundMove : kSoundBack);
+        return;
+    }
+    if (buttons & (kUp | kDown)) {
+        g_guest_row = std::clamp(g_guest_row + ((buttons & kUp) ? -1 : 1), 0, kGuestRowCount - 1);
+        play(rdram, ctx, kSoundMove);
+        return;
+    }
+    if ((buttons & (kA | kZ | kStart)) && !guest_open()) {
+        play(rdram, ctx, kSoundBack);
+        return;
+    }
+    if (buttons & (kA | kZ | kStart)) {
+        guest::choose(true);
+        for (int row = 0; row <= kLastCourseRow; ++row) {
+            if (load32(rdram, kCourseOfRow + uint32_t(row) * 4) == 0) store32(rdram, kCourseRow, uint32_t(row));
+        }
+        std::fprintf(stderr, "[wr64] game menus: Great Bay chosen\n");
+        open(rdram, ctx, Page::FreeRoam);
+    }
+}
+
 // func_i4_802C7474 in its section's table: the course select's way out, to
 // state a0. Starting a race there opens the page instead, once.
 void game_menus_course_exit_hook(uint8_t* rdram, recomp_context* ctx) {
@@ -874,11 +1076,24 @@ void game_menus_course_exit_hook(uint8_t* rdram, recomp_context* ctx) {
 // func_i4_802C6BAC in its section's table: the course select's controls,
 // the page's while it is up.
 void game_menus_course_input_hook(uint8_t* rdram, recomp_context* ctx) {
-    if (g_page != Page::CourseWaves && g_page != Page::FreeRoam) { func_i4_802C6BAC(rdram, ctx); return; }
     const uint32_t pad = uint32_t(std::clamp(load32(rdram, kCourseSelectPad), 0, 3));
     const uint16_t buttons = load16(rdram, kButtons + pad * kControllerSize);
+    if (g_page == Page::Guest) { guest_page_controls(rdram, ctx, buttons); return; }
+    // Down from the last course in a free roam: GUEST COURSES.
+    if (g_page == Page::None && enabled() && free_roam_chosen() && load32(rdram, kChosenMode) == kStunt &&
+        load32(rdram, kCourseStep) == 0 && load32(rdram, kCourseRow) == kLastCourseRow && (buttons & kDown)) {
+        g_page = Page::Guest;
+        g_guest_row = 0;
+        play(rdram, ctx, kSoundMove);
+        return;
+    }
+    if (g_page != Page::CourseWaves && g_page != Page::FreeRoam) { func_i4_802C6BAC(rdram, ctx); return; }
     const bool roam = g_page == Page::FreeRoam;
-    if (!page_controls(rdram, ctx, buttons)) return;
+    if (!page_controls(rdram, ctx, buttons)) {
+        // Out of the Free Roam options with B: not a guest's any more.
+        if (g_page == Page::None) guest::choose(false);
+        return;
+    }
     // Dolphin Park's Warm Up: the championship's, ridden as a free roam.
     if (roam && g_dolphin_park && menu_setting("free_roam", "dolphin_park_layout") == 1) start_warm_up(rdram);
     g_starting = true;
@@ -890,8 +1105,20 @@ void game_menus_course_input_hook(uint8_t* rdram, recomp_context* ctx) {
 // func_i4_802C5B78 in its section's table: the course select's frame, the
 // page drawn over it while it is up.
 void game_menus_course_draw_hook(uint8_t* rdram, recomp_context* ctx) {
+    // Arriving on the course select (its first frame): no guest chosen yet.
+    if (load32(rdram, kFirstFrame) != 0 && uint32_t(load32(rdram, kGameState)) == kCourseSelectState) guest::choose(false);
     func_i4_802C5B78(rdram, ctx);
     preview_music(rdram);
+    if (g_page == Page::Guest) {
+        if (uint32_t(load32(rdram, kGameState)) != kCourseSelectState) { g_page = Page::None; return; }
+        ctx->r2 = gpr(int64_t(int32_t(draw_guest_page(rdram, ctx, uint32_t(ctx->r2)))));
+        return;
+    }
+    if (g_page == Page::None && enabled() && free_roam_chosen() && load32(rdram, kChosenMode) == kStunt &&
+        uint32_t(load32(rdram, kGameState)) == kCourseSelectState && load32(rdram, kCourseStep) == 0) {
+        ctx->r2 = gpr(int64_t(int32_t(draw_more_arrow(rdram, ctx, uint32_t(ctx->r2)))));
+        return;
+    }
     if (g_page != Page::CourseWaves && g_page != Page::FreeRoam) return;
     if (uint32_t(load32(rdram, kGameState)) != kCourseSelectState) { g_page = Page::None; return; }
     ctx->r2 = gpr(int64_t(int32_t(draw_page(rdram, ctx, uint32_t(ctx->r2)))));

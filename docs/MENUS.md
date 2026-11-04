@@ -282,6 +282,19 @@ ovl_i0 offsets `0x844` draw and `0xBAC` controls; ovl_i4 `0x378` frame,
 `0x13AC` controls, `0x1C74` way out). The hooks call the originals for
 everything of the game's own. Nothing is regenerated.
 
+### GUEST COURSES on the course select
+
+In a free roam, down from the last course (`D_800DA9D0` 8, the list's step
+`D_i4_802C7538` 0) opens GUEST COURSES: the mod's page over a dark box, its
+title, GREAT BAY and BACK, and the guest's picture (for now a blank square)
+over the course model's box (`func_801E7C58` at 150,54 to 292,159). Up from
+its first row, BACK or B return to the list. GREAT BAY chooses the guest for
+the next free roam (`guest::choose`, src/guest_course.cpp), puts the row on
+Dolphin Park, its base course, and opens the Free Roam options without
+LAYOUT; B there, or arriving on the course select again, unchooses it.
+While the course list has the cursor, a small green arrow, pointing down
+and bobbing, left of SOUTHERN ISLAND's bar says there is more below.
+
 ### FREE ROAM on the main menu
 
 The main menu's first page gets a sixth row, FREE ROAM, above OPTIONS: the

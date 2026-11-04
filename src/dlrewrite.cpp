@@ -187,6 +187,13 @@ bool free_roam_hides(const uint8_t* rdram, uint32_t list);
 // src/seafloor.cpp: the list drawing the course's seafloor, and an identity
 // matrix to draw it under; or 0.
 uint32_t seafloor_list(uint8_t* rdram, uint32_t course, const uint32_t segments[16], uint32_t* identity);
+// src/guest_course.cpp: a guest course in the base course's place, its
+// scenery's list and the matrix it is drawn under.
+namespace guest {
+bool active(const uint8_t* rdram);
+uint32_t scenery_list();
+uint32_t scenery_matrix();
+}
 bool seafloor_only_below(uint32_t course);
 // src/land_backs.cpp: the backs of the course's land, drawn before its water.
 uint32_t land_backs_list(uint8_t* rdram, uint32_t course, const uint32_t segments[16], uint32_t* identity);
@@ -778,6 +785,11 @@ struct Walker {
         // A course with a seafloor of its own (src/seafloor.cpp) draws it in
         // place of the game's flat floor at the water's level, which would
         // otherwise hide it, in a state of its own that RT64 puts back after.
+        // On a guest course (src/guest_course.cpp) the floor is left out,
+        // and its scenery drawn before the water instead (see below).
+        if (list == kSkyFloorList && racing(state) && wr64::guest::active(rdram) && wr64::guest::scenery_list() != 0) {
+            return true;
+        }
         if (list == kSkyFloorList && racing(state)) {
             uint32_t identity = 0;
             const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));
@@ -817,10 +829,19 @@ struct Walker {
             // is drawn from both sides: a camera skimming the water from
             // outside it -- the title's opening, the cameras after a race --
             // otherwise sees only faces turned away, and so no sky at all.
+            // Its faces turned away first, then those facing the camera over
+            // them: drawn in one go, the tent's back, the gradient's pale
+            // top, covered the sky whenever the camera passed near the
+            // tent's edge -- the attract scene's sky gone white, or a white
+            // wedge in it, in flat (the user, 2026-11-03; POLISH 2.10).
             if (list != kSkyGradientList) return false;
             const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
             emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
-            emit(0xB6000000u, 0x00003000u);                 // clear culling of either side
+            emit(0xB6000000u, 0x00002000u);                 // not the back culled,
+            emit(0xB7000000u, 0x00001000u);                 // the front: the back alone
+            emit(uint32_t(kOpDisplayList) << 24, list);
+            emit(0xB6000000u, 0x00001000u);                 // then as the game draws it
+            emit(0xB7000000u, 0x00002000u);
             emit(uint32_t(kOpDisplayList) << 24, list);
             emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
             return true;
@@ -2327,6 +2348,12 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             if (w.projection_is_perspective && w.replace_sky_call(w1)) {
                 continue;
             }
+            // On a guest course the base course's scenery and objects (its
+            // segment 13 lists, and Dolphin Park's start gate at 0x8029xxxx)
+            // are left out.
+            if (((w1 >> 24) == 0x0D || (w1 >> 16) == 0x8029) && racing(w.state) && wr64::guest::active(w.rdram)) {
+                continue;
+            }
             // WR64_DROP_LISTS=addr,addr,...: those lists' top-level calls are
             // left out, for finding what draws what.
             static const std::vector<uint32_t> dropped = [] {
@@ -2382,6 +2409,26 @@ uint32_t rewrite(uint8_t* rdram, uint32_t list_vaddr) {
             // The backs of the course's land (src/land_backs.cpp), before its
             // water: after the sky, which is drawn over whatever is there
             // before it, in a state of their own that RT64 puts back after.
+            // A guest course's scenery (src/guest_course.cpp) there likewise,
+            // under its own matrix.
+            if (water && racing(state) && wr64::guest::active(w.rdram) && wr64::guest::scenery_list() != 0) {
+                const uint32_t ex = uint32_t(RT64_EXTENDED_OPCODE) << 24;
+                w.emit(ex | G_EX_PUSHGEOMETRYMODE_V1, 0);
+                w.emit(ex | G_EX_PUSHOTHERMODE_V1, 0);
+                w.emit(ex | G_EX_PUSHCOMBINE_V1, 0);
+                static bool told = false;
+                if (!told) {
+                    told = true;
+                    std::fprintf(stderr, "[wr64-guest] scenery drawn: list 0x%08X under matrix 0x%08X\n", wr64::guest::scenery_list(),
+                                 wr64::guest::scenery_matrix());
+                }
+                w.emit((uint32_t(kOpMtx) << 24) | ((kMtxLoad | kMtxPush) << 16) | 0x40, wr64::guest::scenery_matrix());
+                w.emit(uint32_t(kOpDisplayList) << 24, wr64::guest::scenery_list());
+                w.emit(0xBD000000u, 0);                             // pop the modelview
+                w.emit(ex | G_EX_POPCOMBINE_V1, 0);
+                w.emit(ex | G_EX_POPOTHERMODE_V1, 0);
+                w.emit(ex | G_EX_POPGEOMETRYMODE_V1, 0);
+            }
             if (water && racing(state)) {
                 uint32_t identity = 0;
                 const uint32_t course = *reinterpret_cast<const uint32_t*>(rdram + (kCourseId & 0x00FFFFFFu));

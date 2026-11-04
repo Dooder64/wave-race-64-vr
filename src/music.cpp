@@ -234,6 +234,7 @@ void preview(int sequence) {
     preview_until.store(now_ticks() + hold.count(), std::memory_order_relaxed);
 }
 void set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
+bool custom_enabled() { return enabled.load(std::memory_order_relaxed); }
 void set_volume(double percent) { main_volume.store(float(std::clamp(percent, 0.0, 100.0) / 100.0), std::memory_order_relaxed); }
 void set_replacement_volume(double percent) { replacement_volume.store(float(std::clamp(percent, 0.0, 100.0) / 100.0), std::memory_order_relaxed); }
 

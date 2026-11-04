@@ -118,6 +118,9 @@ A gamepad works too, as in the flat game.
 
 - Free Roam's riders sometimes clip through walls and ice, most of all on
   Glacier Coast and the walled courses.
+- Free Roam's riders are off on Twilight City for now: in its narrow canals
+  they kept riding into the walls. They'll be back once they can find their
+  way round it.
 - In the attract scene the title's logo sometimes shows over the sky for a
   few frames.
 - Brief flashes at some transitions between menus and races, and the

@@ -5,8 +5,9 @@
 # What goes in: the executable, the three DLLs it cannot start without (SDL2,
 # dxcompiler, dxil), "Play in VR.bat" (the executable with WR64_VR=1), assets/
 # (menus, replacement music, HD textures), this project's LICENSE, the
-# third-party notices, the README, and licenses/ with each bundled component's
-# license text. The debug symbols go into a
+# third-party notices, the README, licenses/ with each bundled component's
+# license text, and guest\greatbay.rgba16 (the GUEST COURSES page's picture
+# of Great Bay, a screenshot of the user's: -GuestPicture). The debug symbols go into a
 # second zip, which is only needed to investigate crash reports. Nothing here
 # is a ROM, and the script refuses to
 # continue if it finds one where it is staging.
@@ -21,7 +22,10 @@ param(
     [string]$BuildDir = "build-fe",
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$Version = "0.1.0",
-    [string]$OutDir = "dist"
+    [string]$OutDir = "dist",
+    # The GUEST COURSES page's picture of Great Bay (tools/guest/make_thumbnail.py;
+    # not in the repository), as guest\greatbay.rgba16. Empty: none bundled.
+    [string]$GuestPicture = "$env:LOCALAPPDATA\WaveRace64Recomp\guest\greatbay\thumbnail.bin"
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,6 +67,11 @@ foreach ($f in $files) {
     Copy-Item $f $stage
 }
 Copy-Item -LiteralPath 'docs/WINDOWS_RELEASE.md' -Destination (Join-Path $stage 'INSTALLATION.md')
+if ($GuestPicture) {
+    if (-not (Test-Path -LiteralPath $GuestPicture)) { throw "no Great Bay picture at $GuestPicture (tools/guest/make_thumbnail.py makes it; -GuestPicture '' for none)" }
+    New-Item -ItemType Directory -Force (Join-Path $stage "guest") | Out-Null
+    Copy-Item -LiteralPath $GuestPicture -Destination (Join-Path $stage "guest\greatbay.rgba16")
+}
 
 # The license texts of what the executable contains (THIRD_PARTY_NOTICES.md),
 # which go with the binary: licenses\<component>.txt.

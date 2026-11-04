@@ -436,7 +436,7 @@ void init(bool auto_start) {
         if (context != recomp::config::OptionChangeContext::Temporary)
             wr64::day::set_enabled(std::get<bool>(value));
     });
-    roam.add_enum_option("free_roam_music", "Music", "Play another course's music in a free roam. Needs the replacement music; with the original music each course keeps its own.", course_choices, 0u);
+    roam.add_enum_option("free_roam_music", "Music", "Play another course's music in a free roam. Needs Custom music (the Sound tab); with Original each course keeps its own.", course_choices, 0u);
     roam.add_option_change_callback("free_roam_music", [](auto value, auto, auto context) {
         if (context != recomp::config::OptionChangeContext::Temporary)
             wr64::set_race_music(int(std::get<uint32_t>(value)) - 1);
@@ -526,9 +526,20 @@ void init(bool auto_start) {
             wr64::music::set_volume(std::get<double>(value));
         }
     });
-    // The replacement music is always used: Free Roam's MUSIC and its preview
-    // need it. (Tracks without a recording still play the game's own.)
+    // Original or Custom, Custom the default. Free Roam's MUSIC and its
+    // preview are the recordings' only: with the original music each course
+    // keeps its own (playing another course's in the game itself loaded its
+    // instruments into this one's room, and some don't fit: Twilight City's
+    // music on Marine Fortress crashed). Tracks without a recording still
+    // play the game's own.
     wr64::music::set_enabled(true);
+    sound.add_enum_option("music_replacements", "Music", "Custom plays the bundled recordings (or ones installed in your music folder); Original plays the game's own music. Sound effects and the announcer are the game's either way. Free Roam's Music choice needs Custom: with Original each course keeps its own.",
+        {{0, "original", "Original"}, {1, "custom", "Custom"}}, 1u);
+    sound.add_option_change_callback("music_replacements", [](auto value, auto, auto context) {
+        if (context != recomp::config::OptionChangeContext::Temporary) {
+            wr64::music::set_enabled(std::get<uint32_t>(value) != 0);
+        }
+    });
     sound.add_percent_number_option("replacement_music_volume", "Custom music volume", "Adjust the replacement recordings relative to engine sounds, splashes and the announcer.", 65.0);
     sound.add_option_change_callback("replacement_music_volume", [](auto value, auto, auto context) {
         if (context != recomp::config::OptionChangeContext::Temporary) {

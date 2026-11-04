@@ -1,4 +1,4 @@
-// Fellow riders out on the water, having fun while you warm up: the three
+﻿// Fellow riders out on the water, having fun while you warm up: the three
 // racers the player did not pick. On Dolphin Park one rides a loop round the
 // park, hitting the ramp at full speed and barrel-rolling over it, or laps
 // the park's edge; the other two ride together (the pair, below), touring
@@ -85,8 +85,14 @@ namespace wr64 {
 
 // patches/free_roam.cpp: whether this race is a free roam.
 bool free_roam_active(const uint8_t* rdram);
-// src/seafloor.cpp: the seafloor's height, on a course with one.
+// src/guest_course.cpp: whether a guest course is in the base course's place.
+namespace guest { bool active(const uint8_t* rdram); }
+// src/seafloor.cpp: the seafloor's height, on a course with one; how far a
+// point is from what stands out of the water (walls, land), and whether a
+// course's is walls.
 bool seafloor_height_at(uint32_t course, float x, float z, float* height);
+float course_clearance(uint32_t course, float x, float z);
+bool course_has_walls(uint32_t course);
 // patches/water_all_round.cpp: the waves' height at a point.
 float water_height_at(uint32_t segment3, float x, float z);
 // src/body_splash.cpp: companion `index`'s jet ski this frame, for its spray.
@@ -466,6 +472,9 @@ struct Drive {
     int mind = 0;
     bool trio = false;
     float top = kSpeed;
+    // Where it was last seen moving on, and since when (see drive).
+    float held_x = 0, held_z = 0;
+    double held_since = 0;
 };
 // The single riders -- the first, and with more riders out two others --
 // and the trio's leader.
@@ -560,6 +569,13 @@ bool g_stunt = false;
 // ride along.
 uint32_t g_course = 0;
 bool g_pair_out = false, g_more_out = false;
+// With more out, how many of the singles (the first and those after it, the
+// trio's leader last), and whether the trio is: all of them but on Twilight
+// City, its canals too narrow for so many -- there the first and second
+// riders and the pair only (the user, 2026-11-03: its riders kept clear of
+// each other into its walls).
+int g_out_drives = 4;
+bool g_trio_out = true;
 // The course's ramps, and the riders' map (both below).
 constexpr float kRampRoom = 650.0f;
 extern std::vector<std::pair<float, float>> g_ramps;
@@ -567,6 +583,11 @@ extern std::vector<float> g_ramp_angles;
 struct WaterMap;
 extern WaterMap g_rider_map;
 bool map_open(const WaterMap& m, float x, float z);
+bool map_built(const WaterMap& m);
+void plan_route(const WaterMap& m, float fx, float fz, float tx, float tz, std::vector<std::pair<float, float>>& route);
+bool clear_of_walls(uint32_t course, float x, float z);
+bool on_slope_piece(float x, float z, float margin);
+bool land_at(float x, float z);
 // A ramp as ridden: its crest's middle, the way over it, and how far either
 // side of its middle a jet ski is on it. All the park's ramps are one hump,
 // the same either way (kFaceX/kFaceY from the crest back), 1000 across.
@@ -645,7 +666,12 @@ void build_course_lap(const uint8_t* rdram) {
         const auto& a0 = g_course_lap[(near + g_course_lap.size() - 4) % g_course_lap.size()];
         const auto& a1 = g_course_lap[(near + 4) % g_course_lap.size()];
         const float hx = a1.first - a0.first, hz = a1.second - a0.second, length = std::max(1.0f, std::hypot(hx, hz));
-        if (std::hypot(g_course_lap[near].first - rx, g_course_lap[near].second - rz) < 400.0f && (hx * ox + hz * oz) / length > 0.9f) {
+        // (Not one without a face to ride up: Sunset Bay's by the shore
+        // measured none, 116 up straight from the water, and riders sent
+        // over it were stopped at its side, the unattended checks,
+        // 2026-11-03. The line goes round it as round any other.)
+        if (std::hypot(g_course_lap[near].first - rx, g_course_lap[near].second - rz) < 400.0f && (hx * ox + hz * oz) / length > 0.9f &&
+            g_ramp_shapes[k].face >= 100.0f) {
             over[k] = true;
             const RampShape& s = g_ramp_shapes[k];
             g_lap_ramps.push_back({ s.crest_x, s.crest_z, ox, oz, 400.0f, s.top, s.face, s.pop, true, s.launch });
@@ -720,6 +746,90 @@ void build_course_lap(const uint8_t* rdram) {
             }
         }
     }
+    // Through land or walls: the line is drawn straight from buoy to buoy,
+    // and on some courses (Glacier Coast's, the walled ones) that cut across
+    // what stands out of the water, where riders following it went through
+    // (the user, 2026-11-03). Each stretch on closed squares of the riders'
+    // map is replaced by the way round from the open point before it to the
+    // one after -- but for the straight runs over the ramps it jumps.
+    if (map_built(g_rider_map) && g_course_lap.size() > 8) {
+        const size_t n = g_course_lap.size();
+        auto over_ramp = [&](float x, float z) {
+            for (const Ramp& r : g_lap_ramps) {
+                const float along = (x - r.x) * r.over_x + (z - r.z) * r.over_z, across = (z - r.z) * r.over_x - (x - r.x) * r.over_z;
+                // (But not over land: a run-up 1600 long crossed the land
+                // before Sunset Bay's second ramp.)
+                if (along > -1600.0f && along < 1100.0f && std::fabs(across) < 800.0f) return !land_at(x, z);
+            }
+            return false;
+        };
+        std::vector<bool> closed(n);
+        size_t open_at = n;
+        for (size_t i = 0; i < n; ++i) {
+            const auto [x, z] = g_course_lap[i];
+            closed[i] = !map_open(g_rider_map, x, z) && !over_ramp(x, z);
+            if (!closed[i] && open_at == n) open_at = i;
+        }
+        if (open_at < n) {
+            std::vector<std::pair<float, float>> routed;
+            size_t rerouted = 0;
+            for (size_t k = 0; k < n;) {
+                const size_t i = (open_at + k) % n;
+                if (!closed[i]) { routed.push_back(g_course_lap[i]); ++k; continue; }
+                // The closed run from i, and the open point after it.
+                size_t run = 0;
+                while (k + run < n && closed[(open_at + k + run) % n]) ++run;
+                const auto from = routed.empty() ? g_course_lap[open_at] : routed.back();
+                const auto to = g_course_lap[(open_at + k + run) % n];
+                std::vector<std::pair<float, float>> way;
+                plan_route(g_rider_map, from.first, from.second, to.first, to.second, way);
+                // Its squares' middles, points kSample apart between them.
+                std::pair<float, float> last = from;
+                for (size_t w = 1; w + 1 < way.size(); ++w) {
+                    const auto [wx, wz] = way[w];
+                    const float length = std::hypot(wx - last.first, wz - last.second);
+                    for (float t = kSample; t < length; t += kSample)
+                        routed.emplace_back(last.first + (wx - last.first) * t / length, last.second + (wz - last.second) * t / length);
+                    routed.emplace_back(wx, wz);
+                    last = way[w];
+                }
+                ++rerouted;
+                k += run;
+            }
+            if (rerouted > 0) {
+                g_course_lap = std::move(routed);
+                std::fprintf(stderr, "[wr64-companion] course %u: %zu stretches of the lap routed round land or walls\n", g_course, rerouted);
+            }
+        }
+    }
+    // Off the walls: a line along open squares may still run at a wall's
+    // foot, and riders a lane either side of it met the wall (Port Blue's
+    // canal sides, the user, 2026-11-03). Each point with closed squares
+    // within kOffWalls is moved away from them, up to that far.
+    if (map_built(g_rider_map) && (course_has_walls(g_course) || g_course == 7)) {
+        constexpr float kOffWalls = 400.0f;
+        size_t moved = 0;
+        for (auto& [x, z] : g_course_lap) {
+            float px = 0.0f, pz = 0.0f;
+            for (float dz = -kOffWalls; dz <= kOffWalls; dz += 100.0f) {
+                for (float dx = -kOffWalls; dx <= kOffWalls; dx += 100.0f) {
+                    const float d = std::hypot(dx, dz);
+                    if (d < 1.0f || d > kOffWalls || map_open(g_rider_map, x + dx, z + dz)) continue;
+                    px -= dx / d * (kOffWalls - d);
+                    pz -= dz / d * (kOffWalls - d);
+                }
+            }
+            const float length = std::hypot(px, pz);
+            if (length < 1.0f) continue;
+            // As far along it as stays on open squares.
+            for (float t = std::min(kOffWalls, length * 0.05f); t > 20.0f; t *= 0.5f) {
+                const float ox = x + px / length * t, oz = z + pz / length * t;
+                if (map_open(g_rider_map, ox, oz)) { x = ox; z = oz; ++moved; break; }
+            }
+        }
+        std::fprintf(stderr, "[wr64-companion] course %u: %zu points of the lap moved off the walls\n", g_course, moved);
+    }
+
     // The corners: where the line turns more than 17 degrees over 100 units.
     const size_t m = g_course_lap.size();
     g_lap_straight.assign(m, 1e9f);
@@ -1062,7 +1172,9 @@ bool run_at_ramp(const Drive& d) {
     for (const Ramp& r : g_lap_ramps) {
         const float rx = d.x - r.x, rz = d.z - r.z;
         const float s = rx * r.over_x + rz * r.over_z, across = rz * r.over_x - rx * r.over_z;
-        if (s > -1500.0f && s < 300.0f && std::fabs(across) < r.half_width + 200.0f) return true;
+        // (Not over land, as the line is drawn: at Sunset Bay the run crossed
+        // the land before a ramp.)
+        if (s > -1500.0f && !land_at(d.x, d.z) && s < 300.0f && std::fabs(across) < r.half_width + 200.0f) return true;
     }
     return false;
 }
@@ -1188,6 +1300,42 @@ void drive(Drive& d, uint32_t segment3, std::chrono::steady_clock::time_point no
         d.z += std::sin(d.heading) * d.speed * dt;
     }
     else step_on(d.x, d.z, d.heading, d.speed, dt);
+    // Held in one place three seconds on its route (away from the park): put
+    // back on open water further along it, while the player is too far off
+    // to see either place. (Sunset Bay's first rider, off its ramp onto the
+    // land beside it, was wedged against the ramp's side for good: the
+    // unattended checks, 2026-11-03.)
+    {
+        const double t = seconds(std::chrono::steady_clock::now());
+        if (std::hypot(d.x - d.held_x, d.z - d.held_z) > 150.0f || g_course == 0 || d.airborne || d.on_ramp) {
+            d.held_x = d.x;
+            d.held_z = d.z;
+            d.held_since = t;
+        }
+        else if (t - d.held_since > 3.0) {
+            for (int k = int(kLookahead / kSample); k < n; ++k) {
+                const auto& p = points[(d.nearest + k) % n];
+                if (!map_open(g_rider_map, p.first, p.second) || std::hypot(p.first - d.x, p.second - d.z) < 300.0f) continue;
+                const bool unseen = !g_player.known || (std::hypot(g_player.x - d.x, g_player.z - d.z) > 2500.0f &&
+                                                        std::hypot(g_player.x - p.first, g_player.z - p.second) > 2500.0f);
+                if (unseen) {
+                    const auto& q = points[(d.nearest + k + 1) % n];
+                    d.x = p.first;
+                    d.z = p.second;
+                    d.heading = std::atan2(q.second - p.second, q.first - p.first);
+                    d.speed = 300.0f;
+                    d.nearest = (d.nearest + k) % n;
+                    d.way.route.clear();
+                    std::fprintf(stderr, "[wr64-companion] a rider held at %.0f %.0f for %.0f s put back on its route at %.0f %.0f\n",
+                                 d.held_x, d.held_z, t - d.held_since, p.first, p.second);
+                }
+                break;
+            }
+            d.held_x = d.x;
+            d.held_z = d.z;
+            d.held_since = t;
+        }
+    }
     // Into the turn: a heading growing is a turn to the right, and a bank towards the hull's x.
     d.bank = g_pose.x_right * kLean * std::clamp(d.turning / (kSpeed / kRadius), -1.0f, 1.0f);
     d.flip = 0.0f;
@@ -1652,7 +1800,7 @@ void build_course_spots(const uint8_t* rdram) {
         const RampShape& shape = g_ramp_shapes[0];
         const float cx = shape.crest_x, cz = shape.crest_z;
         const float sx = cx - ox * 2000.0f, sz = cz - oz * 2000.0f;
-        bool open = true;
+        bool open = shape.face >= 100.0f;      // (a face to ride up, as for the laps)
         for (const float back : { 0.0f, 300.0f, 700.0f }) {
             for (const float side : { -200.0f, 0.0f, 200.0f }) {
                 if (!rider_water(rdram, g_course, sx - ox * back + oz * side, sz - oz * back - ox * side)) open = false;
@@ -2465,7 +2613,7 @@ void note_player(const uint8_t* rdram, uint32_t segment3, float dt, std::chrono:
         std::fprintf(stderr, "[wr64-companion] the player is in the air, %.0f up at %.0f %.0f\n", pl.height, x, z);
         std::fflush(stderr);
     }
-    for (int i = 0; i < (g_more_out ? kDrives : 1); ++i) {
+    for (int i = 0; i < (g_more_out ? g_out_drives : 1); ++i) {
         Drive& d = g_drives[i];
         if (!d.airborne && d.crash == Crash::None && !d.on_ramp &&
             minds::notice(g_minds[d.mind], air, std::hypot(air.x - d.x, air.z - d.z), chance(), t)) {
@@ -2612,8 +2760,28 @@ bool inside_boundary(const uint8_t* rdram, float x, float z) {
     return false;
 }
 
+// Walls (Marine Fortress, Port Blue, Twilight City; Southern Island's sea
+// walls): their floor is deep right up to them, so the floor alone let
+// riders through them (the user, 2026-11-03). kWallRoom clear of them too.
+constexpr float kWallRoom = 90.0f;
+// (Each square's distance, as the riders' map is built: build_rider_map.)
+std::vector<float>* g_square_clearance = nullptr;
+bool clear_of_walls(uint32_t course, float x, float z) {
+    if (!(course_has_walls(course) || course == 7)) return true;
+    const float clearance = course_clearance(course, x, z);
+    if (g_square_clearance != nullptr) g_square_clearance->push_back(clearance);
+    return clearance > kWallRoom;
+}
+
+// Land by the course's own tables (its sea floor less than 25 deep, or a
+// wall), for where a line is drawn straight.
+bool land_at(float x, float z) {
+    float floor = 0.0f;
+    return !clear_of_walls(g_course, x, z) || (seafloor_height_at(g_course, x, z, &floor) && floor >= -25.0f);
+}
+
 bool dolphin_water(const uint8_t* rdram, uint32_t course, float x, float z) {
-    if (!inside_boundary(rdram, x, z)) return false;
+    if (!inside_boundary(rdram, x, z) || !clear_of_walls(course, x, z)) return false;
     float floor = 0.0f;
     return !seafloor_height_at(course, x, z, &floor) || floor < -kDolphinDepth;
 }
@@ -2622,6 +2790,7 @@ bool dolphin_water(const uint8_t* rdram, uint32_t course, float x, float z) {
 // where it has one -- out past the boundary too, as a free roam goes (the
 // user's sights include beaches far out) -- or else inside the boundary.
 bool rider_water(const uint8_t* rdram, uint32_t course, float x, float z) {
+    if (!clear_of_walls(course, x, z)) return false;
     float floor = 0.0f;
     if (seafloor_height_at(course, x, z, &floor)) return floor < -25.0f;
     return inside_boundary(rdram, x, z);
@@ -2677,7 +2846,7 @@ constexpr float kDolphinSwim = 750.0f, kDolphinLeap = 900.0f, kDolphinTurn = 1.6
 // audience_drive.
 constexpr int kAudience = 6;
 int audience_mind(int t) { return t == 1 ? 0 : t == 2 ? 1 : t >= 3 && t < kAudience ? t - 1 : -1; }
-Drive* audience_drive(int t) { return t == 1 ? &g_drives[0] : t >= 3 && t < kAudience ? &g_drives[t - 2] : nullptr; }
+Drive* audience_drive(int t) { return t == 1 ? &g_drives[0] : t >= 3 && t < kAudience && t - 2 < g_out_drives ? &g_drives[t - 2] : nullptr; }
 
 struct Dolphin {
     float x = 0, y = 0, z = 0, heading = 0, speed = 0;
@@ -2946,17 +3115,36 @@ void plan_route(const WaterMap& m, float fx, float fz, float tx, float tz, std::
     // Starting in a closed square (a rider in the shallows), from the
     // nearest open one, within ten squares: else it could go nowhere, and
     // headed straight for its goal over the land.
+    // (One it can reach straight, not over a wall or ice: by Port Blue's
+    // island the nearest was inside its ring of walls, and a rider at the
+    // wall's foot headed into it for good, the user, 2026-11-03.)
     if (!m.open[size_t(sj * m.w + si)]) {
-        float nearest = 1e9f;
-        int ni = si, nj = sj;
+        auto straight = [&](float x, float z) {
+            if (!(course_has_walls(g_course) || g_course == 7)) return true;
+            const float length = std::hypot(x - fx, z - fz);
+            for (float t = 0.0f; t <= length; t += 25.0f) {
+                const float px = fx + (x - fx) * t / length, pz = fz + (z - fz) * t / length;
+                // (Half the room kept from walls: a thin one is never inside.)
+                if (course_clearance(g_course, px, pz) < 45.0f || on_slope_piece(px, pz, 0.0f)) return false;
+            }
+            return true;
+        };
+        std::vector<std::pair<float, int>> open;   // distance, square
         for (int dj = -10; dj <= 10; ++dj)
             for (int di = -10; di <= 10; ++di) {
                 const int i = si + di, j = sj + dj;
                 if (i < 0 || j < 0 || i >= m.w || j >= m.h || !m.open[size_t(j * m.w + i)]) continue;
-                const float d = std::hypot(float(di), float(dj));
-                if (d < nearest) { nearest = d; ni = i; nj = j; }
+                open.emplace_back(std::hypot(float(di), float(dj)), j * m.w + i);
             }
-        si = ni; sj = nj;
+        std::sort(open.begin(), open.end());
+        if (!open.empty()) {
+            int pick = open[0].second;
+            for (size_t k = 0; k < open.size() && k < 40; ++k) {
+                const int c = open[k].second;
+                if (straight(m.x0 + (float(c % m.w) + 0.5f) * kCell, m.z0 + (float(c / m.w) + 0.5f) * kCell)) { pick = c; break; }
+            }
+            si = pick % m.w; sj = pick / m.w;
+        }
     }
     std::vector<int> from(m.open.size(), -1);
     std::vector<int> queue{ sj * m.w + si };
@@ -3001,7 +3189,7 @@ std::vector<RampShape> g_ramp_shapes;
 // jet ski with them (func_8007FAE4): each a solid box from a corner `o`
 // back along three axes, a point inside when (o - p) . axis[i] is in
 // [0, length[i]) for each.
-struct SlopePiece { float o[3], axis[3][3], length[3]; };
+struct SlopePiece { float o[3], axis[3][3], length[3]; float x0, x1, z0, z1; };
 std::vector<SlopePiece> g_slope_pieces;
 
 
@@ -3021,6 +3209,17 @@ void read_slope_pieces(const uint8_t* rdram) {
             p.length[k] = v[12 + k];
             for (int j = 0; j < 3; ++j) p.axis[k][j] = v[3 + k * 3 + j];
         }
+        // Its outline: the inside is o minus sums of up to each axis times
+        // its length (the axes are each row's unit direction).
+        p.x0 = p.z0 = 1e9f; p.x1 = p.z1 = -1e9f;
+        for (int c = 0; c < 8; ++c) {
+            float x = p.o[0], z = p.o[2];
+            for (int k = 0; k < 3; ++k) {
+                if (c & (1 << k)) { x -= p.axis[k][0] * p.length[k]; z -= p.axis[k][2] * p.length[k]; }
+            }
+            p.x0 = std::min(p.x0, x); p.x1 = std::max(p.x1, x);
+            p.z0 = std::min(p.z0, z); p.z1 = std::max(p.z1, z);
+        }
         g_slope_pieces.push_back(p);
     }
 }
@@ -3028,6 +3227,7 @@ void read_slope_pieces(const uint8_t* rdram) {
 float ramp_surface(float x, float z, float floor) {
     float best = floor;
     for (const SlopePiece& p : g_slope_pieces) {
+        if (x < p.x0 || x > p.x1 || z < p.z0 || z > p.z1) continue;
         // Each axis leaves a range of heights inside; the top of where all
         // three meet.
         float low = -1e9f, high = 1e9f;
@@ -3043,6 +3243,21 @@ float ramp_surface(float x, float z, float floor) {
         if (inside && low < high) best = std::max(best, high);
     }
     return best;
+}
+
+// Whether (x, z), or anywhere within `margin` of it, is on a slope piece
+// standing out of the water: the ramps', and Glacier Coast's ice, which is
+// slope pieces too (riders rode through it).
+bool on_slope_piece(float x, float z, float margin) {
+    for (const SlopePiece& p : g_slope_pieces) {
+        if (x < p.x0 - margin || x > p.x1 + margin || z < p.z0 - margin || z > p.z1 + margin) continue;
+        for (const float dx : { -margin, 0.0f, margin }) {
+            for (const float dz : { -margin, 0.0f, margin }) {
+                if (ramp_surface(x + dx, z + dz, -1e9f) > -30.0f) return true;
+            }
+        }
+    }
+    return false;
 }
 
 // Each ramp's crest and face along the line through its middle, the way it
@@ -3064,7 +3279,23 @@ void measure_ramps() {
         if (top > 0.0f) {
             float s = best_s;
             while (s > best_s - 1500.0f && ramp_surface(rx + ox * (s - 10.0f), rz + oz * (s - 10.0f), -1e9f) > 0.0f) s -= 10.0f;
-            constexpr float kReach = 1300.0f;
+            // (Shorter where the water there is not open: off Sunset Bay's
+            // ramp by the shore a rider came down on the land beside it, the
+            // unattended checks, 2026-11-03. Water: by the course's sea
+            // floor, 25 deep, clear of walls and of the ramps' sides.)
+            auto water_at = [&](float x, float z) {
+                float floor = 0.0f;
+                if (!clear_of_walls(g_course, x, z) || on_slope_piece(x, z, 0.0f)) return false;
+                return !seafloor_height_at(g_course, x, z, &floor) || floor < -25.0f;
+            };
+            float kReach = 1300.0f;
+            for (; kReach > 500.0f; kReach -= 100.0f) {
+                bool open = true;
+                for (float d = kReach - 200.0f; d <= kReach + 300.0f && open; d += 50.0f) {
+                    open = water_at(shape.crest_x + ox * d, shape.crest_z + oz * d);
+                }
+                if (open) break;
+            }
             const float before = ramp_surface(rx + ox * (best_s - 20.0f), rz + oz * (best_s - 20.0f), -1e9f);
             const float slope = std::clamp((top - before) / 20.0f, 0.1f, 1.0f);
             // Down at kReach: top + slope * reach = gravity/2 * t^2.
@@ -3089,16 +3320,9 @@ bool rider_open_clear(float x, float z) {
     for (const auto& [mx, mz] : g_mines) {
         if (std::hypot(x - mx, z - mz) < kMineRoom) return false;
     }
-    // (Nor on a ramp's pieces, whose corners reach out past kRampRoom; only
-    // looked for near a ramp, which keeps building the map quick.)
-    bool near_ramp = false;
-    for (const auto& [rx, rz] : g_ramps) near_ramp = near_ramp || std::hypot(x - rx, z - rz) < 2500.0f;
-    for (const float dx : { -150.0f, 0.0f, 150.0f }) {
-        for (const float dz : { -150.0f, 0.0f, 150.0f }) {
-            if (near_ramp && ramp_surface(x + dx, z + dz, -1e9f) > -1e8f) return false;
-        }
-    }
-    return true;
+    // (Nor on a slope piece out of the water -- a ramp's corners reach out
+    // past kRampRoom; Glacier Coast's ice is slope pieces -- with a margin.)
+    return !on_slope_piece(x, z, 150.0f);
 }
 // Where a rider may be at all, away from the park: water to float in, clear
 // of the ramps' decks (no margin: sights by the shore are reached). Here,
@@ -3111,10 +3335,7 @@ bool rider_wet_clear(float x, float z) {
     for (const auto& [mx, mz] : g_mines) {
         if (std::hypot(x - mx, z - mz) < 120.0f) return false;
     }
-    for (const auto& [rx, rz] : g_ramps) {
-        if (std::hypot(x - rx, z - rz) < 2500.0f && ramp_surface(x, z, -1e9f) > -1e8f) return false;
-    }
-    return true;
+    return !on_slope_piece(x, z, 0.0f);
 }
 
 void build_rider_map(const uint8_t* rdram) {
@@ -3189,7 +3410,10 @@ void build_rider_map(const uint8_t* rdram) {
     // six times a square took 1.2 seconds on Twilight City's 381 by 381,
     // a stall in the headset as a ride began.
     WaterMap water;
+    std::vector<float> clearance;
+    g_square_clearance = &clearance;
     build_map(rdram, water, rider_water, 8000.0f);
+    g_square_clearance = nullptr;
     g_rider_map = water;
     g_wet_map = water;
     auto wet = [&](int i, int j) { return i >= 0 && j >= 0 && i < water.w && j < water.h && water.open[size_t(j) * size_t(water.w) + size_t(i)]; };
@@ -3200,6 +3424,11 @@ void build_rider_map(const uint8_t* rdram) {
             const float x = water.x0 + (float(i) + 0.5f) * kCell, z = water.z0 + (float(j) + 0.5f) * kCell;
             g_wet_map.open[c] = rider_wet_clear(x, z);
             g_rider_map.open[c] = wet(i + 1, j) && wet(i - 1, j) && wet(i, j + 1) && wet(i, j - 1) && rider_open_clear(x, z);
+            // A thin wall along the edge between two squares is half a
+            // square from both their middles, more than kWallRoom: both
+            // were open, and routes went through it (Port Blue, the user,
+            // 2026-11-03). Closed within three-quarters of a square.
+            if (clearance.size() == water.open.size() && clearance[c] < kCell * 0.75f) g_rider_map.open[c] = false;
         }
     std::fprintf(stderr, "[wr64-companion] course %u: the riders' map, %d by %d squares, %zu ramps, %zu mines\n", g_course,
                  g_rider_map.w, g_rider_map.h, g_ramps.size(), g_mines.size());
@@ -3217,6 +3446,7 @@ void build_rider_map(const uint8_t* rdram) {
     std::fflush(stderr);
 }
 
+bool map_built(const WaterMap& m) { return m.w > 0; }
 bool map_open(const WaterMap& m, float x, float z) {
     const int i = int(std::floor((x - m.x0) / kCell)), j = int(std::floor((z - m.z0) / kCell));
     return i >= 0 && j >= 0 && i < m.w && j < m.h && m.open[size_t(j) * size_t(m.w) + size_t(i)];
@@ -3383,12 +3613,46 @@ void step_on(float& x, float& z, float heading, float& speed, float dt) {
     // tables are rough in places (Twilight City's, Southern Island's put
     // stretches of the buoys' line on land), and a rider held there for good
     // looks worse than one nosing over a corner of sand.
+    // (But never into a wall, or onto ice or a ramp's side: what the
+    // tables know is standing out of the water is not crept over.)
+    // (Walls by their distance, not the map's square: a square is open by
+    // its middle, and a thin wall near its edge let a trio's wing to 2 of
+    // it, the unattended checks, 2026-11-03. Nearer than kWallRoom it may
+    // still move away, never in.)
+    const bool walled = g_course != 0 && (course_has_walls(g_course) || g_course == 7);
+    const float here = walled ? course_clearance(g_course, x, z) : 1e9f;
+    auto solid = [&](float nx, float nz) {
+        if (walled) {
+            const float there = course_clearance(g_course, nx, nz);
+            if (there <= kWallRoom && there < here) return true;
+        }
+        return g_course != 0 && g_wet_map.w != 0 && !map_open(g_wet_map, nx, nz) && on_slope_piece(nx, nz, 0.0f);
+    };
+    auto held = [&](float nx, float nz) {
+        return !(g_course == 0 || g_wet_map.w == 0 || map_open(g_wet_map, nx, nz) || !map_open(g_wet_map, x, z) || speed < 120.0f);
+    };
     const float nx = x + std::cos(heading) * speed * dt, nz = z + std::sin(heading) * speed * dt;
-    if (g_course == 0 || g_wet_map.w == 0 || map_open(g_wet_map, nx, nz) || !map_open(g_wet_map, x, z) || speed < 120.0f) {
+    if (!solid(nx, nz) && !held(nx, nz)) {
         x = nx;
         z = nz;
+        return;
     }
-    else speed *= 0.5f;
+    // Stopped short, it slides along what it met, the nearest way to its
+    // heading that is clear: one held nose-on to a wall at Port Blue's
+    // start stayed there for good (the user, 2026-11-03).
+    speed *= 0.5f;
+    // (All the way round to straight back: in a corner of Twilight City's
+    // canals, walls ahead and to both sides, a pair was held for good.)
+    for (int i = 1; i <= 12; ++i) {
+        const float turn = heading + float(i % 2 ? (i + 1) / 2 : -(i / 2)) * 0.5236f;   // 30 degrees a step
+        const float step = std::max(speed, 150.0f) * dt;
+        const float sx = x + std::cos(turn) * step, sz = z + std::sin(turn) * step;
+        if (!solid(sx, sz) && !held(sx, sz)) {
+            x = sx;
+            z = sz;
+            return;
+        }
+    }
 }
 // Whether the water from (ax, az) to (bx, bz) is open, but for the first
 // 150 units (it may be leaving a closed square) and the last 250 (a spot by
@@ -3654,7 +3918,7 @@ void journal_context(journal::Fields& f, int which) {
                           std::to_string(int((p.riders[0].z + p.riders[1].z) / 2)) + "}");
     }
     if (g_more_out) {
-        for (int i = 1; i < kDrives; ++i) {
+        for (int i = 1; i < g_out_drives; ++i) {
             const Drive& d = g_drives[i];
             f.raw(kMindKeys[d.mind], "{\"x\":" + std::to_string(int(d.x)) + ",\"z\":" + std::to_string(int(d.z)) + ",\"speed\":" +
                                          std::to_string(int(d.speed)) + ",\"doing\":\"" + minds::name(g_minds[d.mind].doing) + "\"}");
@@ -3698,6 +3962,12 @@ void companion_note_pose(const uint8_t* rdram, uint32_t parts, int32_t animation
 // are the frame's.
 void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t course,
                      std::vector<std::pair<uint32_t, uint32_t>>& out) {
+    // (None on a guest course: their maps are the base course's.)
+    if (guest::active(rdram)) return;
+    // (None on Twilight City for now: in its narrow canals they kept riding
+    // into the walls, fewer of them too -- the user, 2026-11-03; a known
+    // issue in the README.)
+    if (course == 6) return;
     if (!enabled() || !g_pose.ready) return;
     if (course != 0 && !free_roam_active(rdram)) return;
     int b = -1;
@@ -3798,9 +4068,11 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
         start_drive(g_drives[0], 0, 0, now);
         start_pair(now);
         g_more_out = more_riders_on(course) && first_ready && pair_ready;
+        g_out_drives = course == 6 ? 2 : kDrives;
+        g_trio_out = g_out_drives > kTrioLeader;
         if (g_more_out) {
-            for (int i = 1; i < kDrives; ++i) start_drive(g_drives[i], i, i + 1, now);
-            start_wings();
+            for (int i = 1; i < g_out_drives; ++i) start_drive(g_drives[i], i, i + 1, now);
+            if (g_trio_out) start_wings();
         }
     }
     note_player(rdram, segments[3], dt, now);
@@ -3839,8 +4111,8 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
     // each other be).
     g_crowd.clear();
     if (g_more_out) {
-        for (int i = 1; i < kDrives; ++i) g_crowd.push_back({ g_drives[i].x, g_drives[i].z, 300.0f, true });
-        for (const Rider& r : g_wings) g_crowd.push_back({ r.x, r.z, 300.0f, true });
+        for (int i = 1; i < g_out_drives; ++i) g_crowd.push_back({ g_drives[i].x, g_drives[i].z, 300.0f, true });
+        if (g_trio_out) for (const Rider& r : g_wings) g_crowd.push_back({ r.x, r.z, 300.0f, true });
     }
     // Away from the park the first rider shares the buoys' line with the
     // pair, and keeps clear of them too (and of the others, wherever).
@@ -3860,20 +4132,56 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
     if (g_more_out) {
         std::vector<Obstacle> base{ player, first };
         for (const Rider& r : g_pair.riders) base.push_back({ r.x, r.z, 300.0f, true });
-        for (int i = 1; i < kDrives; ++i) {
+        for (int i = 1; i < g_out_drives; ++i) {
             std::vector<Obstacle> others = base;
-            for (int k = 1; k < kDrives; ++k) {
+            for (int k = 1; k < g_out_drives; ++k) {
                 if (k != i) others.push_back({ g_drives[k].x, g_drives[k].z, 300.0f, true });
             }
-            if (i != kTrioLeader) for (const Rider& r : g_wings) others.push_back({ r.x, r.z, 300.0f, true });
+            if (i != kTrioLeader && g_trio_out) for (const Rider& r : g_wings) others.push_back({ r.x, r.z, 300.0f, true });
             // (Away from the park the trio's leader goes round the ramps.)
             if (i == kTrioLeader && course != 0) others.insert(others.end(), g_ramp_obstacles.begin(), g_ramp_obstacles.end());
             else if (course != 0) for (const auto& [mx, mz] : g_mines) others.push_back({ mx, mz, kMineRoom, true });
             drive(g_drives[i], segments[3], now, dt, others);
         }
-        std::vector<Obstacle> others = base;
-        for (int k = 1; k < kTrioLeader; ++k) others.push_back({ g_drives[k].x, g_drives[k].z, 300.0f, true });
-        ride_wings(segments[3], dt, others);
+        if (g_trio_out) {
+            std::vector<Obstacle> others = base;
+            for (int k = 1; k < kTrioLeader; ++k) others.push_back({ g_drives[k].x, g_drives[k].z, 300.0f, true });
+            ride_wings(segments[3], dt, others);
+        }
+    }
+    // WR64_RIDER_CHECK=<file>: every rider twice a second, for the checks
+    // run over every course unattended (where each is, how fast, what it is
+    // doing, how far from a wall, whether its square is water): one line
+    // each, appended.
+    static std::FILE* check = [] {
+        const char* path = std::getenv("WR64_RIDER_CHECK");
+        return path != nullptr ? std::fopen(path, "a") : nullptr;
+    }();
+    static double checked = 0;
+    if (check != nullptr && seconds(now) - checked > 0.5) {
+        checked = seconds(now);
+        auto line = [&](const char* who, float x, float z, float speed, const std::string& doing, int state) {
+            const bool walled = course_has_walls(course) || course == 7;
+            std::fprintf(check, "%.2f %u %s %.0f %.0f %.0f %d %.0f %d %d %d %s\n", checked, course, who, x, z, speed, state,
+                         walled ? course_clearance(course, x, z) : 9999.0f, int(map_open(g_wet_map, x, z)),
+                         int(map_open(g_rider_map, x, z)), int(on_slope_piece(x, z, 0.0f)), doing.c_str());
+        };
+        if (first_ready) line("rider", d.x, d.z, d.speed, minds::name(g_minds[0].doing), d.parked ? 1 : d.free != Free::None ? 2 : 0);
+        if (pair_ready) {
+            for (int i = 0; i < 2; ++i) {
+                const Rider& r = g_pair.riders[i];
+                line(i ? "pair_b" : "pair_a", r.x, r.z, r.speed, minds::name(g_minds[1].doing), r.stopped ? 1 : 0);
+            }
+        }
+        if (g_more_out) {
+            for (int i = 1; i < g_out_drives; ++i) {
+                const Drive& o = g_drives[i];
+                line(kMindKeys[o.mind], o.x, o.z, o.speed, minds::name(g_minds[o.mind].doing), o.parked ? 1 : o.free != Free::None ? 2 : 0);
+            }
+            for (int i = 0; i < (g_trio_out ? 2 : 0); ++i) line(i ? "wing_b" : "wing_a", g_wings[i].x, g_wings[i].z, g_wings[i].speed, "wing", 0);
+        }
+        if (g_player.known) line("player", g_player.x, g_player.z, g_player.speed, "player", 0);
+        std::fflush(check);
     }
 
     // WR64_COMPANION_TEST_OFFSET=<dx>,<dz>, in a scripted run only: drawn
@@ -4002,19 +4310,19 @@ void companions_draw(uint8_t* rdram, const uint32_t segments[16], uint32_t cours
     // models: the singles the pair's, the trio one of each.
     if (g_more_out) {
         static const int kModelOf[5] = { 1, 2, 0, 1, 2 };
-        for (int i = 1; i < kDrives; ++i) {
+        for (int i = 1; i < g_out_drives; ++i) {
             Matrix hull, body;
             bool body_shown;
             single(g_drives[i], hull, body, body_shown);
             draw(kModelOf[i - 1], hull, body, body_shown, i - 1);
         }
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < (g_trio_out ? 2 : 0); ++i) {
             const Rider& r = g_wings[i];
             const Matrix hull = frame_matrix(r.x, r.y, r.z, std::cos(r.heading), std::sin(r.heading), 0.0f, r.bank, 0.0f);
             draw(kModelOf[3 + i], hull, hull, true, 3 + i);
         }
         if (report) {
-            for (int i = 1; i < kDrives; ++i) {
+            for (int i = 1; i < g_out_drives; ++i) {
                 const Drive& o = g_drives[i];
                 std::fprintf(stderr, "[wr64-companion] %s at %.0f %.0f, %s, speed %.0f\n", kMindNames[o.mind], o.x, o.z,
                              o.free == Free::Follow ? "riding along" : o.free == Free::Rest ? (o.parked ? "resting" : "off to rest")
